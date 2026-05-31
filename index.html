@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeFox</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #141414;
+    --bg2: #1e1e1e;
+    --bg3: #252525;
+    --bg4: #2d2d2d;
+    --border: #333;
+    --border2: #444;
+    --text: #e8e8e8;
+    --text2: #aaa;
+    --text3: #666;
+    --accent: #7c6fff;
+    --accent2: #5a4ecc;
+    --teal: #2dd4a0;
+    --coral: #ff6b6b;
+    --amber: #f5a623;
+    --green: #4caf7d;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow: hidden; }
+
+  /* ── Layout ── */
+  #app { display: flex; height: 100vh; flex-direction: column; }
+  #titlebar { height: 38px; background: var(--bg); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); -webkit-app-region: drag; flex-shrink: 0; gap: 12px; }
+  #titlebar span { color: var(--text2); font-size: 12px; }
+  #titlebar strong { color: var(--text); font-size: 13px; }
+  #columns { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+  /* ── Left column ── */
+  #left { width: 220px; min-width: 180px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; flex-shrink: 0; }
+  .sidebar-section { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .sidebar-section:last-child { border-bottom: none; flex: 1; }
+  .sidebar-label { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; color: var(--text3); padding: 0 14px 6px; text-transform: uppercase; }
+  .sidebar-link { display: flex; align-items: center; justify-content: space-between; padding: 5px 14px; cursor: pointer; color: var(--text2); border-radius: 4px; margin: 0 6px; transition: background 0.12s, color 0.12s; gap: 6px; }
+  .sidebar-link:hover { background: var(--bg3); color: var(--text); }
+  .sidebar-link.active { background: var(--bg4); color: var(--accent); }
+  .sidebar-link-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sidebar-link-del { opacity: 0; font-size: 11px; color: var(--text3); padding: 2px 4px; border-radius: 3px; }
+  .sidebar-link:hover .sidebar-link-del { opacity: 1; }
+  .sidebar-link-del:hover { color: var(--coral); background: rgba(255,107,107,0.1); }
+  .sidebar-new { display: flex; align-items: center; gap: 6px; padding: 5px 14px; cursor: pointer; color: var(--text3); font-size: 12px; margin: 2px 6px; border-radius: 4px; }
+  .sidebar-new:hover { color: var(--accent); background: var(--bg3); }
+  .sidebar-scroll { overflow-y: auto; flex: 1; }
+
+  /* ── Center column ── */
+  #center { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); min-height: 0; }
+  #center-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-shrink: 0; min-height: 44px; }
+  #center-mode-badge { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; }
+  .badge-chat { background: rgba(124,111,255,0.15); color: var(--accent); }
+  .badge-ruleset { background: rgba(124,111,255,0.15); color: var(--accent); }
+  .badge-plan { background: rgba(45,212,160,0.15); color: var(--teal); }
+  .badge-page { background: rgba(255,107,107,0.15); color: var(--coral); }
+  #center-title { font-size: 14px; font-weight: 500; flex: 1; }
+  #center-actions { display: flex; gap: 8px; }
+  .btn { padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-family: var(--font); transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: var(--bg3); color: var(--text2); border: 1px solid var(--border2); }
+  .btn-teal { background: rgba(45,212,160,0.2); color: var(--teal); border: 1px solid rgba(45,212,160,0.3); }
+  .btn-danger { background: rgba(255,107,107,0.15); color: var(--coral); border: 1px solid rgba(255,107,107,0.3); }
+  #center-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+  #chat-mode { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  #editor-mode { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  #plan-mode { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+
+  /* ── Chat mode ── */
+  #chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 10px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg-user { background: var(--accent2); color: #fff; align-self: flex-end; border-bottom-right-radius: 3px; }
+  .msg-assistant { background: var(--bg3); color: var(--text); align-self: flex-start; border-bottom-left-radius: 3px; border: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
+  .msg-system { align-self: center; color: var(--text3); font-size: 11px; font-style: italic; }
+  #chat-input-area { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; }
+  #thread-select { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: var(--font); cursor: pointer; }
+  #chat-input { flex: 1; background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: var(--font); resize: none; min-height: 38px; max-height: 160px; outline: none; line-height: 1.5; }
+  #chat-input:focus { border-color: var(--accent); }
+
+  /* ── Editor mode (ruleset / plan / page) ── */
+  #editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  #editor-content { flex: 1; background: var(--bg2); border: none; color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.7; padding: 20px; resize: none; outline: none; overflow-y: auto; min-height: 0; }
+  #editor-content:focus { background: var(--bg2); }
+
+  /* ── Plan steps view ── */
+  #plan-view { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .plan-section { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .plan-section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text3); margin-bottom: 10px; }
+  .plan-file-tag { display: inline-block; background: rgba(124,111,255,0.12); color: var(--accent); border: 1px solid rgba(124,111,255,0.25); border-radius: 4px; padding: 2px 8px; font-family: var(--mono); font-size: 11px; margin: 3px; cursor: pointer; }
+  .plan-file-tag:hover { background: rgba(124,111,255,0.25); }
+  .plan-step { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .plan-step:last-child { border-bottom: none; }
+  .plan-step-num { width: 22px; height: 22px; border-radius: 50%; background: var(--bg4); color: var(--text3); font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+  .plan-step-text { color: var(--text2); line-height: 1.6; font-size: 13px; }
+
+  /* ── Right column ── */
+  #right { width: 280px; min-width: 200px; background: var(--bg2); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; min-height: 0; }
+  #right-header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  #right-header span { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+  #file-tree { flex: 1; overflow-y: auto; padding: 6px 0; min-height: 0; }
+  .tree-item { display: flex; align-items: center; gap: 6px; padding: 4px 10px; cursor: pointer; color: var(--text2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px; margin: 0 4px; }
+  .tree-item:hover { background: var(--bg3); color: var(--text); }
+  .tree-item.active { background: var(--bg4); color: var(--accent); }
+  .tree-dir { color: var(--amber); }
+  .tree-cs { color: var(--teal); }
+  .tree-indent { display: inline-block; width: 14px; flex-shrink: 0; }
+  #file-viewer { height: 260px; border-top: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  #file-viewer-name { padding: 6px 12px; font-size: 11px; color: var(--text3); border-bottom: 1px solid var(--border); font-family: var(--mono); background: var(--bg); display: flex; align-items: center; justify-content: space-between; }
+  #file-viewer-content { flex: 1; overflow-y: auto; padding: 10px 12px; font-family: var(--mono); font-size: 11px; color: var(--text2); line-height: 1.6; white-space: pre; background: var(--bg); }
+
+  #file-search-input:focus { border-color: var(--accent); }
+
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ── Modal ── */
+  #modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+  #modal-overlay.open { display: flex; }
+  #modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 24px; width: 420px; display: flex; flex-direction: column; gap: 14px; }
+  #modal h2 { font-size: 15px; font-weight: 500; }
+  #modal input, #modal textarea { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; font-family: var(--font); width: 100%; outline: none; }
+  #modal input:focus, #modal textarea:focus { border-color: var(--accent); }
+  #modal textarea { min-height: 80px; resize: vertical; }
+  #modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Thinking indicator ── */
+  .thinking { display: flex; gap: 4px; padding: 10px 14px; align-self: flex-start; }
+  .thinking span { width: 6px; height: 6px; background: var(--text3); border-radius: 50%; animation: bounce 1.2s infinite; }
+  .thinking span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }
+
+  .hidden { display: none !important; }
+  #apply-bar { box-shadow: 0 -2px 12px rgba(0,0,0,0.3); }
+
+  /* ── Ollama status dot ── */
+  #ollama-status { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text3); -webkit-app-region: no-drag; cursor: pointer; padding: 3px 8px; border-radius: 6px; transition: background 0.15s; }
+  #ollama-status:hover { background: var(--bg3); }
+  #ollama-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; transition: background 0.3s; }
+  #ollama-dot.green { background: var(--green); box-shadow: 0 0 5px rgba(76,175,125,0.5); }
+  #ollama-dot.yellow { background: var(--amber); box-shadow: 0 0 5px rgba(245,166,35,0.5); animation: pulse 1s infinite; }
+  #ollama-dot.red { background: var(--coral); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="titlebar">
+    <strong>CodeFox</strong>
+    <span id="project-path-label">C:\CodeFoxLocal2</span>
+    <span style="flex:1"></span>
+    <div id="ollama-status" onclick="retryOllama()" title="Click to retry connection">
+      <div id="ollama-dot"></div>
+      <span id="ollama-label">Ollama</span>
+    </div>
+    <button class="btn btn-secondary" onclick="openSettings()" style="-webkit-app-region:no-drag">⚙ Settings</button>
+  </div>
+
+  <div id="columns">
+    <!-- LEFT -->
+    <div id="left">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Ruleset</div>
+        <div id="ruleset-list" class="sidebar-scroll"></div>
+        <div class="sidebar-new" onclick="newItem('rulesets')">+ New ruleset</div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Plans</div>
+        <div id="plans-list" class="sidebar-scroll"></div>
+        <div class="sidebar-new" onclick="newItem('plans')">+ New plan</div>
+      </div>
+      <div class="sidebar-section" style="flex:1;display:flex;flex-direction:column;">
+        <div class="sidebar-label">Pages</div>
+        <div id="pages-list" class="sidebar-scroll" style="flex:1"></div>
+        <div class="sidebar-new" onclick="newItem('pages')">+ New page</div>
+        <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px;">
+          <div class="sidebar-label">Snapshots</div>
+          <div id="snapshots-list"></div>
+        </div>
+        <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;">
+          <div class="sidebar-label">Chat threads</div>
+          <div id="threads-list"></div>
+          <div class="sidebar-new" onclick="newThread()">+ New thread</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CENTER -->
+    <div id="center">
+      <div id="center-header">
+        <span id="center-mode-badge" class="badge-chat">Chat</span>
+        <span id="center-title">New thread</span>
+        <div id="center-actions"></div>
+      </div>
+      <div id="center-body">
+        <!-- Chat mode -->
+        <div id="chat-mode">
+          <div id="chat-messages"></div>
+          <div id="chat-input-area">
+            <textarea id="chat-input" placeholder="Ask about CodeFox..." rows="1" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
+            <button class="btn btn-primary" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+        <!-- Editor mode -->
+        <div id="editor-mode" class="hidden">
+          <div id="editor-area">
+            <textarea id="editor-content" spellcheck="false" placeholder="Start writing..."></textarea>
+          </div>
+        </div>
+        <!-- Plan view mode -->
+        <div id="plan-mode" class="hidden">
+          <div id="plan-view"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div id="right">
+      <div id="right-header">
+        <span id="file-path-label">File tree</span>
+        <button class="btn btn-secondary" onclick="pickProjectFolder()" style="font-size:11px;padding:3px 8px;">Change</button>
+      </div>
+      <div id="file-search-bar" style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0;">
+        <input id="file-search-input" placeholder="Search files..." 
+          style="width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 10px;font-size:12px;font-family:var(--font);outline:none;"
+          oninput="searchFiles(this.value)" />
+      </div>
+      <div id="file-search-results" style="display:none;flex:1;overflow-y:auto;"></div>
+      <div id="file-tree"></div>
+      <div id="file-viewer">
+        <div id="file-viewer-name">
+          <span id="active-file-name">No file selected</span>
+          <button class="btn btn-secondary" id="load-to-chat-btn" onclick="loadFileToChat()" style="font-size:10px;padding:2px 6px;display:none;">Add to chat</button>
+        </div>
+        <div id="file-viewer-content">Select a file to view</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div id="modal-overlay">
+  <div id="modal">
+    <h2 id="modal-title">New item</h2>
+    <input id="modal-name" placeholder="Name..." />
+    <div id="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmModal()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
