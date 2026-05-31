@@ -8,6 +8,10 @@ Built on [Ollama](https://ollama.com) + Electron + SQLite.
 
 ---
 
+![CodeFox Screenshot](assets/screenshot.png)
+
+---
+
 ## What it does
 
 - **Chat** with a local LLM about your codebase across persistent threads
