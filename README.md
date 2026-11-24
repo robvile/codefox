@@ -145,9 +145,11 @@ Click **▶ Execute plan** — CodeFox creates a dedicated thread, sends the pla
 
 ### Apply + Revert
 - **Apply** — writes files to disk (creating parent folders as needed), triggers Unity refresh (if configured), saves a snapshot
+- **Auto-apply for new Unity assets** — when the assistant creates a NEW Unity-native file (a prefab, scene, material, animation, controller, or similar — a file that contains no code), CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. A simple "make me a prefab" request finishes in one turn. Code files (.cs, .shader, .js, .ts) and edits to files that already exist still show the Apply bar first, unless auto-accept is on. If the change set is mixed — any code file, or any edit to an existing file — the whole set asks first; auto-apply never writes half a set. Turn it off in Settings → Advanced → "Auto-apply new Unity asset files" (`auto_apply_unity_assets`, default on).
 - **Review diff** — shows added/removed/unchanged lines per file before you apply
-- **Revert** — restores all modified files from the snapshot, and deletes files that were newly created by the apply. Triggers Unity refresh
-- **Snapshot history** — last 5 snapshots shown in the left panel, each with a ↩ revert button
+- **Revert** — restores all modified files from the snapshot, and deletes files that were newly created by the apply. Triggers Unity refresh. The revert bar appears after EVERY apply — manual Apply, auto-accept, or auto-apply — and stays there until you click Revert or Keep. It never auto-dismisses, and a new chat message does not replace it.
+- **Keep changes** — an explicit click that discards the snapshot, so the change can no longer be reverted. Nothing discards a snapshot automatically: not closing the app, not starting a new conversation. Only a Keep click does.
+- **Snapshot history** — last 5 snapshots shown in the left panel, each with a ↩ revert button, so you can undo even after the revert bar is gone
 
 ### Agent mode (the loop)
 
@@ -165,6 +167,7 @@ In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each
 - Safe auto-approved commands run automatically in Auto Mode.
 - Dangerous commands always ask: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `rmdir /s`, `rd /s`, `Remove-Item -Recurse` — even in Auto Mode, even if they match an auto-approved prefix.
 - Package installs and removals always ask — even in Auto Mode, even with auto-accept on. There is no way to auto-approve them.
+- New Unity asset files (prefabs, scenes, materials…) are written automatically after a snapshot — revert is always available afterwards.
 - File changes ask unless auto-accept is on (and are snapshotted first either way).
 - Nothing runs while the shell is off, and no package is installed while no project folder is set.
 
@@ -287,12 +290,12 @@ Per-ruleset enabled toggles and priorities (higher = sent first), a **prompt bud
 
 - **Shell Tool** — off by default. When off, no command can run from the app at all and the rest of the section is greyed out. When on, CodeFox runs PowerShell commands (PowerShell on Windows, the system shell elsewhere) in the project folder, with a 60-second timeout.
 - **Auto Mode** — when on, commands that match your auto-approved list run automatically. Everything else asks first, via a Run / Dismiss bar under the assistant's reply.
-- **Approvals** — **Auto-accept project changes** keeps project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo.
+- **Approvals** — **Auto-accept project changes** keeps project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo. **Auto-apply new Unity asset files** (`auto_apply_unity_assets`, default on) writes new Unity-native files (prefabs, scenes, materials…) straight away after a snapshot, without an Apply click; code files and edits to existing files still ask first.
 - **Auto-approved commands** — editable list of command prefixes (defaults: `git status`, `git diff`, `npm test`, `npm run test`, `dotnet build`, `dotnet test`).
 - **Excluded File Types** — file types hidden from project scans and file search (defaults include `meta`, `mat`, `anim`, `controller`, `png`, `jpg`, `asset`, `package-lock.json`, and more), with Add and Restore default.
 - **Run a command** — a manual input + Run button + output area to test the shell tool directly.
 - **Agent loop** — "Max tool rounds per reply" (`agent_max_rounds`, default 5, 1–10) caps how many tool rounds Agent mode runs before stopping. See "Agent mode (the loop)" above.
-- **What runs automatically, what always asks** — a plain-language summary: safe auto-approved commands run automatically in Auto Mode; dangerous commands always ask; package installs/removals always ask; file changes ask unless auto-accept is on; nothing runs while the shell is off, and no package is installed while no project folder is set.
+- **What runs automatically, what always asks** — a plain-language summary: safe auto-approved commands run automatically in Auto Mode; dangerous commands always ask; package installs/removals always ask; new Unity asset files are written automatically after a snapshot (revert always available); file changes ask unless auto-accept is on; nothing runs while the shell is off, and no package is installed while no project folder is set.
 - Dangerous commands are never run automatically: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `Remove-Item -Recurse`, `Remove-Item -Force -Recurse`, `rmdir /s`, and `rd /s` always ask first, even if they match an auto-approved prefix.
 - **Editor Integration** — the Unity bridge is CodeFox's editor integration; there is nothing else to configure here.
 

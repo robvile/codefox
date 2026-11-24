@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-bridge.js', 'unity-bridge-source.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,9 +22,9 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.5.0.
+// 2. package.json version is 0.5.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.5.0', pkg.version === '0.5.0', 'got ' + pkg.version);
+check('package.json version is 0.5.1', pkg.version === '0.5.1', 'got ' + pkg.version);
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -277,6 +277,125 @@ try {
   fs.rmSync(tmpBridge, { recursive: true, force: true });
   fs.rmSync(tmpAppDir, { recursive: true, force: true });
 }
+
+// 14. v0.5.1 auto-apply new Unity asset files + revert always available.
+// The asset list is the single source of truth (unity-assets.js,
+// shared with the renderer through preload's rb.unityAssets).
+const assets = require(path.join(root, 'unity-assets.js'));
+check('unity-assets list includes .prefab/.unity/.mat/.anim/.controller',
+  ['.prefab', '.unity', '.mat', '.anim', '.controller'].every(e => assets.UNITY_ASSET_EXTS.includes(e)));
+check('unity-assets list has no code extensions',
+  !assets.UNITY_ASSET_EXTS.some(e => ['.cs', '.shader', '.js', '.ts'].includes(e)));
+check('isUnityAssetPath accepts Unity assets, rejects code',
+  assets.isUnityAssetPath('Assets/Prefabs/TestTMP.prefab')
+  && assets.isUnityAssetPath('Assets/Scenes/Main.unity')
+  && assets.isUnityAssetPath('Assets/Mats/Red.mat')
+  && !assets.isUnityAssetPath('Assets/Scripts/Player.cs')
+  && !assets.isUnityAssetPath('Assets/Shaders/Glow.shader')
+  && !assets.isUnityAssetPath('README.md'));
+check('isUnityAssetPath is case-insensitive',
+  assets.isUnityAssetPath('Assets/Prefabs/Thing.PREFAB'));
+check('app.js has the auto_apply_unity_assets setting',
+  appJs.includes('auto_apply_unity_assets') && appJs.includes('autoApplyUnityAssets'));
+check('app.js has the auto-apply decision + handler',
+  appJs.includes('isAutoApplyAssetSet') && appJs.includes('handleFileChanges'));
+check('auto-apply is wired into the agent loop files branch',
+  appJs.includes('isAutoApplyAssetSet(action.changes)') && appJs.includes('Unity asset files applied automatically'));
+check('auto-apply is wired into the one-shot Ask/Plan path',
+  appJs.includes('await handleFileChanges(changes)'));
+check('Advanced settings has the auto-apply toggle',
+  appJs.includes('Auto-apply new Unity asset files') && appJs.includes("setShellToggle('auto_apply_unity_assets'"));
+check('main.js seeds auto_apply_unity_assets default on',
+  (mainJs.match(/auto_apply_unity_assets', '1'/g) || []).length >= 3);
+check('package.json build.files includes unity-assets.js',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('unity-assets.js'));
+check('preload.js exposes rb.unityAssets',
+  preloadJs.includes('unityAssets') && preloadJs.includes("require('./unity-assets')"));
+check('preload.js exposes rb.db.deleteSnapshot',
+  preloadJs.includes('deleteSnapshot'));
+check('main.js has db:deleteSnapshot handler',
+  mainJs.includes("ipcMain.handle('db:deleteSnapshot'"));
+check('app.js Keep discards the snapshot via deleteSnapshot',
+  appJs.includes('discardSnapshot') && appJs.includes('rb.db.deleteSnapshot(snapshotId)'));
+check('revert bar explains revert vs keep',
+  (() => {
+    const start = appJs.indexOf('function showRevertBar');
+    const end = appJs.indexOf('\nfunction ', start + 1);
+    const body = appJs.slice(start, end === -1 ? undefined : end);
+    return body.includes('Revert changes') && body.includes('Keep changes')
+      && body.includes('discards the snapshot')
+      && body.includes('new files are deleted');
+  })());
+check('revert bar has no auto-dismiss timer',
+  (() => {
+    const start = appJs.indexOf('function showRevertBar');
+    const end = appJs.indexOf('\nfunction ', start + 1);
+    const body = appJs.slice(start, end === -1 ? undefined : end);
+    return !body.includes('setTimeout');
+  })());
+check('revert discards the spent snapshot',
+  appJs.includes('deleteSnapshot(snapshotId)') && appJs.indexOf('The snapshot is spent') !== -1);
+check('sidebar lists snapshots with a revert button',
+  appJs.includes("revertFromHistory('${s.id}')"));
+
+// Functional test: auto-apply decision + apply-then-revert against
+// a real temp project directory. The .prefab is created (the apply
+// write), then reverted via the sentinel row — and must be gone.
+// An existing file edited by an apply must come back with its
+// original contents.
+const tmpAssets = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-assets-'));
+try {
+  const projDir = path.join(tmpAssets, 'TD Pizza Racer');
+  fs.mkdirSync(path.join(projDir, 'Assets', 'Prefabs'), { recursive: true });
+  fs.mkdirSync(path.join(projDir, 'Assets', 'Scripts'), { recursive: true });
+  const existsSync = (p) => fs.existsSync(p);
+  const resolve = (rel) => path.join(projDir, rel.split('/').join(path.sep));
+  const prefab = 'Assets/Prefabs/TestTMP.prefab';
+  check('auto-apply: new .prefab alone qualifies',
+    assets.isAutoApplyAssetSet([{ path: prefab }], resolve, existsSync) === true);
+  check('auto-apply: .cs file never qualifies',
+    assets.isAutoApplyAssetSet([{ path: 'Assets/Scripts/Player.cs' }], resolve, existsSync) === false);
+  check('auto-apply: mixed set (prefab + code) never qualifies',
+    assets.isAutoApplyAssetSet([{ path: prefab }, { path: 'Assets/Scripts/Player.cs' }], resolve, existsSync) === false);
+  check('auto-apply: empty set never qualifies',
+    assets.isAutoApplyAssetSet([], resolve, existsSync) === false);
+  // Apply: write the new prefab (what applyFileChanges does).
+  fs.writeFileSync(resolve(prefab), '%YAML 1.1\n--- !u!1001 &123\nMonoBehaviour:\n  m_Name: TestTMP\n');
+  fs.writeFileSync(resolve(prefab) + '.meta', 'fileFormatVersion: 2\n');
+  check('auto-apply: existing .prefab no longer qualifies (it is an edit now)',
+    assets.isAutoApplyAssetSet([{ path: prefab }], resolve, existsSync) === false);
+  // Revert the new file: the snapshot row holds the sentinel, so
+  // revert deletes the file and its .meta (confirmRevert semantics).
+  const sentinel = (appJs.match(/const NEW_FILE_SENTINEL = '([^']+)'/) || [])[1];
+  check('NEW_FILE_SENTINEL is readable from app.js', !!sentinel);
+  const reverted = assets.revertBackupFile({ file_path: resolve(prefab), content: sentinel }, sentinel, fs);
+  check('revert deletes a newly created .prefab', reverted === 'deleted' && !fs.existsSync(resolve(prefab)));
+  check('revert deletes the .prefab .meta too', !fs.existsSync(resolve(prefab) + '.meta'));
+  // Revert an edit: the saved original content comes back.
+  const script = 'Assets/Scripts/Player.cs';
+  const original = 'public class Player { }\n';
+  fs.writeFileSync(resolve(script), original);
+  fs.writeFileSync(resolve(script), 'public class Player { /* changed */ }\n'); // the apply overwrote it
+  const restored = assets.revertBackupFile({ file_path: resolve(script), content: original }, sentinel, fs);
+  check('revert restores an edited file to its original contents',
+    restored === 'restored' && fs.readFileSync(resolve(script), 'utf8') === original);
+  check('revert of an already-gone file is a no-op',
+    assets.revertBackupFile({ file_path: resolve(prefab), content: sentinel }, sentinel, fs) === null);
+} finally {
+  fs.rmSync(tmpAssets, { recursive: true, force: true });
+}
+
+// 15. v0.5.1 bridge fix: CreateAnimatorControllerAtPath is 1-arg only.
+// The 2-argument call does not exist in any Unity version (CS1501).
+const twoArgCall = /CreateAnimatorControllerAtPath\([^)]*,[^)]*\)/;
+check('bridge .cs has no 2-argument CreateAnimatorControllerAtPath call',
+  !twoArgCall.test(bridgeCs));
+check('embedded bridge has no 2-argument CreateAnimatorControllerAtPath call',
+  !twoArgCall.test(bridgeSrc.BRIDGE_SOURCE));
+check('bridge .cs uses the 1-argument CreateAnimatorControllerAtPath call',
+  bridgeCs.includes('AnimatorController.CreateAnimatorControllerAtPath(assetPath);'));
+check('embedded bridge contains the fixed 1-argument call',
+  bridgeSrc.BRIDGE_SOURCE.includes('AnimatorController.CreateAnimatorControllerAtPath(assetPath);'));
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');

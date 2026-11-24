@@ -1,12 +1,22 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const { UNITY_ASSET_EXTS, isUnityAssetPath } = require('./unity-assets');
 
 contextBridge.exposeInMainWorld('rb', {
+  // Unity-native asset files (v0.5.1) — one source of truth, shared
+  // with the smoke test via unity-assets.js. Used by the auto-apply
+  // check in app.js: new .prefab / .asset / .unity / … files.
+  unityAssets: {
+    exts: UNITY_ASSET_EXTS,
+    isUnityAssetPath: (p) => isUnityAssetPath(p),
+  },
   db: {
     getAll: (table) => ipcRenderer.invoke('db:getAll', table),
     get: (table, id) => ipcRenderer.invoke('db:get', table, id),
     insert: (table, data) => ipcRenderer.invoke('db:insert', table, data),
     update: (table, id, data) => ipcRenderer.invoke('db:update', table, id, data),
     delete: (table, id) => ipcRenderer.invoke('db:delete', table, id),
+    // v0.5.1: discard a snapshot and its backed-up files (Keep).
+    deleteSnapshot: (snapshotId) => ipcRenderer.invoke('db:deleteSnapshot', snapshotId),
     getSetting: (key) => ipcRenderer.invoke('db:getSetting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:setSetting', key, value),
   },

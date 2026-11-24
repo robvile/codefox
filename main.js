@@ -268,6 +268,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('rules_char_budget', '4000')");
@@ -289,6 +290,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('rules_char_budget', '4000')");
@@ -299,6 +301,9 @@ async function initDB() {
 
   // v0.5.0: max agent-loop rounds (default 5, range 1–10).
   db.run("INSERT OR IGNORE INTO settings VALUES ('agent_max_rounds', '5')");
+
+  // v0.5.1: auto-apply new Unity-native asset files (default on).
+  db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
 
   // ── v0.3.0 migration: one project row per workspace ─────────────
   // If no projects exist, create one from the existing project_path
@@ -412,6 +417,17 @@ ipcMain.handle('db:update', (_, table, id, data) => {
 
 ipcMain.handle('db:delete', (_, table, id) => {
   db.run(`DELETE FROM ${table} WHERE id = ?`, [id]);
+  saveDB();
+  return true;
+});
+
+// v0.5.1: discard a snapshot (Keep changes). Deletes the snapshot
+// row and every backed-up file row that belongs to it, so the change
+// can no longer be reverted — only ever called from an explicit
+// Keep click, never automatically.
+ipcMain.handle('db:deleteSnapshot', (_, snapshotId) => {
+  db.run(`DELETE FROM file_backups WHERE snapshot_id = ?`, [snapshotId]);
+  db.run(`DELETE FROM snapshots WHERE id = ?`, [snapshotId]);
   saveDB();
   return true;
 });

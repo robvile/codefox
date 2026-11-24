@@ -42,6 +42,9 @@ let state = {
   shellEnabled: false,
   shellAutoMode: false,
   autoAcceptChanges: false,
+  // v0.5.1: new Unity-native asset files (.prefab, .asset, .unity,
+  // …) are written straight away after a snapshot, no Apply click.
+  autoApplyUnityAssets: true,
   shellAutoApprove: [],
   excludedFileTypes: [],
   rulesCharBudget: 4000,
@@ -229,6 +232,9 @@ async function init() {
   state.shellEnabled = (await rb.db.getSetting('shell_enabled') || '0') === '1';
   state.shellAutoMode = (await rb.db.getSetting('shell_auto_mode') || '0') === '1';
   state.autoAcceptChanges = (await rb.db.getSetting('auto_accept_changes') || '0') === '1';
+  // v0.5.1: auto-apply new Unity asset files. Default on; the
+  // setting is seeded to '1' in main.js, so a missing key means on.
+  state.autoApplyUnityAssets = (await rb.db.getSetting('auto_apply_unity_assets') || '1') === '1';
   try { state.shellAutoApprove = JSON.parse(await rb.db.getSetting('shell_auto_approve') || 'null') || DEFAULT_SHELL_AUTO_APPROVE.slice(); }
   catch { state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice(); }
   if (!Array.isArray(state.shellAutoApprove)) state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice();
@@ -613,7 +619,10 @@ async function sendChat() {
       const content = await streamOneTurn(state.messages.map(m => ({ role: m.role, content: m.content })), systemPrompt, currentThreadId);
       if (content != null) {
         const changes = extractFileChanges(content);
-        if (changes.length) showApplyBar(changes);
+        // v0.5.1: a pure set of NEW Unity asset files auto-applies
+        // (snapshot first, revert bar shown); anything else gets the
+        // Apply bar exactly as before.
+        if (changes.length) await handleFileChanges(changes);
         // Shell blocks in the reply: auto-run only when auto-approved,
         // otherwise offer a Run button. Never runs when the shell is off.
         handleShellBlocks(content);
@@ -954,7 +963,18 @@ async function processAgentActions(actions) {
     const roundLabel = () => 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ';
     if (action.type === 'files') {
       const paths = action.changes.map(c => c.path).join(', ');
-      if (state.autoAcceptChanges) {
+      // v0.5.1: a pure set of NEW Unity-native asset files
+      // auto-applies — snapshot first, no Apply click, and the loop
+      // keeps going. The tool result tells the model it was written.
+      if (await isAutoApplyAssetSet(action.changes)) {
+        const summary = await applyFileChanges(action.changes);
+        await appendToolResult('Tool result — Unity asset files applied automatically: ' + paths
+          + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
+          + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : '')
+          + ' Snapshot taken — the user can still revert.');
+        if (loopState) setLoopStatus(roundLabel() + 'auto-applied ' + summary.written + ' Unity asset file(s)');
+        outcomes++;
+      } else if (state.autoAcceptChanges) {
         const summary = await applyFileChanges(action.changes);
         await appendToolResult('Tool result — files applied: ' + paths
           + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
@@ -1196,6 +1216,7 @@ function buildSystemPrompt(rulesets) {
   } else {
     prompt += '## Mode: Agent\nWork step by step. Output complete code in fenced code blocks, each preceded by **File Path:** `path`, one file per block. No placeholders, no TODOs, no truncated code. If a step is too large for one reply, do the first step only and say what remains.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
+    prompt += 'New Unity-native asset files you create (prefabs, scenes, materials, animations — files that contain no code) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
   }
   return prompt;
 }
@@ -2332,6 +2353,9 @@ function renderAdvancedPane(body) {
       <label class="settings-toggle-row"><span>Auto-accept project changes</span>
         <span class="switch"><input type="checkbox" ${state.autoAcceptChanges ? 'checked' : ''} onchange="setShellToggle('auto_accept_changes', this.checked)"><span class="slider"></span></span></label>
       <p class="settings-note">Keep project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo.</p>
+      <label class="settings-toggle-row"><span>Auto-apply new Unity asset files</span>
+        <span class="switch"><input type="checkbox" ${state.autoApplyUnityAssets ? 'checked' : ''} onchange="setShellToggle('auto_apply_unity_assets', this.checked)"><span class="slider"></span></span></label>
+      <p class="settings-note">When the assistant creates a new Unity-native file — a prefab, scene, material, animation or similar — CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. Code files (.cs, .shader, .js, .ts) and edits to existing files still ask first, unless auto-accept is on. The revert bar is always shown afterwards, so you can still undo.</p>
       <h3 class="settings-subhead">Auto-approved commands</h3>
       <p class="settings-note">Commands starting with one of these run automatically when Auto Mode is on. Anything else asks first.</p>
       <div class="chip-row">${state.shellAutoApprove.map((c, i) => `<span class="chip">${escHtml(c)} <span class="chip-x" onclick="removeAutoApprove(${i})">✕</span></span>`).join('')}</div>
@@ -2369,6 +2393,7 @@ function renderAdvancedPane(body) {
     <div class="settings-note-box">• Safe auto-approved commands run automatically in Auto Mode.
 • Dangerous commands (rm, del, Remove-Item, format, rm -rf, rmdir /s, rd /s, Remove-Item -Recurse) always ask first.
 • Package installs and removals always ask first — even in Auto Mode, even with auto-accept on.
+• New Unity asset files (prefabs, scenes, materials…) are written automatically after a snapshot — revert is always available afterwards.
 • File changes ask first unless auto-accept is on (and are snapshotted first either way).
 • Nothing runs while the shell is off, and no package is installed while no project folder is set.</div>
     <h3 class="settings-subhead">Editor Integration</h3>
@@ -2381,6 +2406,7 @@ async function setShellToggle(key, checked) {
   if (key === 'shell_enabled') state.shellEnabled = on;
   else if (key === 'shell_auto_mode') state.shellAutoMode = on;
   else if (key === 'auto_accept_changes') state.autoAcceptChanges = on;
+  else if (key === 'auto_apply_unity_assets') state.autoApplyUnityAssets = on;
   await rb.db.setSetting(key, on ? '1' : '0');
   renderSettingsView();
   if (key === 'shell_enabled') {
@@ -2713,6 +2739,45 @@ function applyFromDiff() {
   });
 }
 
+// ── Auto-apply new Unity asset files (v0.5.1) ────────────────────
+// A change set auto-applies only when the setting is on AND every
+// file is a NEW Unity-native asset file (see unity-assets.js, the
+// single source of truth for the list, via preload's rb.unityAssets).
+// Any code file, any edit to a file that already exists, or any
+// extension outside the list makes the whole set ask first —
+// auto-apply is all-or-nothing, never half a set. Existence is
+// checked live on disk, not from a cache.
+async function isAutoApplyAssetSet(changes) {
+  if (!state.autoApplyUnityAssets || !changes || !changes.length) return false;
+  const isAsset = rb.unityAssets && rb.unityAssets.isUnityAssetPath
+    ? rb.unityAssets.isUnityAssetPath
+    : (p) => /\.(prefab|asset|unity|mat|anim|controller|overrideController|physicMaterial|physicsMaterial2D|guiskin|flare|cubemap|renderTexture|spriteatlas|preset|scenetemplate|lighting|mixer)$/i.test(p);
+  for (const c of changes) {
+    if (!isAsset(c.path)) return false;
+    let exists = false;
+    try { exists = await rb.fs.exists(resolvePath(c.path)); } catch (e) { exists = false; }
+    if (exists) return false; // already on disk — an edit, not a new file
+  }
+  return true;
+}
+
+// One-shot (Ask / Plan) entry point for file changes. Pure sets of
+// new Unity asset files are written straight away — applyFileChanges
+// snapshots first and shows the revert bar — and a chat note says
+// so. Everything else gets the Apply bar exactly as before.
+async function handleFileChanges(changes) {
+  if (await isAutoApplyAssetSet(changes)) {
+    const summary = await applyFileChanges(changes);
+    addSystemMessage('Applied ' + summary.written + ' new Unity asset file'
+      + (summary.written !== 1 ? 's' : '') + ' automatically ('
+      + changes.map(c => c.path.split(/[\/\\]/).pop()).join(', ')
+      + ') — snapshot taken, you can revert from the bar below'
+      + (summary.failed ? '. ' + summary.failed + ' failed: ' + summary.errors.join('; ') : '.'));
+    return;
+  }
+  showApplyBar(changes);
+}
+
 function showApplyBar(changes, onDecision) {
   // Remove existing bar if any
   const existing = document.getElementById('apply-bar');
@@ -2844,6 +2909,9 @@ async function applyFileChanges(changes) {
 
   // ── Step 4: Show revert bar ──────────────────────────────────────
   showRevertBar(snapshotId, label, backedUp.length, newFiles.length);
+  // The new snapshot should appear in the sidebar straight away,
+  // so it can be reverted from there even after this bar is gone.
+  refreshSidebar().catch(() => {});
   return { written, failed, errors, snapshotId, label };
 }
 
@@ -2861,28 +2929,50 @@ function showRevertBar(snapshotId, label, backedUpCount, newFileCount) {
   const existing = document.getElementById('revert-bar');
   if (existing) existing.remove();
 
+  // The revert bar stays until the user clicks Revert or Keep.
+  // There is deliberately no timer here: it must NOT auto-dismiss,
+  // and a later chat message must NOT replace it.
   const bar = document.createElement('div');
   bar.id = 'revert-bar';
   bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:2px solid var(--amber);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.4);';
 
   const info = document.createElement('span');
   info.style.cssText = 'color:var(--amber);font-size:12px;flex:1;';
-  info.textContent = `Snapshot saved (${backedUpCount} modified, ${newFileCount} new) — revert if Unity errors appear`;
+  info.textContent = `Changes applied — snapshot saved (${backedUpCount} modified, ${newFileCount} new). Revert restores the files as they were before this change; new files are deleted. Keep discards the snapshot, so the change can no longer be reverted.`;
 
   const revertBtn = document.createElement('button');
   revertBtn.className = 'btn btn-danger';
   revertBtn.textContent = '↩ Revert changes';
+  revertBtn.title = 'Restore the files as they were before this change (new files are deleted)';
   revertBtn.onclick = () => confirmRevert(snapshotId, bar);
 
   const dismissBtn = document.createElement('button');
   dismissBtn.className = 'btn btn-secondary';
   dismissBtn.textContent = 'Keep changes';
-  dismissBtn.onclick = () => bar.remove();
+  dismissBtn.title = 'Keep discards the snapshot — this change can no longer be reverted';
+  dismissBtn.onclick = async () => {
+    bar.remove();
+    await discardSnapshot(snapshotId);
+  };
 
   bar.appendChild(info);
   bar.appendChild(revertBtn);
   bar.appendChild(dismissBtn);
   document.body.appendChild(bar);
+}
+
+// v0.5.1: "Keep changes" is a deliberate click that discards the
+// snapshot — after this, the change can no longer be reverted.
+// This is the ONLY place a snapshot is discarded, and it is never
+// called automatically, on app close, or when a new conversation
+// starts. (Before v0.5.1, Keep only hid the bar and the snapshot
+// stayed in the sidebar forever; there was no auto-discard path
+// then either — this just makes Keep mean what it says.)
+async function discardSnapshot(snapshotId) {
+  try { await rb.db.deleteSnapshot(snapshotId); }
+  catch (e) { console.error('Could not discard snapshot:', e); }
+  showToast('✓ Kept changes — snapshot discarded, this change can no longer be reverted');
+  refreshSidebar().catch(() => {});
 }
 
 async function confirmRevert(snapshotId, bar) {
@@ -2921,6 +3011,12 @@ async function confirmRevert(snapshotId, bar) {
   } else {
     showToast(`⚠ Reverted ${restored}, ${failed} failed — check console`);
   }
+
+  // The snapshot is spent: a reverted change cannot be reverted
+  // again, so discard it (silently — the toast above already said
+  // what happened) and drop its row from the sidebar.
+  try { await rb.db.deleteSnapshot(snapshotId); } catch (e) {}
+  refreshSidebar().catch(() => {});
 }
 
 // ── Top bar ───────────────────────────────────────────────────────

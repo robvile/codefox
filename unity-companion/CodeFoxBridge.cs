@@ -153,7 +153,14 @@ public static class CodeFoxBridge
     {
         string name = string.IsNullOrEmpty(cmd.name) ? "NewController" : cmd.name;
         string assetPath = name.EndsWith(".controller") ? "Assets/" + name : "Assets/" + name + ".controller";
-        var controller = AnimatorController.CreateAnimatorControllerAtPath(assetPath, 1);
+        // NOTE (v0.5.1): CreateAnimatorControllerAtPath only has a
+        // 1-argument overload — CreateAnimatorControllerAtPath(string
+        // path) — in every Unity version (2021–2023 LTS and newer).
+        // There is no 2-argument overload, so passing a layer count
+        // here fails to compile (CS1501). The 1-argument call already
+        // creates the controller with a single default "Base Layer",
+        // which is the 1 layer the old call was asking for.
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(assetPath);
         if (controller == null)
             return new CFResult { ok = false, message = "Could not create Animator Controller at " + assetPath };
 
