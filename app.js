@@ -1,11 +1,18 @@
 // ── State ────────────────────────────────────────────────────────
 let state = {
-  mode: 'chat',          // 'chat' | 'ruleset' | 'plan' | 'page'
+  mode: 'home',          // 'home' | 'chat' | 'ruleset' | 'plan' | 'page' | 'connections' | 'references'
   activeThreadId: null,
   activeItemId: null,
   activeTable: null,
   activeFilePath: null,
   projectPath: '',
+  activeProjectId: null,
+  activeProject: null,
+  projects: [],
+  skillsInstalled: {},
+  unrealPath: '',
+  localFolders: [],
+  homeMentionFile: null,
   ollamaModel: 'qwen2.5-coder:32b-instruct',
   ollamaUrl: 'http://localhost:11434',
   ollamaExePath: '',
@@ -31,10 +38,17 @@ let state = {
 function setLlmStatus(dotClass, label) {
   const dot = document.getElementById('ollama-dot');
   const lbl = document.getElementById('ollama-label');
-  if (!dot || !lbl) return;
-  dot.className = '';
-  if (dotClass) dot.classList.add(dotClass);
-  lbl.textContent = label;
+  if (dot) {
+    dot.className = '';
+    if (dotClass) dot.classList.add(dotClass);
+  }
+  if (lbl) lbl.textContent = label;
+  const homeDot = document.getElementById('home-status-dot');
+  if (homeDot) {
+    homeDot.className = '';
+    if (dotClass) homeDot.classList.add(dotClass);
+  }
+  updateHomeModelLabel();
 }
 // Backwards-compatible name used by the titlebar.
 function setOllamaStatus(status, label) {
@@ -112,13 +126,21 @@ async function refreshModels() {
 
 function updateModelDropdown() {
   const sel = document.getElementById('s-lm-model');
-  if (!sel) return;
-  const current = state.lmstudioModel;
-  sel.innerHTML = '<option value="">— Select a model —</option>' +
-    state.lmstudioModels.map(m => `<option value="${escHtml(m.id)}" ${m.id === current ? 'selected' : ''}>${escHtml(m.id)}</option>`).join('');
-  if (current && !state.lmstudioModels.some(m => m.id === current)) {
-    sel.innerHTML += `<option value="${escHtml(current)}" selected>${escHtml(current)} (not loaded)</option>`;
+  if (sel) {
+    const current = state.lmstudioModel;
+    sel.innerHTML = '<option value="">— Select a model —</option>' +
+      state.lmstudioModels.map(m => `<option value="${escHtml(m.id)}" ${m.id === current ? 'selected' : ''}>${escHtml(m.id)}</option>`).join('');
+    if (current && !state.lmstudioModels.some(m => m.id === current)) {
+      sel.innerHTML += `<option value="${escHtml(current)}" selected>${escHtml(current)} (not loaded)</option>`;
+    }
   }
+  updateHomeModelLabel();
+}
+
+function updateHomeModelLabel() {
+  const el = document.getElementById('home-model-label');
+  if (!el) return;
+  el.textContent = currentModel() || 'No model selected';
 }
 
 async function verifyLmStudio() {
@@ -161,7 +183,14 @@ async function initOllama() { return initLLM(); }
 
 // ── Init ─────────────────────────────────────────────────────────
 async function init() {
-  state.projectPath = await rb.db.getSetting('project_path') || state.projectPath;
+  // Projects first — the DB migration in main.js guarantees at least one.
+  state.projects = await rb.project.list();
+  const activeId = await rb.db.getSetting('active_project_id');
+  state.activeProject = state.projects.find(p => Number(p.id) === Number(activeId)) || state.projects[0] || null;
+  if (state.activeProject) {
+    state.activeProjectId = Number(state.activeProject.id);
+    state.projectPath = state.activeProject.path || '';
+  }
   state.ollamaModel = await rb.db.getSetting('ollama_model') || state.ollamaModel;
   state.ollamaUrl   = await rb.db.getSetting('ollama_url')   || state.ollamaUrl;
   state.ollamaExePath = await rb.db.getSetting('ollama_exe_path') || '';
@@ -174,14 +203,21 @@ async function init() {
   state.maxTokens = parseInt(await rb.db.getSetting('llm_max_tokens') || '4096', 10) || 4096;
   state.unityExePath = await rb.db.getSetting('unity_exe_path') || '';
   state.chatMode = await rb.db.getSetting('chat_mode') || 'agent';
+  state.unrealPath = await rb.db.getSetting('unreal_project_path') || '';
+  try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
+  catch { state.localFolders = []; }
+  if (!Array.isArray(state.localFolders)) state.localFolders = [];
   if (state.ollamaExePath) await rb.ollama.setPath(state.ollamaExePath);
-  document.getElementById('project-path-label').textContent = state.projectPath || 'No project set';
-  document.getElementById('file-path-label').textContent = state.projectPath || 'No project set';
+  setProjectPathLabels();
+  renderProjectSelector();
 
   // Check the LLM backend in parallel — don't block UI
   initLLM();
   updateModeButtons();
+  const homeSel = document.getElementById('home-mode-select');
+  if (homeSel) homeSel.value = state.chatMode;
 
+  await loadSkills();
   await refreshSidebar();
   await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
   // Build flat index in background for search
@@ -189,15 +225,27 @@ async function init() {
     console.log(`File index built: ${allFiles.length} files`);
   });
 
-  // Load or create default thread
-  const threads = await rb.db.getAll('threads');
-  if (threads.length) {
-    await loadThread(threads[0].id);
-  } else {
-    const id = await rb.db.insert('threads', { name: 'General' });
-    await refreshSidebar();
-    await loadThread(id);
-  }
+  // Home is the default view; make sure the project has a conversation.
+  await showHome();
+
+  // Close the project dropdown when clicking anywhere else.
+  document.addEventListener('click', (e) => {
+    const dd = document.getElementById('project-dropdown');
+    if (!dd || dd.classList.contains('hidden')) return;
+    const sel = document.getElementById('project-selector');
+    if (!dd.contains(e.target) && !(sel && sel.contains(e.target))) dd.classList.add('hidden');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const dd = document.getElementById('project-dropdown');
+      if (dd) dd.classList.add('hidden');
+    }
+  });
+}
+
+function setProjectPathLabels() {
+  const f = document.getElementById('file-path-label');
+  if (f) f.textContent = state.projectPath || 'No project set';
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────
@@ -208,10 +256,13 @@ async function refreshSidebar() {
     rb.db.getAll('pages'),
     rb.db.getAll('threads'),
   ]);
-  renderList('ruleset-list', rulesets, 'rulesets');
-  renderList('plans-list', plans, 'plans');
-  renderList('pages-list', pages, 'pages');
-  renderThreadList(threads);
+  // Per-project filtering. Rows with no project_id (pre-0.3.0 rows that
+  // missed the migration backfill) are shown under the active project.
+  const pid = state.activeProjectId;
+  const mine = (rows) => pid == null ? rows : rows.filter(r => r.project_id == null || Number(r.project_id) === Number(pid));
+  renderList('ruleset-list', mine(rulesets), 'rulesets');
+  renderReferencesList(mine(pages), mine(plans));
+  renderThreadList(mine(threads));
   // Snapshots isolated — table may not exist in older DBs
   try {
     const snapshots = await rb.db.getAll('snapshots');
@@ -262,6 +313,7 @@ async function revertFromHistory(snapshotId) {
 
 function renderList(containerId, items, table) {
   const el = document.getElementById(containerId);
+  if (!el) return;
   el.innerHTML = items.map(item => `
     <div class="sidebar-link ${state.activeTable === table && state.activeItemId === item.id ? 'active' : ''}"
          onclick="loadItem('${table}', ${item.id})">
@@ -272,9 +324,15 @@ function renderList(containerId, items, table) {
 }
 
 function renderThreadList(threads) {
-  const el = document.getElementById('threads-list');
-  el.innerHTML = threads.map(t => `
-    <div class="sidebar-link ${state.activeThreadId === t.id && state.mode === 'chat' ? 'active' : ''}"
+  const el = document.getElementById('conversations-list');
+  if (!el) return;
+  const inChat = state.mode === 'chat' && state.activeThreadId != null;
+  const newRow = `
+    <div class="sidebar-link ${!inChat ? 'active' : ''}" onclick="newThread()">
+      <span class="sidebar-link-name">＋ New conversation</span>
+    </div>`;
+  el.innerHTML = newRow + threads.map(t => `
+    <div class="sidebar-link ${state.activeThreadId === Number(t.id) && state.mode === 'chat' ? 'active' : ''}"
          onclick="loadThread(${t.id})">
       <span class="sidebar-link-name">${escHtml(t.name)}</span>
       <span class="sidebar-link-del" onclick="event.stopPropagation(); deleteThread(${t.id})">✕</span>
@@ -282,16 +340,61 @@ function renderThreadList(threads) {
   `).join('');
 }
 
+// References = pages + plans in one list, labelled by kind.
+function renderReferencesList(pages, plans) {
+  const el = document.getElementById('references-list');
+  if (!el) return;
+  const items = [
+    ...pages.map(p => ({ id: p.id, name: p.name, table: 'pages', kind: 'Reference' })),
+    ...plans.map(p => ({ id: p.id, name: p.name, table: 'plans', kind: 'Plan' })),
+  ].sort((a, b) => Number(b.id) - Number(a.id));
+  if (!items.length) {
+    el.innerHTML = '<div style="padding:4px 14px;color:var(--text3);font-size:11px;">No references yet</div>';
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="sidebar-link ${state.activeTable === item.table && state.activeItemId === Number(item.id) ? 'active' : ''}"
+         onclick="loadItem('${item.table}', ${item.id})">
+      <span class="sidebar-link-name">${escHtml(item.name)}</span>
+      <span style="font-size:10px;color:var(--text3);flex-shrink:0;">${item.kind}</span>
+      <span class="sidebar-link-del" onclick="event.stopPropagation(); deleteItem('${item.table}', ${item.id})">✕</span>
+    </div>
+  `).join('');
+}
+
 // ── Mode switching ────────────────────────────────────────────────
 function setMode(mode, title, badgeClass) {
   state.mode = mode;
-  document.getElementById('center-mode-badge').textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
-  document.getElementById('center-mode-badge').className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : 'ruleset');
+  const badgeLabels = { chat: 'Chat', ruleset: 'Ruleset', plan: 'Plan', page: 'Reference', home: 'Home', connections: 'Connections', references: 'References' };
+  const badge = document.getElementById('center-mode-badge');
+  badge.textContent = badgeLabels[mode] || (mode.charAt(0).toUpperCase() + mode.slice(1));
+  badge.className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : mode === 'home' ? 'home' : mode === 'connections' ? 'connections' : mode === 'references' ? 'references' : 'ruleset');
   document.getElementById('center-title').textContent = title;
+  const topTitle = document.getElementById('topbar-title');
+  if (topTitle) topTitle.textContent = mode === 'home' ? 'Home' : title;
 
-  document.getElementById('chat-mode').classList.toggle('hidden', mode !== 'chat');
-  document.getElementById('editor-mode').classList.toggle('hidden', mode !== 'ruleset' && mode !== 'page');
-  document.getElementById('plan-mode').classList.toggle('hidden', mode !== 'plan');
+  // Centre header is hidden on Home (the hero carries the project name).
+  document.getElementById('center-header').classList.toggle('hidden', mode === 'home');
+
+  const panes = { chat: 'chat-mode', ruleset: 'editor-mode', page: 'editor-mode', plan: 'plan-mode', home: 'home-mode', connections: 'connections-mode', references: 'references-mode' };
+  for (const id of new Set(Object.values(panes))) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', panes[mode] !== id);
+  }
+
+  // Right panel: the build panel on Home, the file tree everywhere else.
+  document.getElementById('app').classList.toggle('home-view', mode === 'home');
+  document.getElementById('right-build').classList.toggle('hidden', mode !== 'home');
+  document.getElementById('right-files').classList.toggle('hidden', mode === 'home');
+
+  // Sidebar nav highlight.
+  document.getElementById('nav-conversations')?.classList.toggle('active', mode === 'home' || mode === 'chat');
+  document.getElementById('nav-references')?.classList.toggle('active', mode === 'references' || mode === 'page' || mode === 'plan');
+  document.getElementById('nav-connections')?.classList.toggle('active', mode === 'connections');
+
+  if (mode === 'home') renderHome();
+  if (mode === 'connections') renderConnectionsView();
+  if (mode === 'references') renderReferencesView();
 }
 
 // ── Load items from sidebar ───────────────────────────────────────
@@ -480,6 +583,23 @@ async function sendChat() {
       state.messages.push({ role: 'assistant', content: assistantContent });
     }
     rb.llm.removeListeners();
+    // Audit skill: save the finished audit as a Reference when asked.
+    if (window._saveAuditAsReference) {
+      window._saveAuditAsReference = false;
+      await rb.db.insert('pages', { name: 'Project Structure Audit', content: assistantContent, project_id: state.activeProjectId });
+      await refreshSidebar();
+      if (state.mode === 'home') renderHome();
+      showToast('✓ Audit saved as a Reference');
+    }
+    // GDD skill: save the finished draft into the Reference it created.
+    if (window._saveGddAsReference && window._gddPageId) {
+      window._saveGddAsReference = false;
+      await rb.db.update('pages', window._gddPageId, { content: assistantContent });
+      window._gddPageId = null;
+      await refreshSidebar();
+      if (state.mode === 'home') renderHome();
+      showToast('✓ Game Design Document saved as a Reference');
+    }
     // Parse response for file changes and show apply bar if any found
     const changes = extractFileChanges(assistantContent);
     if (changes.length) showApplyBar(changes);
@@ -530,6 +650,8 @@ function setChatMode(mode) {
   state.chatMode = mode;
   rb.db.setSetting('chat_mode', mode);
   updateModeButtons();
+  const sel = document.getElementById('home-mode-select');
+  if (sel) sel.value = mode;
   const input = document.getElementById('chat-input');
   if (input) {
     input.placeholder = mode === 'ask' ? 'Ask about your code — no files will be changed…'
@@ -681,7 +803,7 @@ Begin with Step 1. Work through each step in order.`;
 
   console.log('[executePlan] creating thread...');
   // Create thread first — don't parseInt, use raw return value
-  const rawThreadId = await rb.db.insert('threads', { name: 'Execute: ' + item.name });
+  const rawThreadId = await rb.db.insert('threads', { name: 'Execute: ' + item.name, project_id: state.activeProjectId });
   const threadId = Number(rawThreadId);
   console.log('[executePlan] thread created raw:', rawThreadId, 'as Number:', threadId, 'typeof:', typeof rawThreadId);
 
@@ -722,7 +844,7 @@ Begin with Step 1. Work through each step in order.`;
 async function sendPageToChat() {
   const item = await rb.db.get('pages', state.activeItemId);
   if (!item) return;
-  const threadId = await rb.db.insert('threads', { name: `Discuss: ${item.name}` });
+  const threadId = await rb.db.insert('threads', { name: `Discuss: ${item.name}`, project_id: state.activeProjectId });
   await refreshSidebar();
   await loadThread(threadId);
   document.getElementById('chat-input').value = `Here is the architecture page for "${item.name}":\n\n${item.content}\n\nLet's discuss this.`;
@@ -862,16 +984,22 @@ async function pickProjectFolder() {
   if (!folder) return;
   state.projectPath = folder;
   await rb.db.setSetting('project_path', folder);
-  document.getElementById('project-path-label').textContent = folder;
-  document.getElementById('file-path-label').textContent = folder;
+  if (state.activeProjectId != null) {
+    await rb.project.update(state.activeProjectId, { path: folder });
+    state.activeProject = { ...state.activeProject, path: folder };
+  }
+  setProjectPathLabels();
   document.getElementById('file-tree').innerHTML = '';
+  allFiles = [];
   await loadFileTree(folder, document.getElementById('file-tree'), 0);
+  buildFileIndex(folder);
+  if (state.mode === 'home') renderHome();
 }
 
 // ── New item modal ────────────────────────────────────────────────
 let modalCallback = null;
 function newItem(table) {
-  const titles = { rulesets: 'New ruleset', plans: 'New plan', pages: 'New page' };
+  const titles = { rulesets: 'New ruleset', plans: 'New plan', pages: 'New reference' };
   document.getElementById('modal-title').textContent = titles[table] || 'New item';
   document.getElementById('modal-name').value = '';
   document.getElementById('modal-overlay').classList.add('open');
@@ -879,7 +1007,7 @@ function newItem(table) {
   modalCallback = async () => {
     const name = document.getElementById('modal-name').value.trim();
     if (!name) return;
-    const id = await rb.db.insert(table, { name, content: '' });
+    const id = await rb.db.insert(table, { name, content: '', project_id: state.activeProjectId });
     await refreshSidebar();
     await loadItem(table, id);
     closeModal();
@@ -887,14 +1015,14 @@ function newItem(table) {
 }
 
 async function newThread() {
-  document.getElementById('modal-title').textContent = 'New thread';
+  document.getElementById('modal-title').textContent = 'New conversation';
   document.getElementById('modal-name').value = '';
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('modal-name').focus();
   modalCallback = async () => {
     const name = document.getElementById('modal-name').value.trim();
     if (!name) return;
-    const id = parseInt(await rb.db.insert('threads', { name }), 10);
+    const id = parseInt(await rb.db.insert('threads', { name, project_id: state.activeProjectId }), 10);
     await loadThread(id);
     await refreshSidebar();
     closeModal();
@@ -919,27 +1047,29 @@ document.getElementById('modal-name').addEventListener('keydown', e => {
 async function deleteItem(table, id) {
   await rb.db.delete(table, id);
   if (state.activeItemId === id) {
-    setMode('chat', 'New thread');
+    setMode('chat', 'New conversation');
     state.activeItemId = null;
     state.activeTable = null;
   }
   await refreshSidebar();
+  if (state.mode === 'home') renderHome();
 }
 
 async function deleteThread(id) {
   await rb.db.delete('threads', id);
   const threads = await rb.db.getAll('threads');
-  if (threads.length) {
-    await loadThread(parseInt(threads[0].id, 10));
+  const mine = state.activeProjectId == null ? threads : threads.filter(t => t.project_id == null || Number(t.project_id) === Number(state.activeProjectId));
+  if (mine.length) {
+    await loadThread(parseInt(mine[0].id, 10));
   } else {
-    const newId = parseInt(await rb.db.insert('threads', { name: 'General' }), 10);
+    const newId = parseInt(await rb.db.insert('threads', { name: 'General', project_id: state.activeProjectId }), 10);
     await loadThread(newId);
     await refreshSidebar();
   }
 }
 
 async function renameThread() {
-  document.getElementById('modal-title').textContent = 'Rename thread';
+  document.getElementById('modal-title').textContent = 'Rename conversation';
   const t = await rb.db.get('threads', state.activeThreadId);
   document.getElementById('modal-name').value = t ? t.name : '';
   document.getElementById('modal-overlay').classList.add('open');
@@ -1117,7 +1247,18 @@ async function saveSettings() {
   const mt = parseInt(document.getElementById('s-maxtokens')?.value, 10);
   if (!isNaN(mt) && mt > 0) { state.maxTokens = mt; await rb.db.setSetting('llm_max_tokens', String(mt)); }
   const pathVal = document.getElementById('s-path')?.value?.trim();
-  if (pathVal) { state.projectPath = pathVal; await rb.db.setSetting('project_path', pathVal); }
+  if (pathVal && pathVal !== state.projectPath) {
+    state.projectPath = pathVal;
+    await rb.db.setSetting('project_path', pathVal);
+    if (state.activeProjectId != null) {
+      await rb.project.update(state.activeProjectId, { path: pathVal });
+      state.activeProject = { ...state.activeProject, path: pathVal };
+    }
+    document.getElementById('file-tree').innerHTML = '';
+    allFiles = [];
+    await loadFileTree(pathVal, document.getElementById('file-tree'), 0);
+    buildFileIndex(pathVal);
+  }
   const ctx = document.getElementById('s-ctx')?.value?.trim();
   if (ctx !== undefined) { state.projectContext = ctx; await rb.db.setSetting('project_context', ctx); }
   const unityExe = document.getElementById('s-unity-exe')?.value?.trim() || '';
@@ -1125,8 +1266,8 @@ async function saveSettings() {
   await rb.db.setSetting('unity_exe_path', unityExe);
   closeSettings();
   // Re-init the LLM connection without losing the thread (no reload).
-  document.getElementById('project-path-label').textContent = state.projectPath || 'No project set';
-  document.getElementById('file-path-label').textContent = state.projectPath || 'No project set';
+  setProjectPathLabels();
+  if (state.mode === 'home') renderHome();
   await initLLM();
   showToast('✓ Settings saved');
 }
@@ -1277,7 +1418,7 @@ function showApplyBar(changes) {
 
   const bar = document.createElement('div');
   bar.id = 'apply-bar';
-  bar.style.cssText = 'position:fixed;bottom:0;left:220px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;';
 
   const label = document.createElement('span');
   label.style.cssText = 'color:var(--teal);font-size:13px;flex:1;';
@@ -1401,7 +1542,7 @@ function showRevertBar(snapshotId, label, backedUpCount, newFileCount) {
 
   const bar = document.createElement('div');
   bar.id = 'revert-bar';
-  bar.style.cssText = 'position:fixed;bottom:0;left:220px;right:280px;background:var(--bg2);border-top:2px solid var(--amber);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.4);';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:2px solid var(--amber);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.4);';
 
   const info = document.createElement('span');
   info.style.cssText = 'color:var(--amber);font-size:12px;flex:1;';
@@ -1459,6 +1600,716 @@ async function confirmRevert(snapshotId, bar) {
   } else {
     showToast(`⚠ Reverted ${restored}, ${failed} failed — check console`);
   }
+}
+
+// ── Top bar ───────────────────────────────────────────────────────
+function toggleSidebar() {
+  document.getElementById('app').classList.toggle('sidebar-hidden');
+}
+function toggleRightPanel() {
+  document.getElementById('app').classList.toggle('right-hidden');
+}
+function toggleZen() {
+  const app = document.getElementById('app');
+  app.classList.toggle('sidebar-hidden');
+  app.classList.toggle('right-hidden');
+}
+
+// ── Sub-modal (project settings, new project, skills, tokens) ─────
+function openSubModal(html) {
+  document.getElementById('sub-modal').innerHTML = html;
+  document.getElementById('sub-modal-overlay').classList.add('open');
+}
+function closeSubModal() {
+  document.getElementById('sub-modal-overlay').classList.remove('open');
+  window._newProjectPath = null;
+  window._projectSettingsPath = null;
+}
+
+// ── Projects ──────────────────────────────────────────────────────
+function renderProjectSelector() {
+  const proj = state.activeProject;
+  const name = proj ? proj.name : 'My Project';
+  document.getElementById('project-name-label').textContent = name;
+  const initial = (name.trim()[0] || 'M').toUpperCase();
+  document.getElementById('project-avatar').textContent = initial;
+}
+
+async function toggleProjectDropdown(e) {
+  if (e) e.stopPropagation();
+  const dd = document.getElementById('project-dropdown');
+  if (!dd.classList.contains('hidden')) { dd.classList.add('hidden'); return; }
+  state.projects = await rb.project.list();
+  const sel = document.getElementById('project-selector');
+  const r = sel.getBoundingClientRect();
+  dd.style.left = r.left + 'px';
+  dd.style.top = (r.bottom + 6) + 'px';
+  dd.innerHTML = state.projects.map(p => `
+    <div class="dd-item ${state.activeProjectId === Number(p.id) ? 'current' : ''}" onclick="switchProject(${p.id})">
+      <span class="dd-avatar">${escHtml((p.name.trim()[0] || 'M').toUpperCase())}</span>
+      <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(p.name)}</span>
+    </div>`).join('') + `
+    <div class="dd-sep"></div>
+    <button class="dd-action" onclick="openProjectSettings()">⚙ Project Settings</button>
+    <button class="dd-action" onclick="openNewProject()">＋ New Project</button>`;
+  dd.classList.remove('hidden');
+}
+
+async function switchProject(id) {
+  const dd = document.getElementById('project-dropdown');
+  if (dd) dd.classList.add('hidden');
+  const proj = await rb.project.switch(id);
+  if (!proj) { showToast('⚠ Could not switch project'); return; }
+  state.activeProjectId = Number(proj.id);
+  state.activeProject = proj;
+  state.projectPath = proj.path || '';
+  state.projectScan = null;
+  state.activeThreadId = null;
+  state.activeItemId = null;
+  state.activeTable = null;
+  state.unrealPath = await rb.db.getSetting('unreal_project_path') || '';
+  try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
+  catch { state.localFolders = []; }
+  if (!Array.isArray(state.localFolders)) state.localFolders = [];
+  renderProjectSelector();
+  setProjectPathLabels();
+  document.getElementById('file-tree').innerHTML = '';
+  allFiles = [];
+  await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
+  buildFileIndex(state.projectPath);
+  await showHome();
+  showToast('Switched to ' + proj.name);
+}
+
+function openNewProject() {
+  const dd = document.getElementById('project-dropdown');
+  if (dd) dd.classList.add('hidden');
+  window._newProjectPath = '';
+  openSubModal(`
+    <h2>New Project</h2>
+    <label class="field-label">Project name
+      <input id="np-name" placeholder="e.g. My Unity Game" />
+    </label>
+    <label class="field-label">Project folder
+      <div style="display:flex;gap:6px;">
+        <input id="np-path" placeholder="Optional — pick a folder, or set it later" readonly style="flex:1;" />
+        <button class="btn btn-secondary" onclick="pickNewProjectFolder()">Choose…</button>
+      </div>
+      <span class="field-note">Local project — stored on this machine.</span>
+    </label>
+    <div class="sub-modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createProject()">Create project</button>
+    </div>
+  `);
+  document.getElementById('np-name').focus();
+}
+
+async function pickNewProjectFolder() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  window._newProjectPath = folder;
+  const input = document.getElementById('np-path');
+  if (input) input.value = folder;
+}
+
+async function createProject() {
+  const name = document.getElementById('np-name')?.value?.trim();
+  if (!name) { showToast('Give the project a name'); return; }
+  const pathVal = window._newProjectPath || '';
+  const proj = await rb.project.create(name, pathVal);
+  closeSubModal();
+  await switchProject(proj.id);
+}
+
+function openProjectSettings() {
+  const dd = document.getElementById('project-dropdown');
+  if (dd) dd.classList.add('hidden');
+  const proj = state.activeProject;
+  if (!proj) return;
+  window._projectSettingsPath = proj.path || '';
+  window._confirmDeleteProject = false;
+  openSubModal(`
+    <h2>Project Settings</h2>
+    <label class="field-label">Project name
+      <input id="ps-name" value="${escHtml(proj.name)}" />
+    </label>
+    <label class="field-label">Project folder
+      <div style="display:flex;gap:6px;">
+        <input id="ps-path" value="${escHtml(proj.path || '')}" readonly style="flex:1;" />
+        <button class="btn btn-secondary" onclick="pickProjectSettingsFolder()">Choose…</button>
+      </div>
+      <span class="field-note">Local project — stored on this machine.</span>
+    </label>
+    <div class="sub-modal-actions" style="justify-content:space-between;">
+      <button class="btn btn-danger" id="ps-delete-btn" onclick="deleteActiveProject()">Delete project</button>
+      <span style="display:flex;gap:8px;">
+        <button class="btn btn-secondary" onclick="closeSubModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProjectSettings()">Save</button>
+      </span>
+    </div>
+  `);
+}
+
+async function pickProjectSettingsFolder() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  window._projectSettingsPath = folder;
+  const input = document.getElementById('ps-path');
+  if (input) input.value = folder;
+}
+
+async function saveProjectSettings() {
+  const proj = state.activeProject;
+  if (!proj) return;
+  const name = document.getElementById('ps-name')?.value?.trim() || proj.name;
+  const pathVal = window._projectSettingsPath != null ? window._projectSettingsPath : proj.path;
+  await rb.project.update(proj.id, { name, path: pathVal });
+  state.activeProject = { ...proj, name, path: pathVal };
+  state.projectPath = pathVal || '';
+  state.projects = await rb.project.list();
+  renderProjectSelector();
+  setProjectPathLabels();
+  document.getElementById('file-tree').innerHTML = '';
+  allFiles = [];
+  await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
+  buildFileIndex(state.projectPath);
+  closeSubModal();
+  if (state.mode === 'home') renderHome();
+  showToast('✓ Project settings saved');
+}
+
+async function deleteActiveProject() {
+  const proj = state.activeProject;
+  if (!proj) return;
+  if (!window._confirmDeleteProject) {
+    window._confirmDeleteProject = true;
+    const btn = document.getElementById('ps-delete-btn');
+    if (btn) btn.textContent = 'Click again to confirm — deletes its conversations and references';
+    return;
+  }
+  const res = await rb.project.delete(proj.id);
+  if (!res.ok) { showToast('⚠ ' + (res.error || 'Could not delete project')); closeSubModal(); return; }
+  closeSubModal();
+  state.projects = await rb.project.list();
+  const next = state.projects.find(p => Number(p.id) === Number(res.activeProjectId)) || state.projects[0];
+  if (next) await switchProject(next.id);
+  else await showHome();
+}
+
+// ── Home view ─────────────────────────────────────────────────────
+async function ensureDefaultThread() {
+  const threads = await rb.db.getAll('threads');
+  const pid = state.activeProjectId;
+  const mine = pid == null ? threads : threads.filter(t => t.project_id == null || Number(t.project_id) === Number(pid));
+  if (mine.length) {
+    state.activeThreadId = Number(mine[0].id);
+    return mine[0];
+  }
+  const id = parseInt(await rb.db.insert('threads', { name: 'General', project_id: pid }), 10);
+  state.activeThreadId = id;
+  return { id, name: 'General' };
+}
+
+async function showHome() {
+  await ensureDefaultThread();
+  setMode('home', state.activeProject ? state.activeProject.name : 'Home');
+  await refreshSidebar();
+}
+
+function showConnections() {
+  setMode('connections', 'Connections');
+}
+
+function showReferences() {
+  setMode('references', 'References');
+}
+
+async function renderHome() {
+  const proj = state.activeProject;
+  const name = proj ? proj.name : 'My Project';
+  const initial = (name.trim()[0] || 'M').toUpperCase();
+  const heroName = document.getElementById('hero-project-name');
+  if (heroName) heroName.textContent = name;
+  const heroAvatar = document.getElementById('hero-avatar');
+  if (heroAvatar) heroAvatar.textContent = initial;
+  const chip = document.getElementById('home-context-chip');
+  if (chip) chip.textContent = '# ' + name;
+  updateHomeModelLabel();
+  await refreshConnectionCards();
+  renderSkillsGrid();
+  await renderRecentReferences();
+}
+
+async function refreshConnectionCards() {
+  const setStatus = (id, text, connected) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('connected', !!connected);
+  };
+  const unityConnected = state.projectPath ? await rb.fs.exists(state.projectPath + '/Assets') : false;
+  setStatus('conn-unity-status', unityConnected ? '1 Connected' : 'No connections yet', unityConnected);
+  const unrealConnected = state.unrealPath ? await rb.fs.exists(state.unrealPath) : false;
+  setStatus('conn-unreal-status', unrealConnected ? '1 Connected' : 'No connections yet', unrealConnected);
+  const n = state.localFolders.length;
+  setStatus('conn-folders-status', n ? n + ' connected' : 'No connections yet', n > 0);
+}
+
+async function renderRecentReferences() {
+  const el = document.getElementById('recent-refs-list');
+  if (!el) return;
+  const [pages, plans] = await Promise.all([rb.db.getAll('pages'), rb.db.getAll('plans')]);
+  const pid = state.activeProjectId;
+  const mine = (rows) => pid == null ? rows : rows.filter(r => r.project_id == null || Number(r.project_id) === Number(pid));
+  const items = [
+    ...mine(pages).map(p => ({ id: p.id, name: p.name, table: 'pages', kind: 'Reference' })),
+    ...mine(plans).map(p => ({ id: p.id, name: p.name, table: 'plans', kind: 'Plan' })),
+  ].sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 5);
+  if (!items.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;">No references yet — use a skill below or create one from the sidebar.</div>';
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="ref-row" onclick="loadItem('${item.table}', ${item.id})">
+      <span class="ref-name">${escHtml(item.name)}</span>
+      <span class="ref-kind">${item.kind}</span>
+    </div>`).join('');
+}
+
+function renderReferencesView() {
+  const el = document.getElementById('references-mode');
+  if (!el) return;
+  el.innerHTML = '<h2 style="font-size:15px;font-weight:600;margin-bottom:4px;">References</h2>' +
+    '<p style="color:var(--text3);font-size:12px;margin-bottom:14px;">Pages and plans for this project. Plans are labelled “Plan”, pages are “Reference”.</p>' +
+    '<div id="references-view-list"><div style="color:var(--text3);font-size:12px;">Loading…</div></div>';
+  Promise.all([rb.db.getAll('pages'), rb.db.getAll('plans')]).then(([pages, plans]) => {
+    const pid = state.activeProjectId;
+    const mine = (rows) => pid == null ? rows : rows.filter(r => r.project_id == null || Number(r.project_id) === Number(pid));
+    const items = [
+      ...mine(pages).map(p => ({ id: p.id, name: p.name, table: 'pages', kind: 'Reference' })),
+      ...mine(plans).map(p => ({ id: p.id, name: p.name, table: 'plans', kind: 'Plan' })),
+    ].sort((a, b) => Number(b.id) - Number(a.id));
+    const list = document.getElementById('references-view-list');
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = '<div style="color:var(--text3);font-size:12px;">No references yet. Create one from the sidebar, or run the /document-project skill from Home.</div>';
+      return;
+    }
+    list.innerHTML = items.map(item => `
+      <div class="ref-row" onclick="loadItem('${item.table}', ${item.id})">
+        <span class="ref-name">${escHtml(item.name)}</span>
+        <span class="ref-kind">${item.kind}</span>
+      </div>`).join('');
+  });
+}
+
+// ── Connection cards ──────────────────────────────────────────────
+async function onUnityCard() {
+  if (!state.projectPath) {
+    const folder = await rb.fs.pickFolder();
+    if (!folder) return;
+    await rb.project.update(state.activeProjectId, { path: folder });
+    state.activeProject = { ...state.activeProject, path: folder };
+    state.projectPath = folder;
+    setProjectPathLabels();
+    document.getElementById('file-tree').innerHTML = '';
+    allFiles = [];
+    await loadFileTree(folder, document.getElementById('file-tree'), 0);
+    buildFileIndex(folder);
+    showToast('✓ Unity project folder set');
+    await renderHome();
+    return;
+  }
+  const connected = await rb.fs.exists(state.projectPath + '/Assets');
+  if (connected) {
+    await scanProject();
+  } else {
+    const folder = await rb.fs.pickFolder();
+    if (!folder) return;
+    await rb.project.update(state.activeProjectId, { path: folder });
+    state.activeProject = { ...state.activeProject, path: folder };
+    state.projectPath = folder;
+    setProjectPathLabels();
+    document.getElementById('file-tree').innerHTML = '';
+    allFiles = [];
+    await loadFileTree(folder, document.getElementById('file-tree'), 0);
+    buildFileIndex(folder);
+    showToast('✓ Unity project folder set');
+  }
+  await renderHome();
+}
+
+async function onUnrealCard() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  const items = await rb.fs.readDir(folder);
+  const found = items.some(i => !i.isDir && i.name.toLowerCase().endsWith('.uproject'));
+  if (!found) { showToast('No Unreal project found in that folder'); return; }
+  state.unrealPath = folder;
+  await rb.db.setSetting('unreal_project_path', folder);
+  showToast('✓ Unreal project connected');
+  await renderHome();
+}
+
+async function onLocalFoldersCard() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  if (!state.localFolders.includes(folder)) {
+    state.localFolders.push(folder);
+    await rb.db.setSetting('local_folders', JSON.stringify(state.localFolders));
+  }
+  showToast('✓ Folder added — ' + state.localFolders.length + ' connected. Open it as a project via New Project.');
+  await renderHome();
+}
+
+// ── Skills ────────────────────────────────────────────────────────
+const SKILLS = [
+  { name: '/document-project', desc: 'Generate a Game Design Document for your project', action: 'documentProject' },
+  { name: '/prototype-this', desc: 'Design and plan a new gameplay feature prototype', action: 'prototypeThis' },
+  { name: '/convert-to-ui-toolkit', desc: 'Migrate your UGUI Canvas UI to Unity UI Toolkit', action: 'convertToUiToolkit' },
+  { name: '/audit-project-structure', desc: "Audit and clean up your project's folder structure and naming", action: 'auditProjectStructure' },
+  { name: '/work-with-figma', desc: 'Import Figma designs and build them in your project', action: 'figma', needsConnection: 'Figma' },
+  { name: '/work-with-jira', desc: 'Pick a JIRA ticket and implement it in your project', action: 'jira', needsConnection: 'Jira' },
+];
+
+async function loadSkills() {
+  try {
+    const rows = await rb.skills.list();
+    state.skillsInstalled = {};
+    for (const r of rows) state.skillsInstalled[r.name] = !!r.installed;
+  } catch { state.skillsInstalled = {}; }
+}
+
+function renderSkillsGrid() {
+  const el = document.getElementById('skills-grid');
+  if (!el) return;
+  el.innerHTML = SKILLS.map(s => {
+    const installed = !!state.skillsInstalled[s.name];
+    const btn = s.needsConnection
+      ? `<button class="skill-btn" onclick="runSkill('${s.name}')">Configure</button><span class="skill-note">Requires a ${s.needsConnection} connection</span>`
+      : `<button class="skill-btn ${installed ? 'installed' : ''}" onclick="runSkill('${s.name}')">${installed ? 'Installed ✓' : 'Install'}</button>`;
+    return `<div class="skill-card">
+      <span class="skill-ico">✦</span>
+      <span class="skill-name">${escHtml(s.name)}</span>
+      <span class="skill-desc">${escHtml(s.desc)}</span>
+      <span style="display:flex;gap:8px;align-items:center;">${btn}</span>
+    </div>`;
+  }).join('');
+}
+
+async function setSkillInstalled(name, installed) {
+  await rb.skills.set(name, installed);
+  state.skillsInstalled[name] = !!installed;
+  renderSkillsGrid();
+}
+
+function openSkillsModal() {
+  const rows = SKILLS.map(s => {
+    const installed = !!state.skillsInstalled[s.name];
+    const action = s.needsConnection
+      ? `<button class="btn btn-secondary" onclick="closeSubModal(); showConnections();">Configure</button>`
+      : `<button class="btn ${installed ? 'btn-danger' : 'btn-teal'}" onclick="toggleSkillFromModal('${s.name}', ${installed ? 'false' : 'true'})">${installed ? 'Uninstall' : 'Install'}</button>`;
+    return `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);">
+      <span style="color:var(--teal);">✦</span>
+      <span style="flex:1;min-width:0;"><span style="font-family:var(--mono);font-weight:700;">${escHtml(s.name)}</span><br>
+      <span style="color:var(--text2);font-size:12px;">${escHtml(s.desc)}${s.needsConnection ? ' — requires a ' + s.needsConnection + ' connection.' : ''}</span></span>
+      ${action}
+    </div>`;
+  }).join('');
+  openSubModal(`
+    <h2>Manage Skills</h2>
+    <div style="max-height:60vh;overflow-y:auto;padding-right:4px;">${rows}</div>
+    <div class="sub-modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()">Close</button>
+    </div>
+  `);
+}
+
+async function toggleSkillFromModal(name, installed) {
+  await setSkillInstalled(name, installed);
+  openSkillsModal();
+}
+
+async function runSkill(name) {
+  const skill = SKILLS.find(s => s.name === name);
+  if (!skill) return;
+  if (skill.needsConnection) { showConnections(); return; }
+  if (skill.action === 'documentProject') return skillDocumentProject();
+  if (skill.action === 'prototypeThis') return skillPrototypeThis();
+  if (skill.action === 'convertToUiToolkit') return skillConvertToUiToolkit();
+  if (skill.action === 'auditProjectStructure') return skillAuditProjectStructure();
+}
+
+async function startSkillChat(threadName, prompt, mode) {
+  if (mode) setChatMode(mode);
+  const id = parseInt(await rb.db.insert('threads', { name: threadName, project_id: state.activeProjectId }), 10);
+  await loadThread(id);
+  await refreshSidebar();
+  const input = document.getElementById('chat-input');
+  if (input) input.value = prompt;
+  await sendChat();
+}
+
+async function skillDocumentProject() {
+  await setSkillInstalled('/document-project', true);
+  const scan = await rb.project.scan(state.projectPath);
+  if (scan.ok) state.projectScan = scan;
+  const pageId = await rb.db.insert('pages', {
+    name: 'Game Design Document',
+    content: 'Game Design Document — draft in progress. See the "Game Design Document" conversation for the model draft.',
+    project_id: state.activeProjectId,
+  });
+  await refreshSidebar();
+  window._gddPageId = Number(pageId);
+  window._saveGddAsReference = true;
+  const summary = projectScanSummary();
+  await startSkillChat('Game Design Document',
+    'Draft a Game Design Document for this project' + (summary ? ' using the project scan below' : '') + '.\n\n' +
+    (summary ? 'Project scan:\n' + summary + '\n\n' : '') +
+    'Structure it as: Overview, Pillars, Core loop, Systems, Progression, Art and audio direction, Scope and milestones. ' +
+    'Base everything on the scan — do not invent features, files, or assets that are not in the project.',
+    'agent');
+}
+
+async function skillPrototypeThis() {
+  await setSkillInstalled('/prototype-this', true);
+  const template = `# Prototype: New gameplay feature
+
+## Goal
+(One sentence: what should the player feel or do?)
+
+## Files to touch
+FILE: Assets/Scripts/
+
+## Steps
+1. Describe the first step
+2. Describe the next step
+3. How to test it in the editor
+`;
+  const id = await rb.db.insert('plans', { name: 'Prototype: New gameplay feature', content: template, project_id: state.activeProjectId });
+  await refreshSidebar();
+  await loadItem('plans', id);
+  editPlan();
+  showToast('Prototype plan created — fill in the goal and steps, then save');
+}
+
+async function skillConvertToUiToolkit() {
+  await setSkillInstalled('/convert-to-ui-toolkit', true);
+  const file = state.activeFilePath ? state.activeFilePath.split(/[\\/]/).pop() : null;
+  const summary = projectScanSummary();
+  await startSkillChat('Convert to UI Toolkit',
+    'Plan the migration of this project\'s UGUI Canvas UI to Unity UI Toolkit.' +
+    (file ? ' Start with the file currently open in the viewer: ' + file + '.' : ' Start with the UI scripts found in the project scan.') +
+    (summary ? '\n\nProject scan:\n' + summary : '') +
+    '\n\nOutput: 1) which UGUI components map to which UI Toolkit elements, 2) a step-by-step migration plan with FILE: lines, 3) the converted code for the first screen, one file per fenced block with **File Path:**. Do not invent UI files that are not in the scan.',
+    'agent');
+}
+
+async function skillAuditProjectStructure() {
+  await setSkillInstalled('/audit-project-structure', true);
+  showToast('Scanning project…');
+  const scan = await rb.project.scan(state.projectPath);
+  if (!scan.ok) { showToast('⚠ ' + scan.error); return; }
+  state.projectScan = scan;
+  window._saveAuditAsReference = true;
+  await startSkillChat('Project structure audit',
+    'Audit this project\'s folder structure and naming using the scan below. Report: 1) folders that break the project\'s own conventions, 2) misnamed or misplaced scripts and assets, 3) empty or dead folders, 4) a concrete cleanup list with exact moves (old path → new path). Do not invent files that are not in the scan.\n\nProject scan:\n' + projectScanSummary(),
+    'agent');
+}
+
+// ── Connections view ──────────────────────────────────────────────
+async function renderConnectionsView() {
+  const el = document.getElementById('connections-mode');
+  if (!el) return;
+  el.innerHTML = `
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:4px;">Connections</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px;">Local integrations for this project. Nothing here phones home — tokens are stored locally on this machine.</p>
+    <div id="connections-list"><div style="color:var(--text3);font-size:12px;">Checking statuses…</div></div>`;
+  const list = document.getElementById('connections-list');
+  if (!list) return;
+
+  const [llmStatus, ollamaStatus, bridgeExists, figmaToken, jiraToken, jiraUrl] = await Promise.all([
+    rb.llm.status().catch(() => ({ running: false })),
+    rb.ollama.status().catch(() => ({ running: false })),
+    state.projectPath ? rb.fs.exists(state.projectPath + '/Assets/Editor/CodeFoxBridge.cs') : Promise.resolve(false),
+    rb.db.getSetting('figma_token'),
+    rb.db.getSetting('jira_token'),
+    rb.db.getSetting('jira_url'),
+  ]);
+  const lmRunning = llmStatus.provider !== 'ollama' && llmStatus.running;
+  const rows = [
+    {
+      ico: '⬢', name: 'LM Studio',
+      status: lmRunning ? 'Connected — ' + (llmStatus.modelsAvailable ?? 0) + ' model(s) available' : 'Not reachable at ' + (llmStatus.url || state.lmstudioUrl),
+      connected: lmRunning,
+      action: '<button class="btn btn-secondary" onclick="openSettings()">Configure</button>',
+    },
+    {
+      ico: '◉', name: 'Ollama',
+      status: ollamaStatus.running ? 'Running' : 'Not running',
+      connected: !!ollamaStatus.running,
+      action: '<button class="btn btn-secondary" onclick="openSettings()">Configure</button>',
+    },
+    {
+      ico: '⬡', name: 'Unity Bridge',
+      status: bridgeExists ? 'Installed in Assets/Editor/CodeFoxBridge.cs' : 'Not installed in this project',
+      connected: bridgeExists,
+      action: bridgeExists
+        ? '<button class="btn btn-secondary" disabled>Installed ✓</button>'
+        : '<button class="btn btn-teal" onclick="installUnityBridge()">Install bridge</button>',
+    },
+    {
+      ico: '◆', name: 'Figma',
+      status: figmaToken ? 'Token saved locally' : 'Not connected — needs a token',
+      connected: !!figmaToken,
+      action: '<button class="btn btn-secondary" onclick="openFigmaModal()">Configure</button>',
+    },
+    {
+      ico: '▤', name: 'Jira',
+      status: jiraToken ? 'Token saved locally' + (jiraUrl ? ' — ' + jiraUrl : '') : 'Not connected — needs a token and site URL',
+      connected: !!jiraToken,
+      action: '<button class="btn btn-secondary" onclick="openJiraModal()">Configure</button>',
+    },
+    {
+      ico: '⌘', name: 'GitHub',
+      status: 'Managed in Muse, not in CodeFox',
+      connected: false,
+      action: '',
+    },
+  ];
+  list.innerHTML = rows.map(r => `
+    <div class="conn-row">
+      <span class="conn-ico">${r.ico}</span>
+      <span class="conn-row-info"><span class="conn-name">${escHtml(r.name)}</span><br>
+      <span class="conn-status ${r.connected ? 'connected' : ''}">${escHtml(r.status)}</span></span>
+      ${r.action}
+    </div>`).join('');
+}
+
+async function installUnityBridge() {
+  showToast('Installing Unity bridge…');
+  const res = await rb.unity.installBridge(state.projectPath);
+  if (res.ok) {
+    showToast('✓ Bridge installed in Assets/Editor/CodeFoxBridge.cs');
+    renderConnectionsView();
+  } else {
+    showToast('⚠ ' + res.error);
+  }
+}
+
+function openFigmaModal() {
+  openSubModal(`
+    <h2>Figma connection</h2>
+    <label class="field-label">Personal access token
+      <input id="figma-token" type="password" placeholder="Paste a Figma personal access token" />
+      <span class="field-note">Stored locally, used only for Figma imports. CodeFox does not have a Figma import yet — this saves the token so the import can use it when it lands.</span>
+    </label>
+    <div class="sub-modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveFigmaToken()">Save token</button>
+    </div>
+  `);
+}
+
+async function saveFigmaToken() {
+  const token = document.getElementById('figma-token')?.value?.trim() || '';
+  await rb.db.setSetting('figma_token', token);
+  closeSubModal();
+  showToast(token ? '✓ Figma token saved locally' : 'Figma token cleared');
+  if (state.mode === 'connections') renderConnectionsView();
+}
+
+function openJiraModal() {
+  openSubModal(`
+    <h2>Jira connection</h2>
+    <label class="field-label">Jira site URL
+      <input id="jira-url" placeholder="https://your-team.atlassian.net" />
+    </label>
+    <label class="field-label">API token
+      <input id="jira-token" type="password" placeholder="Paste a Jira API token" />
+      <span class="field-note">Stored locally, used only for Jira ticket imports. CodeFox does not have a Jira import yet — this saves the token and URL so the import can use them when it lands.</span>
+    </label>
+    <div class="sub-modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveJiraToken()">Save</button>
+    </div>
+  `);
+}
+
+async function saveJiraToken() {
+  const token = document.getElementById('jira-token')?.value?.trim() || '';
+  const url = document.getElementById('jira-url')?.value?.trim() || '';
+  await rb.db.setSetting('jira_token', token);
+  await rb.db.setSetting('jira_url', url);
+  closeSubModal();
+  showToast(token ? '✓ Jira credentials saved locally' : 'Jira credentials cleared');
+  if (state.mode === 'connections') renderConnectionsView();
+}
+
+// ── Home build panel ──────────────────────────────────────────────
+function setHomePrompt(kind) {
+  const composer = document.getElementById('home-composer');
+  if (!composer) return;
+  if (kind === 'debug') {
+    setChatMode('agent');
+    composer.value = 'Debug this issue: ';
+  } else if (kind === 'tool') {
+    setChatMode('agent');
+    composer.value = 'Build an editor tool that ';
+  } else {
+    setChatMode('agent');
+    composer.value = 'Write a script that ';
+  }
+  composer.focus();
+  autoResize(composer);
+}
+
+function homeComposerKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendHomeComposer(); }
+}
+
+function mentionActiveFile() {
+  const composer = document.getElementById('home-composer');
+  if (!composer) return;
+  if (!state.activeFilePath) { showToast('Open a file in the viewer first to mention it'); return; }
+  const name = state.activeFilePath.split(/[\\/]/).pop();
+  state.homeMentionFile = state.activeFilePath;
+  composer.value += '@' + name + ' ';
+  composer.focus();
+  autoResize(composer);
+}
+
+async function sendHomeComposer() {
+  const composer = document.getElementById('home-composer');
+  if (!composer) return;
+  const text = composer.value.trim();
+  if (!text) return;
+  composer.value = '';
+  autoResize(composer);
+  await sendHomePrompt(text);
+}
+
+async function sendHomePrompt(text) {
+  // Expand an @-mention of the open file into its contents.
+  let finalText = text;
+  if (state.homeMentionFile) {
+    const name = state.homeMentionFile.split(/[\\/]/).pop();
+    if (text.includes('@' + name)) {
+      const result = await rb.fs.readFile(state.homeMentionFile);
+      if (result.ok) {
+        finalText = text.replace('@' + name, 'the file ' + name + ':\n```\n' + result.content + '\n```');
+      }
+    }
+    state.homeMentionFile = null;
+  }
+  const name = finalText.slice(0, 40).trim() + (finalText.length > 40 ? '…' : '');
+  const id = parseInt(await rb.db.insert('threads', { name: name || 'New conversation', project_id: state.activeProjectId }), 10);
+  await loadThread(id);
+  await refreshSidebar();
+  const input = document.getElementById('chat-input');
+  if (input) input.value = finalText;
+  await sendChat();
 }
 
 // ── Start ─────────────────────────────────────────────────────────
