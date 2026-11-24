@@ -1,3 +1,9 @@
+// Defaults for the Settings > Advanced lists (v0.4.0). The same lists
+// are seeded into the settings table in main.js for fresh and existing
+// databases; these copies are the fallback when a setting is missing.
+const DEFAULT_SHELL_AUTO_APPROVE = ['git status', 'git diff', 'npm test', 'npm run test', 'dotnet build', 'dotnet test'];
+const DEFAULT_EXCLUDED_FILE_TYPES = ['meta', 'mat', 'anim', 'controller', 'overrideController', 'physicMaterial', 'physicsMaterial2D', 'renderTexture', 'cubemap', 'flare', 'guiskin', 'avatarMask', 'terrainlayer', 'preset', 'playable', 'spriteatlas', 'scenetemplate', 'shadervariants', 'lighting', 'png', 'jpg', 'asset', 'package-lock.json'];
+
 // ── State ────────────────────────────────────────────────────────
 let state = {
   mode: 'home',          // 'home' | 'chat' | 'ruleset' | 'plan' | 'page' | 'connections' | 'references'
@@ -31,6 +37,17 @@ let state = {
   chatMode: 'agent',     // 'ask' | 'plan' | 'agent'
   projectScan: null,     // cached result of project:scan
   autoAccept: false,
+  // Settings (v0.4.0) — loaded from the settings table in init().
+  settingsSection: 'model',
+  shellEnabled: false,
+  shellAutoMode: false,
+  autoAcceptChanges: false,
+  shellAutoApprove: [],
+  excludedFileTypes: [],
+  rulesCharBudget: 4000,
+  useCondensedRules: false,
+  condensedRules: '',
+  mcpServers: [],
 };
 
 // ── LLM management (LM Studio default, Ollama supported) ─────────
@@ -202,6 +219,21 @@ async function init() {
   state.maxTokens = parseInt(await rb.db.getSetting('llm_max_tokens') || '4096', 10) || 4096;
   state.unityExePath = await rb.db.getSetting('unity_exe_path') || '';
   state.chatMode = await rb.db.getSetting('chat_mode') || 'agent';
+  state.shellEnabled = (await rb.db.getSetting('shell_enabled') || '0') === '1';
+  state.shellAutoMode = (await rb.db.getSetting('shell_auto_mode') || '0') === '1';
+  state.autoAcceptChanges = (await rb.db.getSetting('auto_accept_changes') || '0') === '1';
+  try { state.shellAutoApprove = JSON.parse(await rb.db.getSetting('shell_auto_approve') || 'null') || DEFAULT_SHELL_AUTO_APPROVE.slice(); }
+  catch { state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice(); }
+  if (!Array.isArray(state.shellAutoApprove)) state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice();
+  try { state.excludedFileTypes = JSON.parse(await rb.db.getSetting('excluded_file_types') || 'null') || DEFAULT_EXCLUDED_FILE_TYPES.slice(); }
+  catch { state.excludedFileTypes = DEFAULT_EXCLUDED_FILE_TYPES.slice(); }
+  if (!Array.isArray(state.excludedFileTypes)) state.excludedFileTypes = DEFAULT_EXCLUDED_FILE_TYPES.slice();
+  state.rulesCharBudget = parseInt(await rb.db.getSetting('rules_char_budget') || '4000', 10) || 4000;
+  state.useCondensedRules = (await rb.db.getSetting('use_condensed_rules') || '0') === '1';
+  state.condensedRules = await rb.db.getSetting('condensed_rules') || '';
+  try { state.mcpServers = JSON.parse(await rb.db.getSetting('mcp_servers') || '[]'); }
+  catch { state.mcpServers = []; }
+  if (!Array.isArray(state.mcpServers)) state.mcpServers = [];
   try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
   catch { state.localFolders = []; }
   if (!Array.isArray(state.localFolders)) state.localFolders = [];
@@ -363,10 +395,10 @@ function renderReferencesList(pages, plans) {
 // ── Mode switching ────────────────────────────────────────────────
 function setMode(mode, title, badgeClass) {
   state.mode = mode;
-  const badgeLabels = { chat: 'Chat', ruleset: 'Ruleset', plan: 'Plan', page: 'Reference', home: 'Home', connections: 'Connections', references: 'References' };
+  const badgeLabels = { chat: 'Chat', ruleset: 'Ruleset', plan: 'Plan', page: 'Reference', home: 'Home', connections: 'Connections', references: 'References', settings: 'Settings' };
   const badge = document.getElementById('center-mode-badge');
   badge.textContent = badgeLabels[mode] || (mode.charAt(0).toUpperCase() + mode.slice(1));
-  badge.className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : mode === 'home' ? 'home' : mode === 'connections' ? 'connections' : mode === 'references' ? 'references' : 'ruleset');
+  badge.className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : mode === 'home' ? 'home' : mode === 'connections' ? 'connections' : mode === 'references' ? 'references' : mode === 'settings' ? 'settings' : 'ruleset');
   document.getElementById('center-title').textContent = title;
   const topTitle = document.getElementById('topbar-title');
   if (topTitle) topTitle.textContent = mode === 'home' ? 'Home' : title;
@@ -374,7 +406,7 @@ function setMode(mode, title, badgeClass) {
   // Centre header is hidden on Home (the hero carries the project name).
   document.getElementById('center-header').classList.toggle('hidden', mode === 'home');
 
-  const panes = { chat: 'chat-mode', ruleset: 'editor-mode', page: 'editor-mode', plan: 'plan-mode', home: 'home-mode', connections: 'connections-mode', references: 'references-mode' };
+  const panes = { chat: 'chat-mode', ruleset: 'editor-mode', page: 'editor-mode', plan: 'plan-mode', home: 'home-mode', connections: 'connections-mode', references: 'references-mode', settings: 'settings-mode' };
   for (const id of new Set(Object.values(panes))) {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', panes[mode] !== id);
@@ -389,10 +421,16 @@ function setMode(mode, title, badgeClass) {
   document.getElementById('nav-conversations')?.classList.toggle('active', mode === 'home' || mode === 'chat');
   document.getElementById('nav-references')?.classList.toggle('active', mode === 'references' || mode === 'page' || mode === 'plan');
   document.getElementById('nav-connections')?.classList.toggle('active', mode === 'connections');
+  document.getElementById('nav-settings')?.classList.toggle('active', mode === 'settings');
+
+  // Settings has its own Save button; clear any actions left over from
+  // the editor / plan views.
+  if (mode === 'settings') document.getElementById('center-actions').innerHTML = '';
 
   if (mode === 'home') renderHome();
   if (mode === 'connections') renderConnectionsView();
   if (mode === 'references') renderReferencesView();
+  if (mode === 'settings') renderSettingsView();
 }
 
 // ── Load items from sidebar ───────────────────────────────────────
@@ -601,6 +639,9 @@ async function sendChat() {
     // Parse response for file changes and show apply bar if any found
     const changes = extractFileChanges(assistantContent);
     if (changes.length) showApplyBar(changes);
+    // Shell blocks in the reply: auto-run only when auto-approved,
+    // otherwise offer a Run button. Never runs when the shell is off.
+    handleShellBlocks(assistantContent);
   });
 
   try {
@@ -629,10 +670,39 @@ function buildSystemPrompt(rulesets) {
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
   const scan = projectScanSummary();
   if (scan) prompt += '## Project context (from a scan of the project folder)\n\n' + scan + '\n\n';
-  if (rulesets.length) {
-    prompt += '## Project Rules\n\n';
-    rulesets.forEach(r => { prompt += '### ' + r.name + '\n' + r.content + '\n\n'; });
+  // Rules budget (Settings > Rules): enabled rulesets only, highest
+  // priority first, whole rulesets only — never cut one off mid-way.
+  const budget = state.rulesCharBudget || 4000;
+  const enabled = (rulesets || []).filter(r => r.enabled == null || Number(r.enabled) !== 0);
+  enabled.sort((a, b) => (Number(b.priority || 0) - Number(a.priority || 0)) || (Number(b.id || 0) - Number(a.id || 0)));
+  const totalChars = enabled.reduce((n, r) => n + (r.content || '').length, 0);
+  const included = [];
+  const leftOut = [];
+  let usedChars = 0;
+  if (enabled.length) {
+    if (totalChars > budget && state.useCondensedRules && state.condensedRules) {
+      // Over budget and the user asked for condensed rules: send the
+      // condensed version instead of dropping rules silently.
+      prompt += '## Project Rules (condensed — the full rules exceeded the ' + budget + '-character budget)\n\n' + state.condensedRules + '\n\n';
+      included.push('Condensed rules');
+      usedChars = state.condensedRules.length;
+      enabled.forEach(r => leftOut.push(r.name));
+    } else {
+      for (const r of enabled) {
+        const len = (r.content || '').length;
+        if (usedChars + len <= budget) { included.push(r.name); usedChars += len; }
+        else leftOut.push(r.name);
+      }
+      if (included.length) {
+        prompt += '## Project Rules\n\n';
+        for (const r of enabled) {
+          if (included.includes(r.name)) prompt += '### ' + r.name + '\n' + r.content + '\n\n';
+        }
+      }
+    }
   }
+  // What actually went out — the Rules section shows this back.
+  window._lastRulesIncluded = { included, leftOut, chars: usedChars };
   if (state.chatMode === 'ask') {
     prompt += '## Mode: Ask\nAnswer and explain only. Do not propose file writes, do not output code blocks meant to be applied, and do not change any files.\n';
   } else if (state.chatMode === 'plan') {
@@ -852,12 +922,24 @@ async function sendPageToChat() {
 // ── File search ───────────────────────────────────────────────────
 let allFiles = []; // flat list of all file paths, built on load
 
+// Same match as main.js isExcludedFile: an entry matches a file name
+// exactly (e.g. package-lock.json) or as its extension (e.g. .meta).
+function isExcludedFileName(name) {
+  const lower = String(name || '').toLowerCase();
+  for (const entry of state.excludedFileTypes || []) {
+    const e = String(entry).toLowerCase();
+    if (!e) continue;
+    if (lower === e || lower.endsWith('.' + e)) return true;
+  }
+  return false;
+}
+
 async function buildFileIndex(dirPath) {
   const items = await rb.fs.readDir(dirPath);
   for (const item of items) {
     if (item.isDir) {
       await buildFileIndex(item.path);
-    } else {
+    } else if (!isExcludedFileName(item.name)) {
       allFiles.push({ name: item.name, path: item.path });
     }
   }
@@ -877,7 +959,7 @@ function searchFiles(query) {
   treeEl.style.display = 'none';
   resultsEl.style.display = 'block';
 
-  const matches = allFiles.filter(f => f.name.toLowerCase().includes(q)).slice(0, 50);
+  const matches = allFiles.filter(f => !isExcludedFileName(f.name) && f.name.toLowerCase().includes(q)).slice(0, 50);
 
   if (!matches.length) {
     resultsEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:12px;">No files found</div>';
@@ -1082,92 +1164,140 @@ async function renameThread() {
   };
 }
 
-// ── Settings ──────────────────────────────────────────────────────
-function openSettings() {
-  const overlay = document.getElementById('modal-overlay');
-  const modal = document.getElementById('modal');
-  const isLm = state.provider === 'lmstudio';
-  const inp = (id, val, ph) => `<input id="${id}" value="${escHtml(val || '')}" placeholder="${ph || ''}" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />`;
+// ── Settings (full window, v0.4.0) ──────────────────────────────
+// Settings is a centre view (mode 'settings'), not a popup modal.
+// The left sidebar stays visible; the view has its own sub-nav:
+// Model / Connections / MCPs / Rules / Advanced. There is deliberately
+// no account, subscription, or multi-user section — CodeFox is a
+// single-user local app.
 
-  modal.innerHTML = `
-    <h2>Settings</h2>
-    <div style="display:flex;flex-direction:column;gap:14px;max-height:70vh;overflow-y:auto;padding-right:4px;">
-      <label style="color:var(--text2);font-size:12px;">LLM provider
-        <select id="s-provider" onchange="onProviderChange()" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;">
+function showSettings(section) {
+  if (section) state.settingsSection = section;
+  setMode('settings', 'Settings');
+}
+
+function setSettingsSection(section) {
+  state.settingsSection = section;
+  renderSettingsView();
+}
+
+function renderSettingsView() {
+  const el = document.getElementById('settings-mode');
+  if (!el) return;
+  const sections = [
+    { id: 'model', label: 'Model' },
+    { id: 'connections', label: 'Connections' },
+    { id: 'mcps', label: 'MCPs' },
+    { id: 'rules', label: 'Rules' },
+    { id: 'advanced', label: 'Advanced' },
+  ];
+  const meta = {
+    model: ['Model', 'Which local model answers, and how CodeFox reaches it.'],
+    connections: ['Your Connections', 'Local integrations for this project. Nothing here phones home.'],
+    mcps: ['MCPs', 'Connect local MCP servers so the assistant can use their tools. Servers run on this machine; CodeFox never sends your code to them or anywhere else.'],
+    rules: ['Rules', 'Rules are your instructions to the assistant — how CodeFox should write code, what to never do, your architecture contracts. They are the system prompt the model sees.'],
+    advanced: ['Advanced', 'Shell tool, approvals, and which files CodeFox ignores.'],
+  };
+  const sec = state.settingsSection || 'model';
+  el.innerHTML = `
+    <div class="settings-wrap">
+      <div class="settings-subnav">
+        ${sections.map(s2 => `<div class="settings-nav-item ${s2.id === sec ? 'active' : ''}" onclick="setSettingsSection('${s2.id}')">${s2.label}</div>`).join('')}
+      </div>
+      <div class="settings-pane">
+        <h2 class="settings-heading">${meta[sec][0]}</h2>
+        <p class="settings-desc">${meta[sec][1]}</p>
+        <div id="settings-pane-body"></div>
+      </div>
+    </div>`;
+  renderSettingsPane();
+}
+
+function renderSettingsPane() {
+  const body = document.getElementById('settings-pane-body');
+  if (!body) return;
+  const sec = state.settingsSection || 'model';
+  if (sec === 'model') renderModelPane(body);
+  else if (sec === 'connections') renderConnectionsPane(body);
+  else if (sec === 'mcps') renderMcpsPane(body);
+  else if (sec === 'rules') renderRulesPane(body);
+  else if (sec === 'advanced') renderAdvancedPane(body);
+}
+
+// ── Model section (the old popup's contents, moved into the window)
+function renderModelPane(body) {
+  const isLm = state.provider === 'lmstudio';
+  const inp = (id, val, ph) => `<input id="${id}" value="${escHtml(val || '')}" placeholder="${ph || ''}" />`;
+  body.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <label class="field-label">LLM provider
+        <select id="s-provider" onchange="onProviderChange()">
           <option value="lmstudio" ${isLm ? 'selected' : ''}>LM Studio (default)</option>
           <option value="ollama" ${!isLm ? 'selected' : ''}>Ollama</option>
         </select>
       </label>
 
       <div id="s-lm-section" style="display:${isLm ? 'flex' : 'none'};flex-direction:column;gap:12px;">
-        <label style="color:var(--text2);font-size:12px;">LM Studio server URL
+        <label class="field-label">LM Studio server URL
           ${inp('s-lm-url', state.lmstudioUrl, 'http://localhost:1234/v1')}
-          <span style="color:var(--text3);font-size:11px;">Default: http://localhost:1234/v1 — start the local server in LM Studio first. A trailing /chat/completions is stripped automatically.</span>
+          <span class="field-note">Default: http://localhost:1234/v1 — start the local server in LM Studio first. A trailing /chat/completions is stripped automatically.</span>
         </label>
         <div style="display:flex;gap:8px;align-items:center;">
           <button class="btn btn-secondary" onclick="verifyLmStudio()">Verify connection</button>
           <button class="btn btn-secondary" onclick="refreshModels().then(r => { const el = document.getElementById('s-lm-status'); if (el && r.ok) { el.style.color = 'var(--green)'; el.textContent = '✓ ' + r.models.length + ' model(s) found.'; } })">Refresh models</button>
         </div>
         <div id="s-lm-status" style="font-size:12px;color:var(--text3);">Not verified yet — click Verify connection.</div>
-        <label style="color:var(--text2);font-size:12px;">Model (from the live server list)
-          <select id="s-lm-model" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;">
+        <label class="field-label">Model (from the live server list)
+          <select id="s-lm-model">
             <option value="">— Select a model —</option>
           </select>
         </label>
-        <label style="color:var(--text2);font-size:12px;">API key (optional — LM Studio needs none by default)
-          <input id="s-lm-key" type="password" value="${escHtml(state.lmstudioApiKey || '')}" placeholder="Leave blank unless your server requires one"
-            style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+        <label class="field-label">API key (optional — LM Studio needs none by default)
+          <input id="s-lm-key" type="password" value="${escHtml(state.lmstudioApiKey || '')}" placeholder="Leave blank unless your server requires one" />
         </label>
       </div>
 
       <div id="s-ollama-section" style="display:${!isLm ? 'flex' : 'none'};flex-direction:column;gap:12px;">
-        <label style="color:var(--text2);font-size:12px;">Ollama URL
+        <label class="field-label">Ollama URL
           ${inp('s-url', state.ollamaUrl)}
         </label>
-        <label style="color:var(--text2);font-size:12px;">Ollama model name
+        <label class="field-label">Ollama model name
           ${inp('s-model', state.ollamaModel)}
         </label>
-        <label style="color:var(--text2);font-size:12px;">
-          Ollama executable path
-          <span style="color:var(--text3);font-size:11px;margin-left:6px;">leave blank to auto-detect</span>
-          <div style="display:flex;gap:6px;margin-top:4px;">
-            <input id="s-exe" value="${escHtml(state.ollamaExePath || '')}" placeholder="C:\\...\\ollama.exe"
-              style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+        <label class="field-label">Ollama executable path
+          <span class="field-note">Leave blank to auto-detect</span>
+          <div style="display:flex;gap:6px;">
+            <input id="s-exe" value="${escHtml(state.ollamaExePath || '')}" placeholder="C:\\...\\ollama.exe" style="flex:1;" />
             <button class="btn btn-secondary" onclick="browseOllamaExe()" style="flex-shrink:0;">Browse</button>
           </div>
           <div id="s-exe-detected" style="margin-top:4px;font-size:11px;color:var(--text3);"></div>
         </label>
       </div>
 
-      <label style="color:var(--text2);font-size:12px;">Temperature (0 = focused, 1 = creative)
+      <label class="field-label">Temperature (0 = focused, 1 = creative)
         ${inp('s-temp', String(state.temperature), '0.2')}
       </label>
-      <label style="color:var(--text2);font-size:12px;">Max tokens per reply
+      <label class="field-label">Max tokens per reply
         ${inp('s-maxtokens', String(state.maxTokens), '4096')}
       </label>
-      <label style="color:var(--text2);font-size:12px;">Project path
+      <label class="field-label">Project path
         ${inp('s-path', state.projectPath)}
       </label>
-      <label style="color:var(--text2);font-size:12px;">Project context
-        <input id="s-ctx" value="${escHtml(state.projectContext || '')}" placeholder="e.g. a Unity 6 card game"
-          style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+      <label class="field-label">Project context
+        <input id="s-ctx" value="${escHtml(state.projectContext || '')}" placeholder="e.g. a Unity 6 card game" />
       </label>
-      <label style="color:var(--text2);font-size:12px;">
-        Unity Editor executable path
-        <span style="color:var(--text3);font-size:11px;margin-left:6px;">needed for Run tests</span>
-        <div style="display:flex;gap:6px;margin-top:4px;">
-          <input id="s-unity-exe" value="${escHtml(state.unityExePath || '')}" placeholder="C:\\Program Files\\Unity\\Hub\\Editor\\...\\Unity.exe"
-            style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+      <label class="field-label">Unity Editor executable path
+        <span class="field-note">Needed for Run tests</span>
+        <div style="display:flex;gap:6px;">
+          <input id="s-unity-exe" value="${escHtml(state.unityExePath || '')}" placeholder="C:\\Program Files\\Unity\\Hub\\Editor\\...\\Unity.exe" style="flex:1;" />
           <button class="btn btn-secondary" onclick="browseUnityExe()" style="flex-shrink:0;">Browse</button>
         </div>
       </label>
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-      <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveSettings()">Save</button>
-    </div>
-  `;
-  overlay.classList.add('open');
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+      </div>
+      <p class="settings-note">Settings save without losing the current thread — no reload.</p>
+    </div>`;
   updateModelDropdown();
   // Try to populate the model list right away if LM Studio is up.
   if (isLm) refreshModels();
@@ -1182,23 +1312,6 @@ function onProviderChange() {
   document.getElementById('s-lm-section').style.display = provider === 'lmstudio' ? 'flex' : 'none';
   document.getElementById('s-ollama-section').style.display = provider === 'ollama' ? 'flex' : 'none';
   if (provider === 'lmstudio') refreshModels();
-}
-
-function closeSettings() {
-  // Restore the generic modal content so newItem/newThread still work.
-  document.getElementById('modal-overlay').classList.remove('open');
-  document.getElementById('modal').innerHTML = `
-    <h2 id="modal-title">New item</h2>
-    <input id="modal-name" placeholder="Name..." />
-    <div id="modal-actions">
-      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="confirmModal()">Create</button>
-    </div>
-  `;
-  document.getElementById('modal-name').addEventListener('keydown', e => {
-    if (e.key === 'Enter') confirmModal();
-    if (e.key === 'Escape') closeModal();
-  });
 }
 
 async function browseOllamaExe() {
@@ -1262,13 +1375,596 @@ async function saveSettings() {
   const unityExe = document.getElementById('s-unity-exe')?.value?.trim() || '';
   state.unityExePath = unityExe;
   await rb.db.setSetting('unity_exe_path', unityExe);
-  closeSettings();
   // Re-init the LLM connection without losing the thread (no reload).
   setProjectPathLabels();
   if (state.mode === 'home') renderHome();
+  if (state.mode === 'settings') renderSettingsView();
   await initLLM();
   showToast('✓ Settings saved');
 }
+
+// ── Connections section ───────────────────────────────────────────
+function renderConnectionsPane(body) {
+  const filter = window._connFilter || 'all';
+  const tab = (id, label) => `<button class="chip-tab ${filter === id ? 'active' : ''}" onclick="setConnFilter('${id}')">${label}</button>`;
+  body.innerHTML = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+      ${tab('all', 'All')}${tab('unity', 'Unity')}${tab('folders', 'Folders')}
+    </div>
+    <div style="display:flex;gap:8px;margin:14px 0;">
+      <button class="btn btn-teal" onclick="addUnityProject()">+ Add Unity project</button>
+      <button class="btn btn-secondary" onclick="addLocalFolderFromSettings()">+ Add folder</button>
+    </div>
+    <div id="settings-connections-list"><div style="color:var(--text3);font-size:12px;">Checking statuses…</div></div>
+    <button class="btn btn-secondary" onclick="showSettings('mcps')">Manage MCP connections →</button>`;
+  renderSettingsConnections();
+}
+
+function setConnFilter(f) {
+  window._connFilter = f;
+  renderSettingsPane();
+}
+
+async function renderSettingsConnections() {
+  const list = document.getElementById('settings-connections-list');
+  if (!list) return;
+  const filter = window._connFilter || 'all';
+  const proj = state.activeProject;
+  const bridgePath = state.projectPath ? state.projectPath + '/Assets/Editor/CodeFoxBridge.cs' : '';
+  // Status is derived live from whether the bridge file exists — never faked.
+  const bridgeExists = bridgePath ? await rb.fs.exists(bridgePath) : false;
+  const rows = [];
+  if (filter === 'all' || filter === 'unity') {
+    rows.push(`
+    <div class="conn-row">
+      <span class="conn-ico">⬢</span>
+      <span class="conn-row-info"><span class="conn-name">Unity Project — ${escHtml(proj ? proj.name : 'No project')}</span><br>
+      <span class="conn-status ${bridgeExists ? 'connected' : ''}">${bridgeExists ? 'Connected — bridge installed' : 'Not connected — bridge not installed'}</span><br>
+      <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(state.projectPath || 'No folder set')}</span></span>
+      <button class="btn btn-secondary" onclick="updateUnityBridge()" title="Re-install the bridge into Assets/Editor/">Update plugin</button>
+      <label class="switch" title="${bridgeExists ? 'Disable the bridge (removes it from the project)' : 'Enable the bridge (installs it into the project)'}"><input type="checkbox" ${bridgeExists ? 'checked' : ''} onchange="toggleUnityBridge(this.checked)"><span class="slider"></span></label>
+      <button class="btn btn-secondary" onclick="toggleConnMenu()">⋯</button>
+    </div>
+    <div id="conn-menu-row" class="hidden" style="margin:-4px 0 10px;text-align:right;">
+      <button class="btn btn-danger" onclick="disconnectUnityBridge()">Disconnect — remove the bridge from this project</button>
+    </div>`);
+  }
+  if (filter === 'all' || filter === 'folders') {
+    state.localFolders.forEach((folder, i) => {
+      const base = folder.split(/[\\/]/).filter(Boolean).pop() || folder;
+      rows.push(`
+      <div class="conn-row">
+        <span class="conn-ico">▣</span>
+        <span class="conn-row-info"><span class="conn-name">${escHtml(base)}</span><br>
+        <span class="conn-status">Local folder</span><br>
+        <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(folder)}</span></span>
+        <button class="btn btn-secondary" onclick="removeLocalFolderByIndex(${i})">Remove</button>
+      </div>`);
+    });
+    if (!state.localFolders.length) {
+      rows.push('<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No local folders yet — add one with “+ Add folder”.</div>');
+    }
+  }
+  list.innerHTML = rows.join('');
+}
+
+function toggleConnMenu() {
+  const row = document.getElementById('conn-menu-row');
+  if (row) row.classList.toggle('hidden');
+}
+
+async function toggleUnityBridge(enabled) {
+  const res = enabled
+    ? await rb.unity.installBridge(state.projectPath)
+    : await rb.unity.removeBridge(state.projectPath);
+  if (res.ok) {
+    showToast(enabled ? '✓ Bridge installed in Assets/Editor/CodeFoxBridge.cs' : '✓ Bridge removed from this project');
+  } else {
+    showToast('⚠ ' + (res.error || 'Bridge change failed'));
+  }
+  await refreshConnectionCards();
+  if (state.mode === 'settings') renderSettingsView();
+}
+
+async function disconnectUnityBridge() {
+  await toggleUnityBridge(false);
+}
+
+async function updateUnityBridge() {
+  await toggleUnityBridge(true);
+}
+
+async function addUnityProject() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  if (state.activeProjectId != null) {
+    await rb.project.update(state.activeProjectId, { path: folder });
+    state.activeProject = { ...state.activeProject, path: folder };
+  }
+  state.projectPath = folder;
+  setProjectPathLabels();
+  document.getElementById('file-tree').innerHTML = '';
+  allFiles = [];
+  await loadFileTree(folder, document.getElementById('file-tree'), 0);
+  buildFileIndex(folder);
+  showToast('✓ Unity project folder set');
+  await refreshConnectionCards();
+  if (state.mode === 'settings') renderSettingsView();
+}
+
+async function addLocalFolderFromSettings() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  if (!state.localFolders.includes(folder)) {
+    state.localFolders.push(folder);
+    await rb.db.setSetting('local_folders', JSON.stringify(state.localFolders));
+  }
+  showToast('✓ Folder added — ' + state.localFolders.length + ' connected.');
+  await refreshConnectionCards();
+  renderSettingsView();
+}
+
+async function removeLocalFolderByIndex(i) {
+  state.localFolders.splice(i, 1);
+  await rb.db.setSetting('local_folders', JSON.stringify(state.localFolders));
+  await refreshConnectionCards();
+  renderSettingsView();
+}
+
+// ── MCPs section ──────────────────────────────────────────────────
+// Configuration + storage only. The assistant does not call MCP tools
+// yet — that wiring is the next step, and these settings are stored so
+// it can be added without reconfiguring. Nothing here is a cloud
+// marketplace or a one-click install: servers run on this machine.
+function renderMcpsPane(body) {
+  body.innerHTML = `
+    <p class="settings-note">MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring.</p>
+    <div id="mcp-list"></div>
+    <button class="btn btn-teal" onclick="showMcpForm()">+ Add MCP server</button>
+    <div id="mcp-form"></div>`;
+  renderMcpList();
+  renderMcpForm();
+}
+
+function renderMcpList() {
+  const el = document.getElementById('mcp-list');
+  if (!el) return;
+  if (!state.mcpServers.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No MCP servers configured yet.</div>';
+    return;
+  }
+  el.innerHTML = state.mcpServers.map(s2 => `
+    <div class="conn-row">
+      <span class="conn-ico">▣</span>
+      <span class="conn-row-info"><span class="conn-name">${escHtml(s2.name)}</span><br>
+      <span class="conn-status" style="font-family:var(--mono);">${escHtml(s2.command + (s2.args ? ' ' + s2.args : ''))}</span><br>
+      <span style="font-size:11px;color:var(--text3);">${Object.keys(s2.env || {}).length} env var(s)</span></span>
+      <label class="switch" title="Enable this MCP server"><input type="checkbox" ${s2.enabled ? 'checked' : ''} onchange="toggleMcpServer('${s2.id}', this.checked)"><span class="slider"></span></label>
+      <button class="btn btn-secondary" onclick="editMcpServer('${s2.id}')">Edit</button>
+      <button class="btn btn-secondary" onclick="removeMcpServer('${s2.id}')">Remove</button>
+    </div>`).join('');
+}
+
+function mcpId() {
+  return 'mcp_' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+}
+
+async function persistMcpServers() {
+  await rb.db.setSetting('mcp_servers', JSON.stringify(state.mcpServers));
+}
+
+function showMcpForm() {
+  window._mcpEditingId = null;
+  window._mcpFormOpen = true;
+  renderMcpForm();
+}
+
+function editMcpServer(id) {
+  window._mcpEditingId = id;
+  window._mcpFormOpen = true;
+  renderMcpForm();
+}
+
+function cancelMcpForm() {
+  window._mcpFormOpen = false;
+  window._mcpEditingId = null;
+  renderMcpForm();
+}
+
+function renderMcpForm() {
+  const el = document.getElementById('mcp-form');
+  if (!el) return;
+  if (!window._mcpFormOpen) { el.innerHTML = ''; return; }
+  const s2 = window._mcpEditingId ? state.mcpServers.find(x => x.id === window._mcpEditingId) : null;
+  const envText = s2 && s2.env ? Object.entries(s2.env).map(([k, v]) => k + '=' + v).join('\n') : '';
+  el.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:12px;display:flex;flex-direction:column;gap:10px;">
+      <h3 style="font-size:13px;">${s2 ? 'Edit MCP server' : 'Add MCP server'}</h3>
+      <label class="field-label">Name
+        <input id="mcp-name" value="${escHtml(s2 ? s2.name : '')}" placeholder="e.g. filesystem" />
+      </label>
+      <label class="field-label">Command
+        <input id="mcp-command" value="${escHtml(s2 ? s2.command : '')}" placeholder="e.g. npx" />
+      </label>
+      <label class="field-label">Arguments
+        <input id="mcp-args" value="${escHtml(s2 ? (s2.args || '') : '')}" placeholder="e.g. -y @modelcontextprotocol/server-filesystem C:\\projects" />
+      </label>
+      <label class="field-label">Environment variables — one KEY=value per line
+        <textarea id="mcp-env" placeholder="API_KEY=...">${escHtml(envText)}</textarea>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;color:var(--text2);font-size:12px;"><input type="checkbox" id="mcp-enabled" ${!s2 || s2.enabled ? 'checked' : ''} style="width:auto;" /> Enabled</label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn btn-secondary" onclick="cancelMcpForm()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveMcpServer()">Save server</button>
+      </div>
+    </div>`;
+}
+
+async function saveMcpServer() {
+  const name = document.getElementById('mcp-name')?.value?.trim();
+  const command = document.getElementById('mcp-command')?.value?.trim();
+  if (!name || !command) { showToast('Give the MCP server a name and a command'); return; }
+  const args = document.getElementById('mcp-args')?.value?.trim() || '';
+  const envText = document.getElementById('mcp-env')?.value || '';
+  const env = {};
+  envText.split('\n').forEach(line => {
+    const i = line.indexOf('=');
+    if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  const enabled = document.getElementById('mcp-enabled')?.checked !== false;
+  const editingId = window._mcpEditingId;
+  if (editingId) {
+    const s2 = state.mcpServers.find(x => x.id === editingId);
+    if (s2) Object.assign(s2, { name, command, args, env, enabled });
+  } else {
+    state.mcpServers.push({ id: mcpId(), name, command, args, env, enabled });
+  }
+  window._mcpEditingId = null;
+  window._mcpFormOpen = false;
+  await persistMcpServers();
+  renderSettingsView();
+  showToast('✓ MCP server saved');
+}
+
+async function toggleMcpServer(id, enabled) {
+  const s2 = state.mcpServers.find(x => x.id === id);
+  if (!s2) return;
+  s2.enabled = !!enabled;
+  await persistMcpServers();
+}
+
+async function removeMcpServer(id) {
+  state.mcpServers = state.mcpServers.filter(x => x.id !== id);
+  await persistMcpServers();
+  renderSettingsView();
+}
+
+// ── Rules section ─────────────────────────────────────────────────
+function renderRulesPane(body) {
+  const last = window._lastRulesIncluded;
+  const includedLine = last
+    ? `<p class="settings-note">Included in the last message: ${last.included.length ? escHtml(last.included.join(', ')) : 'none'} (${last.chars} characters)${last.leftOut.length ? '<br>Left out this time: ' + escHtml(last.leftOut.join(', ')) : ''}</p>`
+    : '<p class="settings-note">No message sent yet in this session — send a chat message, then come back here to see which rules were included.</p>';
+  body.innerHTML = `
+    <label class="field-label">Prompt budget — max characters of rules sent with each message
+      <div style="display:flex;gap:8px;">
+        <input id="rules-budget" type="number" min="1000" max="12000" step="500" value="${state.rulesCharBudget}" style="flex:1;" />
+        <button class="btn btn-secondary" onclick="saveRulesBudget()" style="flex-shrink:0;">Save budget</button>
+      </div>
+      <span class="field-note">Local models have small memories. CodeFox only sends this many characters of rules with each message — your highest-priority rules first. Anything over the budget is left out of that message, and the list below shows what was included last time.</span>
+    </label>
+    ${includedLine}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0;">
+      <button class="btn btn-secondary" id="condense-btn" onclick="condenseRules()">Condense rules</button>
+      <label style="display:flex;align-items:center;gap:8px;color:var(--text2);font-size:12px;"><input type="checkbox" id="use-condensed" ${state.useCondensedRules ? 'checked' : ''} onchange="toggleUseCondensed(this.checked)" style="width:auto;" /> Use condensed rules when over budget</label>
+    </div>
+    ${state.condensedRules ? `<div class="settings-note-box"><strong>Condensed rules</strong><br>${escHtml(state.condensedRules)}</div>` : ''}
+    <div id="rules-list"><div style="color:var(--text3);font-size:12px;">Loading rulesets…</div></div>`;
+  renderRulesList();
+}
+
+async function renderRulesList() {
+  const el = document.getElementById('rules-list');
+  if (!el) return;
+  const rulesets = await rb.db.getAll('rulesets');
+  const pid = state.activeProjectId;
+  const mine = pid == null ? rulesets : rulesets.filter(r => r.project_id == null || Number(r.project_id) === Number(pid));
+  mine.sort((a, b) => (Number(b.priority || 0) - Number(a.priority || 0)) || (Number(b.id) - Number(a.id)));
+  if (!mine.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;">No rulesets yet — create one from the sidebar.</div>';
+    return;
+  }
+  el.innerHTML = mine.map(r => {
+    const len = (r.content || '').length;
+    const enabled = r.enabled == null || Number(r.enabled) !== 0;
+    return `<div class="conn-row">
+      <span class="conn-row-info"><span class="conn-name">${escHtml(r.name)}</span><br>
+      <span class="conn-status">${len} characters · priority ${Number(r.priority || 0)}</span></span>
+      <button class="btn btn-secondary" onclick="moveRulesetPriority(${r.id}, 1)" title="Send this ruleset sooner">↑</button>
+      <button class="btn btn-secondary" onclick="moveRulesetPriority(${r.id}, -1)" title="Send this ruleset later">↓</button>
+      <label class="switch" title="Include this ruleset in prompts"><input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleRulesetEnabled(${r.id}, this.checked)"><span class="slider"></span></label>
+      <button class="btn btn-secondary" onclick="loadItem('rulesets', ${r.id})">Edit</button>
+    </div>`;
+  }).join('');
+}
+
+async function toggleRulesetEnabled(id, enabled) {
+  await rb.db.update('rulesets', id, { enabled: enabled ? 1 : 0 });
+  await refreshSidebar();
+  renderSettingsView();
+}
+
+async function moveRulesetPriority(id, delta) {
+  const row = await rb.db.get('rulesets', id);
+  if (!row) return;
+  await rb.db.update('rulesets', id, { priority: Number(row.priority || 0) + delta });
+  renderSettingsView();
+}
+
+async function saveRulesBudget() {
+  const raw = parseInt(document.getElementById('rules-budget')?.value, 10);
+  if (isNaN(raw)) { showToast('Enter a number from 1000 to 12000'); return; }
+  const budget = Math.min(12000, Math.max(1000, raw));
+  state.rulesCharBudget = budget;
+  await rb.db.setSetting('rules_char_budget', String(budget));
+  renderSettingsView();
+  showToast('✓ Prompt budget saved: ' + budget + ' characters');
+}
+
+async function toggleUseCondensed(checked) {
+  state.useCondensedRules = !!checked;
+  await rb.db.setSetting('use_condensed_rules', checked ? '1' : '0');
+}
+
+async function condenseRules() {
+  const rulesets = await rb.db.getAll('rulesets');
+  const pid = state.activeProjectId;
+  const enabled = (rulesets || []).filter(r => (r.enabled == null || Number(r.enabled) !== 0) && (pid == null || r.project_id == null || Number(r.project_id) === Number(pid)));
+  if (!enabled.length) { showToast('No enabled rulesets to condense'); return; }
+  const btn = document.getElementById('condense-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Condensing…'; }
+  const full = enabled.map(r => '### ' + r.name + '\n' + r.content).join('\n\n');
+  const prompt = 'Condense these project rules into one short version under 500 characters. Keep every hard constraint, every "never do" rule, and every naming/architecture rule — drop examples and explanations, never drop a constraint.\n\n' + full;
+  let out = '';
+  rb.llm.removeListeners();
+  const done = new Promise((resolve) => {
+    rb.llm.onChunk(chunk => { out += chunk; });
+    rb.llm.onDone(() => resolve(true));
+  });
+  try {
+    await rb.llm.chat({
+      messages: [{ role: 'user', content: prompt }],
+      systemPrompt: 'You condense coding rules. Reply with only the condensed rules, under 500 characters.',
+      provider: state.provider,
+      model: currentModel(),
+      lmstudioUrl: state.lmstudioUrl,
+      lmstudioApiKey: state.lmstudioApiKey,
+      ollamaUrl: state.ollamaUrl,
+      temperature: 0,
+      maxTokens: 1024,
+    });
+    await done;
+  } catch (e) {
+    rb.llm.removeListeners();
+    if (btn) { btn.disabled = false; btn.textContent = 'Condense rules'; }
+    showToast('⚠ Could not reach ' + providerLabel() + ': ' + (e.message || ''));
+    return;
+  }
+  rb.llm.removeListeners();
+  const condensed = out.trim().slice(0, 2000);
+  if (!condensed) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Condense rules'; }
+    showToast('⚠ The model returned nothing — condensed rules unchanged');
+    return;
+  }
+  state.condensedRules = condensed;
+  await rb.db.setSetting('condensed_rules', condensed);
+  showToast('✓ Condensed rules saved');
+  renderSettingsView();
+}
+
+// ── Advanced section ──────────────────────────────────────────────
+function renderAdvancedPane(body) {
+  const disabled = state.shellEnabled ? '' : 'settings-disabled';
+  body.innerHTML = `
+    <h3 class="settings-subhead">Shell Tool</h3>
+    <label class="settings-toggle-row"><span>Allow CodeFox to run PowerShell commands</span>
+      <span class="switch"><input type="checkbox" ${state.shellEnabled ? 'checked' : ''} onchange="setShellToggle('shell_enabled', this.checked)"><span class="slider"></span></span></label>
+    <p class="settings-note">Shell: PowerShell — used to run terminal commands in the project folder.</p>
+    <div class="${disabled}">
+      <h3 class="settings-subhead">Auto Mode</h3>
+      <label class="settings-toggle-row"><span>Run eligible commands automatically</span>
+        <span class="switch"><input type="checkbox" ${state.shellAutoMode ? 'checked' : ''} onchange="setShellToggle('shell_auto_mode', this.checked)"><span class="slider"></span></span></label>
+      <p class="settings-note">When on, commands that match your auto-approved list run without asking. Everything else asks first.</p>
+      <h3 class="settings-subhead">Approvals</h3>
+      <label class="settings-toggle-row"><span>Auto-accept project changes</span>
+        <span class="switch"><input type="checkbox" ${state.autoAcceptChanges ? 'checked' : ''} onchange="setShellToggle('auto_accept_changes', this.checked)"><span class="slider"></span></span></label>
+      <p class="settings-note">Keep project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo.</p>
+      <h3 class="settings-subhead">Auto-approved commands</h3>
+      <p class="settings-note">Commands starting with one of these run automatically when Auto Mode is on. Anything else asks first.</p>
+      <div class="chip-row">${state.shellAutoApprove.map((c, i) => `<span class="chip">${escHtml(c)} <span class="chip-x" onclick="removeAutoApprove(${i})">✕</span></span>`).join('')}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <input id="auto-approve-input" placeholder="e.g. git log" style="flex:1;" />
+        <button class="btn btn-secondary" onclick="addAutoApprove()">Add</button>
+      </div>
+      <h3 class="settings-subhead">Excluded File Types</h3>
+      <p class="settings-note">Files matching these patterns are hidden from project scans and file search.</p>
+      <div class="chip-row">${state.excludedFileTypes.map((c, i) => `<span class="chip">${escHtml(c)} <span class="chip-x" onclick="removeExcludedType(${i})">✕</span></span>`).join('')}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <input id="excluded-type-input" placeholder="e.g. tmp" style="flex:1;" />
+        <button class="btn btn-secondary" onclick="addExcludedType()">Add</button>
+        <button class="btn btn-secondary" onclick="restoreExcludedDefaults()">Restore default</button>
+      </div>
+      <h3 class="settings-subhead">Run a command</h3>
+      <p class="settings-note">Test the shell tool directly. Commands run in the project folder.</p>
+      <div style="display:flex;gap:8px;">
+        <input id="shell-manual-cmd" placeholder="e.g. git status" style="flex:1;" onkeydown="if(event.key==='Enter') runManualCommand()" />
+        <button class="btn btn-teal" onclick="runManualCommand()">Run</button>
+      </div>
+      <pre id="shell-manual-output" class="settings-output">No command run yet.</pre>
+      <p class="settings-note">Dangerous commands are never run automatically: rm, del, Remove-Item, format, rm -rf, and Remove-Item -Recurse always ask first, even if they match an auto-approved prefix.</p>
+    </div>
+    <h3 class="settings-subhead">Editor Integration</h3>
+    <p class="settings-note">The Unity bridge is CodeFox's editor integration — it refreshes Unity's AssetDatabase when CodeFox writes files, and runs editor commands from Unity. There is nothing else to configure here.</p>
+    <button class="btn btn-secondary" onclick="showSettings('connections')">Manage the Unity bridge in Connections →</button>`;
+}
+
+async function setShellToggle(key, checked) {
+  const on = !!checked;
+  if (key === 'shell_enabled') state.shellEnabled = on;
+  else if (key === 'shell_auto_mode') state.shellAutoMode = on;
+  else if (key === 'auto_accept_changes') state.autoAcceptChanges = on;
+  await rb.db.setSetting(key, on ? '1' : '0');
+  renderSettingsView();
+  if (key === 'shell_enabled') {
+    showToast(on ? 'Shell tool enabled — commands can run from this app' : 'Shell tool disabled — no commands can run');
+  }
+}
+
+async function addAutoApprove() {
+  const v = document.getElementById('auto-approve-input')?.value?.trim();
+  if (!v) return;
+  if (!state.shellAutoApprove.includes(v)) state.shellAutoApprove.push(v);
+  await rb.db.setSetting('shell_auto_approve', JSON.stringify(state.shellAutoApprove));
+  renderSettingsView();
+}
+
+async function removeAutoApprove(i) {
+  state.shellAutoApprove.splice(i, 1);
+  await rb.db.setSetting('shell_auto_approve', JSON.stringify(state.shellAutoApprove));
+  renderSettingsView();
+}
+
+async function addExcludedType() {
+  const v = document.getElementById('excluded-type-input')?.value?.trim().replace(/^\./, '');
+  if (!v) return;
+  if (!state.excludedFileTypes.includes(v)) state.excludedFileTypes.push(v);
+  await rb.db.setSetting('excluded_file_types', JSON.stringify(state.excludedFileTypes));
+  renderSettingsView();
+}
+
+async function removeExcludedType(i) {
+  state.excludedFileTypes.splice(i, 1);
+  await rb.db.setSetting('excluded_file_types', JSON.stringify(state.excludedFileTypes));
+  renderSettingsView();
+}
+
+async function restoreExcludedDefaults() {
+  state.excludedFileTypes = DEFAULT_EXCLUDED_FILE_TYPES.slice();
+  await rb.db.setSetting('excluded_file_types', JSON.stringify(state.excludedFileTypes));
+  renderSettingsView();
+  showToast('✓ Excluded file types restored to the default list');
+}
+
+async function runManualCommand() {
+  const input = document.getElementById('shell-manual-cmd');
+  const out = document.getElementById('shell-manual-output');
+  if (!input || !out) return;
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  if (!state.shellEnabled) {
+    out.textContent = 'Shell tool is off. Turn on "Allow CodeFox to run PowerShell commands" above first.';
+    return;
+  }
+  out.textContent = 'Running…';
+  const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+  appendShellResultTo(out, cmd, res);
+}
+
+function appendShellResultTo(el, cmd, res) {
+  const output = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim() || '(no output)';
+  el.textContent = '$ ' + cmd + '\n' + output + (res.ok === false ? '\n⚠ ' + (res.error || ('Command exited with code ' + res.code)) : '');
+}
+
+// ── Shell commands from assistant replies ─────────────────────────
+// A command is only ever run automatically when ALL of these hold:
+// the shell tool is on, Auto Mode is on, the command's first line
+// starts with an auto-approved prefix, and the command is not
+// dangerous. Dangerous commands — rm, del, Remove-Item, format,
+// rm -rf, Remove-Item -Recurse — always require an explicit Run click,
+// even if they match a prefix. Anything else the assistant suggests
+// gets a Run / Dismiss bar instead.
+function extractShellBlocks(text) {
+  const out = [];
+  const re = /```(powershell|pwsh|shell)\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const cmd = m[2].trim();
+    if (cmd) out.push(cmd);
+  }
+  return out;
+}
+
+function firstCommandLine(cmd) {
+  return String(cmd || '').split('\n').map(l => l.trim()).find(l => l) || '';
+}
+
+function isDangerousCommand(cmd) {
+  const text = String(cmd || '');
+  const first = firstCommandLine(cmd);
+  const patterns = [/^\s*rm\b/i, /^\s*del\b/i, /^\s*format\b/i, /^\s*remove-item\b/i, /rm\s+-rf/i, /remove-item\s+.*-recurse/i];
+  return patterns.some(re => re.test(text) || re.test(first));
+}
+
+function matchesAutoApprove(cmd) {
+  const first = firstCommandLine(cmd);
+  return (state.shellAutoApprove || []).some(p => p && first.startsWith(p));
+}
+
+async function handleShellBlocks(text) {
+  if (!state.shellEnabled) return;
+  const blocks = extractShellBlocks(text);
+  for (const cmd of blocks) {
+    if (state.shellAutoMode && matchesAutoApprove(cmd) && !isDangerousCommand(cmd)) {
+      const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+      const output = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim() || '(no output)';
+      addSystemMessage('$ ' + cmd + '\n' + output + (res.ok === false ? '\n⚠ ' + (res.error || ('Command exited with code ' + res.code)) : ''));
+    } else {
+      showShellBar(cmd);
+    }
+  }
+}
+
+function showShellBar(cmd) {
+  if (!window._shellQueue) window._shellQueue = [];
+  window._shellQueue.push(cmd);
+  renderShellBar();
+}
+
+function renderShellBar() {
+  const existing = document.getElementById('shell-bar');
+  if (existing) existing.remove();
+  const queue = window._shellQueue || [];
+  const cmd = queue[0];
+  if (!cmd) return;
+  const bar = document.createElement('div');
+  bar.id = 'shell-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);';
+  label.textContent = '$ ' + firstCommandLine(cmd);
+  const runBtn = document.createElement('button');
+  runBtn.className = 'btn btn-teal';
+  runBtn.textContent = '▶ Run';
+  runBtn.onclick = () => runShellCommand(cmd);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Dismiss';
+  dismissBtn.onclick = () => { window._shellQueue.shift(); renderShellBar(); };
+  bar.appendChild(label);
+  bar.appendChild(runBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+}
+
+async function runShellCommand(cmd) {
+  const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+  const output = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim() || '(no output)';
+  addSystemMessage('$ ' + cmd + '\n' + output + (res.ok === false ? '\n⚠ ' + (res.error || ('Command exited with code ' + res.code)) : ''));
+  if (window._shellQueue) window._shellQueue.shift();
+  renderShellBar();
+}
+
 
 // ── Unity refresh ─────────────────────────────────────────────────
 async function triggerUnityRefresh() {
@@ -1413,6 +2109,13 @@ function showApplyBar(changes) {
   const existing = document.getElementById('apply-bar');
   if (existing) existing.remove();
   if (!changes.length) return;
+  if (state.autoAcceptChanges) {
+    // Auto-accept is on (Settings > Advanced): apply without waiting.
+    // applyFileChanges snapshots first, and the revert bar is always
+    // shown afterwards, so the user can still undo.
+    applyFileChanges(changes);
+    return;
+  }
 
   const bar = document.createElement('div');
   bar.id = 'apply-bar';
@@ -1846,7 +2549,8 @@ async function refreshConnectionCards() {
     el.classList.toggle('connected', !!connected);
   };
   const unityConnected = state.projectPath ? await rb.fs.exists(state.projectPath + '/Assets') : false;
-  setStatus('conn-unity-status', unityConnected ? '1 Connected' : 'No connections yet', unityConnected);
+  const bridgeExists = state.projectPath ? await rb.fs.exists(state.projectPath + '/Assets/Editor/CodeFoxBridge.cs') : false;
+  setStatus('conn-unity-status', bridgeExists ? 'Connected · Bridge installed' : unityConnected ? '1 Connected' : 'No connections yet', unityConnected || bridgeExists);
   const n = state.localFolders.length;
   setStatus('conn-folders-status', n ? n + ' connected' : 'No connections yet', n > 0);
 }
@@ -2126,13 +2830,13 @@ async function renderConnectionsView() {
       ico: '⬢', name: 'LM Studio',
       status: lmRunning ? 'Connected — ' + (llmStatus.modelsAvailable ?? 0) + ' model(s) available' : 'Not reachable at ' + (llmStatus.url || state.lmstudioUrl),
       connected: lmRunning,
-      action: '<button class="btn btn-secondary" onclick="openSettings()">Configure</button>',
+      action: '<button class="btn btn-secondary" onclick="showSettings(\'model\')">Configure</button>',
     },
     {
       ico: '◉', name: 'Ollama',
       status: ollamaStatus.running ? 'Running' : 'Not running',
       connected: !!ollamaStatus.running,
-      action: '<button class="btn btn-secondary" onclick="openSettings()">Configure</button>',
+      action: '<button class="btn btn-secondary" onclick="showSettings(\'model\')">Configure</button>',
     },
     {
       ico: '⬡', name: 'Unity Bridge',
