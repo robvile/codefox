@@ -10,7 +10,6 @@ let state = {
   activeProject: null,
   projects: [],
   skillsInstalled: {},
-  unrealPath: '',
   localFolders: [],
   homeMentionFile: null,
   ollamaModel: 'qwen2.5-coder:32b-instruct',
@@ -203,7 +202,6 @@ async function init() {
   state.maxTokens = parseInt(await rb.db.getSetting('llm_max_tokens') || '4096', 10) || 4096;
   state.unityExePath = await rb.db.getSetting('unity_exe_path') || '';
   state.chatMode = await rb.db.getSetting('chat_mode') || 'agent';
-  state.unrealPath = await rb.db.getSetting('unreal_project_path') || '';
   try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
   catch { state.localFolders = []; }
   if (!Array.isArray(state.localFolders)) state.localFolders = [];
@@ -1667,7 +1665,6 @@ async function switchProject(id) {
   state.activeThreadId = null;
   state.activeItemId = null;
   state.activeTable = null;
-  state.unrealPath = await rb.db.getSetting('unreal_project_path') || '';
   try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
   catch { state.localFolders = []; }
   if (!Array.isArray(state.localFolders)) state.localFolders = [];
@@ -1850,8 +1847,6 @@ async function refreshConnectionCards() {
   };
   const unityConnected = state.projectPath ? await rb.fs.exists(state.projectPath + '/Assets') : false;
   setStatus('conn-unity-status', unityConnected ? '1 Connected' : 'No connections yet', unityConnected);
-  const unrealConnected = state.unrealPath ? await rb.fs.exists(state.unrealPath) : false;
-  setStatus('conn-unreal-status', unrealConnected ? '1 Connected' : 'No connections yet', unrealConnected);
   const n = state.localFolders.length;
   setStatus('conn-folders-status', n ? n + ' connected' : 'No connections yet', n > 0);
 }
@@ -1937,18 +1932,6 @@ async function onUnityCard() {
     buildFileIndex(folder);
     showToast('✓ Unity project folder set');
   }
-  await renderHome();
-}
-
-async function onUnrealCard() {
-  const folder = await rb.fs.pickFolder();
-  if (!folder) return;
-  const items = await rb.fs.readDir(folder);
-  const found = items.some(i => !i.isDir && i.name.toLowerCase().endsWith('.uproject'));
-  if (!found) { showToast('No Unreal project found in that folder'); return; }
-  state.unrealPath = folder;
-  await rb.db.setSetting('unreal_project_path', folder);
-  showToast('✓ Unreal project connected');
   await renderHome();
 }
 
