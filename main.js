@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { spawn, execFile } = require('child_process');
+const upm = require('./upm-manifest');
+const unityBridge = require('./unity-bridge');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -295,6 +297,9 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('mcp_servers', '[]')");
   }
 
+  // v0.5.0: max agent-loop rounds (default 5, range 1–10).
+  db.run("INSERT OR IGNORE INTO settings VALUES ('agent_max_rounds', '5')");
+
   // ── v0.3.0 migration: one project row per workspace ─────────────
   // If no projects exist, create one from the existing project_path
   // setting (name = last folder segment, or "My Project" if empty)
@@ -354,6 +359,11 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initDB();
+  // Auto-install the bridge for the already-connected active project
+  // (v0.5.0): the project was connected in an earlier session, so no
+  // create / switch / update call will trigger it. Silent when the
+  // bridge is already there or the folder is not a Unity project.
+  try { unityBridge.ensureBridge(readSetting('project_path', ''), __dirname); } catch {}
   createWindow();
 });
 
@@ -443,14 +453,18 @@ ipcMain.handle('project:create', (_, name, projectPath) => {
   db.run('INSERT INTO projects (name, path) VALUES (?, ?)', [cleanName, projectPath || '']);
   const project = projectById(db.exec('SELECT CAST(last_insert_rowid() AS TEXT) as id')[0].values[0][0]);
   setActiveProject(project);
-  return project;
+  // Connecting a project installs its bridge automatically (v0.5.0).
+  const bridge = unityBridge.ensureBridge(project.path || '', __dirname);
+  return { ...project, bridge };
 });
 
 ipcMain.handle('project:switch', (_, id) => {
   const project = projectById(id);
   if (!project) return null;
   setActiveProject(project);
-  return project;
+  // Switching to a project installs its bridge automatically (v0.5.0).
+  const bridge = unityBridge.ensureBridge(project.path || '', __dirname);
+  return { ...project, bridge };
 });
 
 ipcMain.handle('project:update', (_, id, data) => {
@@ -464,6 +478,9 @@ ipcMain.handle('project:update', (_, id, data) => {
     db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('project_path', ?)", [projectPath]);
   }
   saveDB();
+  // Changing a project's folder connects it — install its bridge
+  // automatically when the new folder is a Unity project (v0.5.0).
+  if (data && data.path != null) unityBridge.ensureBridge(projectPath, __dirname);
   return true;
 });
 
@@ -835,6 +852,15 @@ ipcMain.handle('project:scan', async (_, projectPath) => {
     const man = JSON.parse(fs.readFileSync(path.join(root, 'Packages', 'manifest.json'), 'utf8'));
     packages = man.dependencies || {};
   } catch {}
+  // Resolved versions from packages-lock.json, when Unity has written
+  // one — the model sees both the requested and the resolved version.
+  let locked = {};
+  try {
+    const lock = JSON.parse(fs.readFileSync(path.join(root, 'Packages', 'packages-lock.json'), 'utf8'));
+    for (const [name, entry] of Object.entries(lock.dependencies || {})) {
+      locked[name] = (entry && entry.version) || '';
+    }
+  } catch {}
   const assetsByExt = {};
   for (const f of files) {
     const ext = path.extname(f).toLowerCase() || '(no ext)';
@@ -846,7 +872,7 @@ ipcMain.handle('project:scan', async (_, projectPath) => {
     tree[top] = (tree[top] || 0) + 1;
   }
   return {
-    ok: true, projectPath: root, unityVersion, packages,
+    ok: true, projectPath: root, unityVersion, packages, locked,
     scenes, prefabs, scripts, scriptCount: files.filter(f => f.endsWith('.cs')).length,
     fileCount: files.length, assetsByExt, tree,
   };
@@ -905,28 +931,48 @@ ipcMain.handle('unity:buildCheck', async (_, payload) => {
 
 // ── Unity bridge ─────────────────────────────────────────────────
 
-ipcMain.handle('unity:refresh', async (_, projectPath) => {
-  // Touches a sentinel file that the Unity Editor script watches
-  const sentinelPath = path.join(projectPath, 'Assets', '.codefox-refresh-trigger');
+// Writes the refresh sentinel the Unity bridge watches (same trigger
+// the bridge install uses). Shared by unity:refresh and the package
+// handlers so a manifest edit is picked up by Unity.
+function writeRefreshTrigger(projectPath) {
   try {
-    fs.writeFileSync(sentinelPath, Date.now().toString());
+    fs.writeFileSync(path.join(projectPath, 'Assets', '.codefox-refresh-trigger'), Date.now().toString());
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Manifest edits go through the shared helper in upm-manifest.js:
+// it backs the manifest up to manifest.json.codefox-bak first, then
+// applies the mutator and writes the JSON back with 2-space indent.
+// The helper is plain Node (no Electron) so the smoke test can
+// exercise it directly.
+function updateManifest(projectPath, mutator) {
+  return upm.updateManifest(projectPath, mutator);
+}
+
+ipcMain.handle('unity:refresh', async (_, projectPath) => {
+  // Touches a sentinel file that the Unity Editor script watches
+  return writeRefreshTrigger(projectPath);
 });
 
 // Copies the bundled companion script into the project's Assets/Editor
-// folder (creating it if needed). Honest install: it really writes the file.
+// folder (creating it if needed). The source is the bundled file when
+// the install has it, and the embedded copy (unity-bridge-source.js,
+// regenerated by scripts/embed-bridge.js at build time) when it does
+// not — so installing the bridge never fails for a missing source
+// file. A failure that is reported is the real filesystem error.
 ipcMain.handle('unity:installBridge', async (_, projectPath) => {
   const root = projectPath || readSetting('project_path', '');
-  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
-  const src = path.join(__dirname, 'unity-companion', 'CodeFoxBridge.cs');
-  if (!fs.existsSync(src)) return { ok: false, error: 'Companion script not found in the app install. Copy unity-companion/CodeFoxBridge.cs to Assets/Editor/ by hand.' };
-  const dest = path.join(root, 'Assets', 'Editor', 'CodeFoxBridge.cs');
-  try {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(src, dest);
-    return { ok: true, dest };
-  } catch (e) { return { ok: false, error: e.message }; }
+  return unityBridge.installBridgeFile(root, __dirname);
+});
+
+// Install the bridge for a project that does not have it yet.
+// No-ops when it is already there; skips when the folder has no
+// Assets folder. Used by the Connections view and by the project
+// connect / startup paths, which call ensureBridge directly.
+ipcMain.handle('unity:ensureBridge', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  return unityBridge.ensureBridge(root, __dirname);
 });
 
 // Removes the companion script from the project's Assets/Editor folder
@@ -943,6 +989,68 @@ ipcMain.handle('unity:removeBridge', async (_, projectPath) => {
     if (fs.existsSync(sentinel)) fs.unlinkSync(sentinel);
     return { ok: true, removed };
   } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// ── Unity Package Manager (v0.5.0, manifest-based) ───────────────
+// CodeFox edits <project>/Packages/manifest.json directly — it does
+// not talk to Unity's Package Manager API. Unity resolves the
+// packages itself when it refreshes (triggered below via the same
+// sentinel the bridge watches). Every edit is backed up first to
+// Packages/manifest.json.codefox-bak by updateManifest.
+ipcMain.handle('unity:listPackages', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
+  const read = upm.readManifest(root);
+  if (!read.ok) return read;
+  const locked = {};
+  try {
+    const lock = JSON.parse(fs.readFileSync(path.join(root, 'Packages', 'packages-lock.json'), 'utf8'));
+    for (const [name, entry] of Object.entries(lock.dependencies || {})) {
+      locked[name] = (entry && entry.version) || '';
+    }
+  } catch {}
+  return { ok: true, dependencies: read.manifest.dependencies || {}, scopedRegistries: read.manifest.scopedRegistries || [], locked };
+});
+
+ipcMain.handle('unity:addPackage', async (_, payload) => {
+  const root = (payload && payload.projectPath) || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
+  const name = String((payload && payload.name) || '').trim();
+  const version = String((payload && payload.version) || '').trim();
+  if (!upm.isValidPackageName(name)) {
+    return { ok: false, error: 'Invalid package name "' + name + '". Package names look like com.unity.textmeshpro.' };
+  }
+  if (!upm.isValidPackageVersion(version)) {
+    return { ok: false, error: 'Invalid version "' + version + '". Use a version like 3.0.6, a git URL, or a tarball / file path.' };
+  }
+  const res = updateManifest(root, (manifest) => {
+    manifest.dependencies[name] = version;
+    return { name, version };
+  });
+  if (!res.ok) return res;
+  writeRefreshTrigger(root);
+  return { ok: true, name, version, backup: res.backup };
+});
+
+ipcMain.handle('unity:removePackage', async (_, payload) => {
+  const root = (payload && payload.projectPath) || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
+  const name = String((payload && payload.name) || '').trim();
+  if (!upm.isValidPackageName(name)) {
+    return { ok: false, error: 'Invalid package name "' + name + '".' };
+  }
+  const read = upm.readManifest(root);
+  if (!read.ok) return read;
+  if (!read.manifest.dependencies || !(name in read.manifest.dependencies)) {
+    return { ok: false, error: 'Package "' + name + '" is not in Packages/manifest.json.' };
+  }
+  const res = updateManifest(root, (manifest) => {
+    delete manifest.dependencies[name];
+    return { name };
+  });
+  if (!res.ok) return res;
+  writeRefreshTrigger(root);
+  return { ok: true, name, backup: res.backup };
 });
 
 // ── Shell execution (Settings > Advanced) ─────────────────────────

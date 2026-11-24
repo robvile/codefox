@@ -48,7 +48,14 @@ let state = {
   useCondensedRules: false,
   condensedRules: '',
   mcpServers: [],
+  agentMaxRounds: 5,
 };
+
+// ── Agent loop state (v0.5.0) ──────────────────────────────────────
+// Set while an Agent-mode loop is running, null otherwise. The loop
+// pauses here whenever an action needs the user's approval, and
+// resumes when the approval bar calls the stored resolver.
+let loopState = null;
 
 // ── LLM management (LM Studio default, Ollama supported) ─────────
 function setLlmStatus(dotClass, label) {
@@ -229,6 +236,7 @@ async function init() {
   catch { state.excludedFileTypes = DEFAULT_EXCLUDED_FILE_TYPES.slice(); }
   if (!Array.isArray(state.excludedFileTypes)) state.excludedFileTypes = DEFAULT_EXCLUDED_FILE_TYPES.slice();
   state.rulesCharBudget = parseInt(await rb.db.getSetting('rules_char_budget') || '4000', 10) || 4000;
+  state.agentMaxRounds = clampAgentMaxRounds(parseInt(await rb.db.getSetting('agent_max_rounds') || '5', 10));
   state.useCondensedRules = (await rb.db.getSetting('use_condensed_rules') || '0') === '1';
   state.condensedRules = await rb.db.getSetting('condensed_rules') || '';
   try { state.mcpServers = JSON.parse(await rb.db.getSetting('mcp_servers') || '[]'); }
@@ -576,13 +584,8 @@ async function sendChat() {
   state.messages.push({ role: 'user', content: text });
   renderMessages();
 
-  // Show thinking
-  const msgsEl = document.getElementById('chat-messages');
-  const thinkingEl = document.createElement('div');
-  thinkingEl.className = 'thinking';
-  thinkingEl.innerHTML = '<span></span><span></span><span></span>';
-  msgsEl.appendChild(thinkingEl);
-  msgsEl.scrollTop = msgsEl.scrollHeight;
+  // The thinking indicator is created per turn by streamOneTurn,
+  // which also owns the assistant message element.
 
   // Build system prompt — use override if set by executePlan
   let systemPrompt;
@@ -595,13 +598,249 @@ async function sendChat() {
     systemPrompt = buildSystemPrompt(rulesets);
   }
 
-  // Stream response
+  // Capture thread ID now — state may change if user navigates away
+  const currentThreadId = state.activeThreadId;
   state.streaming = true;
-  let assistantContent = '';
+  try {
+    if (state.chatMode === 'agent') {
+      // Agent mode: the loop (v0.5.0). The model runs commands,
+      // applies file changes and installs packages, reads the results,
+      // and tries again on its own — no further prompting needed.
+      await runAgentTurn(systemPrompt, currentThreadId);
+    } else {
+      // Ask / Plan: exactly the v0.4.0 behaviour — one reply, then
+      // the apply bar / shell bar / package bar. No looping.
+      const content = await streamOneTurn(state.messages.map(m => ({ role: m.role, content: m.content })), systemPrompt, currentThreadId);
+      if (content != null) {
+        const changes = extractFileChanges(content);
+        if (changes.length) showApplyBar(changes);
+        // Shell blocks in the reply: auto-run only when auto-approved,
+        // otherwise offer a Run button. Never runs when the shell is off.
+        handleShellBlocks(content);
+        // Package blocks: always ask first, via the package bar.
+        handlePackageBlocks(content);
+      }
+    }
+  } finally {
+    state.streaming = false;
+    hideLoopUI();
+  }
+}
+
+// ── Agent loop (v0.5.0, Agent mode only) ──────────────────────────
+// Ask and Plan modes never loop: they stream one reply and stop, as
+// in v0.4.0. In Agent mode, after each reply the loop parses the
+// reply for actions (file changes, shell blocks, package blocks),
+// runs the ones that are allowed, asks about the rest, feeds every
+// result back to the model as a tool-result message, and calls the
+// model again — until a reply contains no actions, the user stops
+// it, or agent_max_rounds is reached. The max is a hard cap.
+
+function clampAgentMaxRounds(n) {
+  const v = parseInt(n, 10);
+  if (isNaN(v)) return 5;
+  return Math.min(10, Math.max(1, v));
+}
+
+function isValidPackageName(name) {
+  return typeof name === 'string'
+    && /^[a-z0-9][a-z0-9._-]*$/i.test(name)
+    && name.indexOf('.') !== -1;
+}
+
+function isValidPackageVersion(v) {
+  const s = String(v || '').trim();
+  if (!s) return false;
+  if (/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(s)) return true;
+  if (/^(https?:\/\/[^\s]+\.git(?:#[^\s]+)?|git@[^\s]+\.git(?:#[^\s]+)?)$/i.test(s)) return true;
+  if (/^(file:|https?:\/\/)/i.test(s)) return true;
+  if (/\.tgz$|\.tar\.gz$/i.test(s)) return true;
+  if (s.indexOf('/') !== -1 || s.indexOf('\\') !== -1) return true;
+  return false;
+}
+
+// One line from a ```upm-install / ```upm-remove block, or null for
+// blank lines and comments. See upm-manifest.js parsePackageSpec
+// for the accepted forms (the renderer cannot require that file).
+function parsePackageSpecLine(line) {
+  const raw = String(line || '').trim();
+  if (!raw || raw.startsWith('//') || raw.startsWith('#')) return null;
+  if (/^(https?:\/\/[^\s]+\.git(?:#[^\s]+)?|git@[^\s]+\.git(?:#[^\s]+)?)$/i.test(raw)) {
+    return { name: '', version: raw, isGit: true, raw, valid: true };
+  }
+  const at = raw.indexOf('@');
+  if (at > 0) {
+    const name = raw.slice(0, at).trim();
+    const version = raw.slice(at + 1).trim();
+    return { name, version, isGit: false, raw, valid: isValidPackageName(name) && isValidPackageVersion(version) };
+  }
+  return { name: raw, version: '', isGit: false, raw, valid: isValidPackageName(raw) };
+}
+
+function parseUpmBlocks(text, lang) {
+  const out = [];
+  const re = new RegExp('```' + lang + '\\s*\\n([\\s\\S]*?)```', 'gi');
+  let m;
+  while ((m = re.exec(text))) {
+    for (const line of m[1].split('\n')) {
+      const spec = parsePackageSpecLine(line);
+      if (spec) out.push({ ...spec, index: m.index });
+    }
+  }
+  return out;
+}
+
+function extractShellBlocksWithIndex(text) {
+  const out = [];
+  const re = /```(powershell|pwsh|shell)\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const cmd = m[2].trim();
+    if (cmd) out.push({ command: cmd, index: m.index });
+  }
+  return out;
+}
+
+// All actions in one reply, in the order they appear: file changes
+// (one action for the whole set, applied together), one action per
+// shell block, one action per package line.
+function parseAgentActions(text) {
+  const actions = [];
+  const changes = extractFileChanges(text);
+  if (changes.length) {
+    let idx = Infinity;
+    for (const c of changes) {
+      const i = text.indexOf(c.path);
+      if (i >= 0 && i < idx) idx = i;
+    }
+    actions.push({ type: 'files', changes, index: idx === Infinity ? 0 : idx });
+  }
+  for (const b of extractShellBlocksWithIndex(text)) {
+    actions.push({ type: 'shell', command: b.command, index: b.index });
+  }
+  for (const p of parseUpmBlocks(text, 'upm-install')) {
+    actions.push({ type: 'package-install', name: p.name, version: p.version, isGit: p.isGit, raw: p.raw, valid: p.valid, index: p.index });
+  }
+  for (const p of parseUpmBlocks(text, 'upm-remove')) {
+    actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
+  }
+  actions.sort((a, b) => a.index - b.index);
+  return actions;
+}
+
+// A tool result is a real message in the thread (role "user" with a
+// "Tool result —" prefix), saved to the database and sent to the
+// model with the next turn — not just text on screen.
+async function appendToolResult(text) {
+  if (state.activeThreadId != null) {
+    try { await rb.db.insert('messages', { thread_id: state.activeThreadId, role: 'user', content: text }); } catch {}
+  }
+  state.messages.push({ role: 'user', content: text });
+  renderMessages();
+}
+
+function formatShellResult(cmd, res) {
+  const output = ((res && res.stdout) || '') + (res && res.stderr ? '\n' + res.stderr : '');
+  const trimmed = output.trim() || '(no output)';
+  const code = res && res.code != null ? res.code : '?';
+  let text = 'Tool result — ' + cmd + ' (exit ' + code + '):\n' + trimmed;
+  if (res && res.ok === false && res.error) text += '\n' + res.error;
+  return text;
+}
+
+function packageResultText(action, res) {
+  const isInstall = action.type === 'package-install';
+  const label = isInstall ? 'package install' : 'package removal';
+  const what = action.name + (isInstall && action.version ? '@' + action.version : '');
+  if (!res) return 'Tool result — ' + label + ': ' + what + ' — no result returned.';
+  if (res.ok) {
+    return 'Tool result — ' + label + ': ' + what + ' — done. Backup: ' + (res.backup || 'none')
+      + '. Unity will resolve this on refresh — open Unity or wait for the refresh trigger.';
+  }
+  return 'Tool result — ' + label + ': ' + what + ' — failed: ' + (res.error || 'unknown error');
+}
+
+// Loop status line under the reply, e.g.
+// "Working… round 2/5 — ran `dotnet build`".
+function setLoopStatus(text) {
+  const el = document.getElementById('loop-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+function showLoopUI() {
+  const btn = document.getElementById('stop-loop-btn');
+  if (btn) btn.classList.remove('hidden');
+  setLoopStatus('Working…');
+}
+
+function hideLoopUI() {
+  const btn = document.getElementById('stop-loop-btn');
+  if (btn) btn.classList.add('hidden');
+  const el = document.getElementById('loop-status');
+  if (el) { el.textContent = ''; el.classList.add('hidden'); }
+}
+
+// Stop button: sets the flag the loop checks between rounds, drops
+// any in-flight stream chunks, dismisses any approval bar, and wakes
+// a loop that is paused waiting for approval so it can unwind.
+// There is no stream-abort IPC in the main process, so a stream that
+// is already in flight finishes in the background — the loop still
+// never starts another round after a stop.
+function stopAgentLoop() {
+  if (!loopState) return;
+  loopState.stopRequested = true;
+  try { rb.llm.removeListeners(); } catch {}
+  for (const id of ['apply-bar', 'shell-bar', 'package-bar']) {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
+  if (window._shellQueue) window._shellQueue = [];
+  if (window._packageQueue) window._packageQueue = [];
+  if (loopState.pendingResolve) {
+    const settle = loopState.pendingResolve;
+    loopState.pendingResolve = null;
+    loopState.waitingApproval = false;
+    settle({ decision: 'stopped' });
+  }
+  setLoopStatus('Stopping…');
+}
+
+// Show an approval bar and wait for the user's decision. `showFn`
+// receives a settle callback to hand to the bar. Resolves exactly
+// once — a late click after a Stop is ignored.
+function waitForLoopDecision(showFn) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      if (loopState) { loopState.waitingApproval = false; loopState.pendingResolve = null; }
+      resolve(outcome);
+    };
+    if (!loopState) return settle({ decision: 'stopped' });
+    loopState.pendingResolve = settle;
+    loopState.waitingApproval = true;
+    showFn(settle);
+  });
+}
+
+// One streamed assistant turn: creates the message element, streams
+// chunks into it, saves the finished reply, and returns it. Returns
+// null when the model could not be reached (the error is already
+// shown in the message element).
+async function streamOneTurn(messages, systemPrompt, threadId) {
+  const msgsEl = document.getElementById('chat-messages');
+  const thinkingEl = document.createElement('div');
+  thinkingEl.className = 'thinking';
+  thinkingEl.innerHTML = '<span></span><span></span><span></span>';
+  msgsEl.appendChild(thinkingEl);
   const assistantMsgEl = document.createElement('div');
   assistantMsgEl.className = 'msg msg-assistant';
   msgsEl.appendChild(assistantMsgEl);
-
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+  let assistantContent = '';
   rb.llm.removeListeners();
   rb.llm.onChunk(chunk => {
     thinkingEl.remove();
@@ -609,45 +848,9 @@ async function sendChat() {
     assistantMsgEl.textContent = assistantContent;
     msgsEl.scrollTop = msgsEl.scrollHeight;
   });
-  // Capture thread ID now — state may change if user navigates away
-  const currentThreadId = state.activeThreadId;
-
-  rb.llm.onDone(async () => {
-    state.streaming = false;
-    await rb.db.insert('messages', { thread_id: currentThreadId, role: 'assistant', content: assistantContent });
-    if (state.activeThreadId === currentThreadId) {
-      state.messages.push({ role: 'assistant', content: assistantContent });
-    }
-    rb.llm.removeListeners();
-    // Audit skill: save the finished audit as a Reference when asked.
-    if (window._saveAuditAsReference) {
-      window._saveAuditAsReference = false;
-      await rb.db.insert('pages', { name: 'Project Structure Audit', content: assistantContent, project_id: state.activeProjectId });
-      await refreshSidebar();
-      if (state.mode === 'home') renderHome();
-      showToast('✓ Audit saved as a Reference');
-    }
-    // GDD skill: save the finished draft into the Reference it created.
-    if (window._saveGddAsReference && window._gddPageId) {
-      window._saveGddAsReference = false;
-      await rb.db.update('pages', window._gddPageId, { content: assistantContent });
-      window._gddPageId = null;
-      await refreshSidebar();
-      if (state.mode === 'home') renderHome();
-      showToast('✓ Game Design Document saved as a Reference');
-    }
-    // Parse response for file changes and show apply bar if any found
-    const changes = extractFileChanges(assistantContent);
-    if (changes.length) showApplyBar(changes);
-    // Shell blocks in the reply: auto-run only when auto-approved,
-    // otherwise offer a Run button. Never runs when the shell is off.
-    handleShellBlocks(assistantContent);
-  });
-
   try {
-    await rb.llm.chat({
-      messages: state.messages.map(m => ({ role: m.role, content: m.content })),
-      systemPrompt,
+    const result = await rb.llm.chat({
+      messages, systemPrompt,
       provider: state.provider,
       model: currentModel(),
       lmstudioUrl: state.lmstudioUrl,
@@ -656,11 +859,294 @@ async function sendChat() {
       temperature: state.temperature,
       maxTokens: state.maxTokens,
     });
+    if (!assistantContent && typeof result === 'string' && !(loopState && loopState.stopRequested)) {
+      assistantContent = result;
+      assistantMsgEl.textContent = result;
+    }
   } catch (e) {
     thinkingEl.remove();
     assistantMsgEl.textContent = '⚠ Could not reach ' + providerLabel() + ' at ' + currentUrl() + '. ' + (e.message || '') + (currentModel() ? '' : ' No model is selected — open Settings, verify the connection, and pick a model.');
-    state.streaming = false;
+    rb.llm.removeListeners();
+    return null;
   }
+  thinkingEl.remove();
+  rb.llm.removeListeners();
+  try { await rb.db.insert('messages', { thread_id: threadId, role: 'assistant', content: assistantContent }); } catch {}
+  if (state.activeThreadId === threadId) state.messages.push({ role: 'assistant', content: assistantContent });
+  await handleSkillSaveFlags(assistantContent);
+  return assistantContent;
+}
+
+// Audit / Game Design Document skills: save the finished reply into
+// the Reference they created. Flags are cleared on first use, so
+// only the first turn of a loop saves.
+async function handleSkillSaveFlags(content) {
+  if (window._saveAuditAsReference) {
+    window._saveAuditAsReference = false;
+    await rb.db.insert('pages', { name: 'Project Structure Audit', content, project_id: state.activeProjectId });
+    await refreshSidebar();
+    if (state.mode === 'home') renderHome();
+    showToast('✓ Audit saved as a Reference');
+  }
+  if (window._saveGddAsReference && window._gddPageId) {
+    window._saveGddAsReference = false;
+    await rb.db.update('pages', window._gddPageId, { content });
+    window._gddPageId = null;
+    await refreshSidebar();
+    if (state.mode === 'home') renderHome();
+    showToast('✓ Game Design Document saved as a Reference');
+  }
+}
+
+// The agent loop. Streams a turn, parses its actions, executes the
+// allowed ones, pauses for approval on the rest, appends every
+// outcome as a tool result, and streams the next turn with the
+// extended history. Ends when a reply has no actions, the user stops
+// it, the model cannot be reached, or agent_max_rounds is hit.
+async function runAgentTurn(systemPrompt, threadId) {
+  const maxRounds = clampAgentMaxRounds(state.agentMaxRounds);
+  loopState = {
+    active: true, stopRequested: false, stopNoted: false,
+    round: 0, maxRounds, threadId, systemPrompt,
+    waitingApproval: false, pendingResolve: null,
+  };
+  showLoopUI();
+  try {
+    while (loopState.round < loopState.maxRounds) {
+      if (loopState.stopRequested) break;
+      setLoopStatus('Working… round ' + (loopState.round + 1) + '/' + loopState.maxRounds + ' — waiting for the model…');
+      const content = await streamOneTurn(
+        state.messages.map(m => ({ role: m.role, content: m.content })),
+        systemPrompt, threadId);
+      if (!loopState || loopState.stopRequested) break;
+      if (content == null) break; // model unreachable — error already shown
+      const actions = parseAgentActions(content);
+      if (!actions.length) break; // final answer — no actions, loop ends
+      loopState.round++;
+      const outcomes = await processAgentActions(actions);
+      if (!loopState || loopState.stopRequested) break;
+      if (outcomes === 0) break;
+      if (loopState.round >= loopState.maxRounds) {
+        addSystemMessage('Stopped after ' + loopState.round + ' tool rounds — the task may need more steps. Ask me to continue if you want.');
+        break;
+      }
+    }
+  } finally {
+    if (loopState && loopState.stopRequested && !loopState.stopNoted) {
+      loopState.stopNoted = true;
+      addSystemMessage('Stopped by user.');
+    }
+    loopState = null;
+    hideLoopUI();
+  }
+}
+
+// Execute one round's actions in order. Returns how many outcomes
+// (executed, declined, or skipped-with-note) were appended as tool
+// results. An action that needs approval pauses the loop on its bar;
+// the loop resumes when the user clicks Run / Apply / Install
+// (action runs, result appended) or Dismiss (decline note appended,
+// so the model can try a different approach).
+async function processAgentActions(actions) {
+  let outcomes = 0;
+  for (const action of actions) {
+    if (!loopState || loopState.stopRequested) break;
+    const roundLabel = () => 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ';
+    if (action.type === 'files') {
+      const paths = action.changes.map(c => c.path).join(', ');
+      if (state.autoAcceptChanges) {
+        const summary = await applyFileChanges(action.changes);
+        await appendToolResult('Tool result — files applied: ' + paths
+          + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
+          + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : ''));
+        if (loopState) setLoopStatus(roundLabel() + 'applied ' + summary.written + ' file(s)');
+        outcomes++;
+      } else {
+        const outcome = await waitForLoopDecision((settle) => showApplyBar(action.changes, settle));
+        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+        if (outcome.decision === 'applied') {
+          const s = outcome.summary || { written: 0, failed: 0, errors: [] };
+          await appendToolResult('Tool result — files applied: ' + paths
+            + ' (' + s.written + ' written, ' + s.failed + ' failed)'
+            + (s.failed ? ' Errors: ' + s.errors.join('; ') : ''));
+          if (loopState) setLoopStatus(roundLabel() + 'applied ' + s.written + ' file(s)');
+        } else {
+          await appendToolResult('User declined: file changes (' + paths + ')');
+        }
+        outcomes++;
+      }
+    } else if (action.type === 'shell') {
+      const cmd = action.command;
+      if (!state.shellEnabled) {
+        await appendToolResult('Tool result — ' + cmd + ':\nShell is disabled in Settings — command not run');
+        outcomes++;
+        continue;
+      }
+      const autoOk = state.shellAutoMode && matchesAutoApprove(cmd) && !isDangerousCommand(cmd);
+      if (autoOk) {
+        const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+        await appendToolResult(formatShellResult(cmd, res));
+        if (loopState) setLoopStatus(roundLabel() + 'ran `' + firstCommandLine(cmd) + '`');
+        outcomes++;
+      } else {
+        const outcome = await waitForLoopDecision((settle) => showShellBar(cmd, settle));
+        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+        if (outcome.decision === 'run') {
+          await appendToolResult(formatShellResult(cmd, outcome.result));
+          if (loopState) setLoopStatus(roundLabel() + 'ran `' + firstCommandLine(cmd) + '`');
+        } else {
+          const short = cmd.length > 200 ? cmd.slice(0, 200) + '…' : cmd;
+          await appendToolResult('User declined: ' + short);
+        }
+        outcomes++;
+      }
+    } else if (action.type === 'package-install' || action.type === 'package-remove') {
+      const isInstall = action.type === 'package-install';
+      const label = isInstall ? 'package install' : 'package removal';
+      if (!action.valid) {
+        await appendToolResult('Tool result — ' + label + ': "' + action.raw + '" is not a valid package '
+          + (isInstall ? 'spec' : 'name') + ' — skipped. Use `name@version`, a bare package name, or a git URL.');
+        outcomes++;
+        continue;
+      }
+      if (!state.projectPath) {
+        await appendToolResult('Tool result — ' + label + ': ' + (action.name || action.raw)
+          + ' — No project folder set, package not ' + (isInstall ? 'installed' : 'removed') + '. Pick a project folder in Settings first.');
+        outcomes++;
+        continue;
+      }
+      // Packages ALWAYS need approval — no auto-run path exists, not
+      // in Auto Mode and not with auto-accept on.
+      const outcome = await waitForLoopDecision((settle) => showPackageBar(action, {
+        approved: (res, name, version) => settle({ decision: 'approved', result: res, name, version }),
+        declined: () => settle({ decision: 'declined' }),
+      }));
+      if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+      if (outcome.decision === 'approved') {
+        await appendToolResult(packageResultText(
+          { ...action, name: outcome.name || action.name, version: outcome.version || action.version },
+          outcome.result));
+        if (loopState) setLoopStatus(roundLabel() + (isInstall ? 'installed ' : 'removed ')
+          + (outcome.name || action.name) + (isInstall && (outcome.version || action.version) ? '@' + (outcome.version || action.version) : ''));
+      } else {
+        await appendToolResult('User declined ' + label + ': ' + (action.name || action.raw));
+      }
+      outcomes++;
+    }
+  }
+  return outcomes;
+}
+
+// ── Package approval bar (v0.5.0) ─────────────────────────────────
+// Shown for ```upm-install / ```upm-remove blocks. Package installs
+// and removals only ever run from this bar — there is no auto-run
+// path. When the model gave no version, the bar shows an editable
+// version field (pre-filled empty) and Install stays disabled until
+// a valid version is typed; a git URL with no package name likewise
+// needs a name typed in. `cb` is { approved(res, name, version),
+// declined() }; with no callbacks the bar appends the result itself
+// (the Ask / Plan path, via pumpPackageQueue).
+function showPackageBar(action, cb) {
+  const existing = document.getElementById('package-bar');
+  if (existing) existing.remove();
+  const isInstall = action.type === 'package-install';
+  const callbacks = cb || {};
+  const bar = document.createElement('div');
+  bar.id = 'package-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;';
+  label.textContent = (isInstall ? 'Install Unity package ' : 'Remove Unity package ')
+    + (action.name || '(package name needed)')
+    + (isInstall && action.version ? '@' + action.version : '') + '?';
+  bar.appendChild(label);
+  let nameInput = null;
+  let versionInput = null;
+  const inputStyle = 'background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;font-family:var(--mono);';
+  if (!action.name) {
+    nameInput = document.createElement('input');
+    nameInput.placeholder = 'package name, e.g. com.unity.textmeshpro';
+    nameInput.style.cssText = inputStyle + 'width:260px;';
+    bar.appendChild(nameInput);
+  }
+  if (isInstall && !action.version) {
+    versionInput = document.createElement('input');
+    versionInput.placeholder = 'version, e.g. 3.0.6';
+    versionInput.style.cssText = inputStyle + 'width:130px;';
+    bar.appendChild(versionInput);
+  }
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = isInstall ? 'btn btn-teal' : 'btn btn-danger';
+  confirmBtn.textContent = isInstall ? 'Install' : 'Remove';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Dismiss';
+  let decided = false;
+  const validate = () => {
+    const name = nameInput ? nameInput.value.trim() : action.name;
+    const version = versionInput ? versionInput.value.trim() : action.version;
+    const nameOk = isValidPackageName(name);
+    const versionOk = !isInstall || isValidPackageVersion(version);
+    const projectOk = !!state.projectPath;
+    confirmBtn.disabled = !(nameOk && versionOk && projectOk);
+    if (!projectOk) label.textContent = 'Set a project folder first — package installs need a project.';
+  };
+  if (nameInput) nameInput.addEventListener('input', validate);
+  if (versionInput) versionInput.addEventListener('input', validate);
+  confirmBtn.onclick = async () => {
+    if (decided) return;
+    decided = true;
+    const name = nameInput ? nameInput.value.trim() : action.name;
+    const version = versionInput ? versionInput.value.trim() : action.version;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = isInstall ? 'Installing…' : 'Removing…';
+    // The only place a package is ever installed or removed.
+    const res = isInstall
+      ? await rb.unity.addPackage({ name, version, projectPath: state.projectPath })
+      : await rb.unity.removePackage({ name, projectPath: state.projectPath });
+    bar.remove();
+    if (callbacks.approved) callbacks.approved(res, name, version);
+    else addSystemMessage(packageResultText({ ...action, name, version }, res));
+  };
+  dismissBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.declined) callbacks.declined();
+  };
+  bar.appendChild(confirmBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+  validate();
+  if (nameInput) nameInput.focus();
+  else if (versionInput) versionInput.focus();
+}
+
+// Ask / Plan path for package blocks: no loop, so queue the bars one
+// at a time and append each result as a system message.
+function handlePackageBlocks(text) {
+  const actions = parseAgentActions(text)
+    .filter(a => a.type === 'package-install' || a.type === 'package-remove');
+  if (!actions.length) return;
+  if (!window._packageQueue) window._packageQueue = [];
+  window._packageQueue.push(...actions);
+  pumpPackageQueue();
+}
+
+function pumpPackageQueue() {
+  if (document.getElementById('package-bar')) return;
+  const next = (window._packageQueue || []).shift();
+  if (!next) return;
+  showPackageBar(next, {
+    approved: (res, name, version) => {
+      addSystemMessage(packageResultText({ ...next, name, version }, res));
+      pumpPackageQueue();
+    },
+    declined: () => {
+      addSystemMessage('User declined package ' + (next.type === 'package-install' ? 'install' : 'removal') + ': ' + (next.name || next.raw));
+      pumpPackageQueue();
+    },
+  });
 }
 
 function buildSystemPrompt(rulesets) {
@@ -709,6 +1195,7 @@ function buildSystemPrompt(rulesets) {
     prompt += '## Mode: Plan\nOutput a plan only: FILE: lines for every file to touch, then numbered steps. Do not write code yet.\n';
   } else {
     prompt += '## Mode: Agent\nWork step by step. Output complete code in fenced code blocks, each preceded by **File Path:** `path`, one file per block. No placeholders, no TODOs, no truncated code. If a step is too large for one reply, do the first step only and say what remains.\n';
+    prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
   }
   return prompt;
 }
@@ -755,7 +1242,7 @@ function projectScanSummary() {
   const parts = [];
   if (scan.unityVersion) parts.push('Unity version: ' + scan.unityVersion);
   const pkgs = Object.keys(scan.packages || {});
-  if (pkgs.length) parts.push('Packages: ' + pkgs.slice(0, 30).join(', '));
+  if (pkgs.length) parts.push('Packages: ' + pkgs.slice(0, 30).map(n => n + '@' + (scan.packages[n] || '') + (scan.locked && scan.locked[n] && scan.locked[n] !== scan.packages[n] ? ' (locked ' + scan.locked[n] + ')' : '')).join(', '));
   if (scan.scenes && scan.scenes.length) parts.push('Scenes: ' + scan.scenes.map(x => x.path + (x.gameObjects.length ? ' (' + x.gameObjects.slice(0, 10).join(', ') + ')' : '')).join('; ').slice(0, 1200));
   if (scan.prefabs && scan.prefabs.length) parts.push('Prefabs: ' + scan.prefabs.map(x => x.path).slice(0, 40).join(', '));
   parts.push('Scripts: ' + scan.scriptCount + ' C# files' + (scan.scripts ? ' — ' + scan.scripts.slice(0, 60).join(', ') : ''));
@@ -1196,7 +1683,7 @@ function renderSettingsView() {
     connections: ['Your Connections', 'Local integrations for this project. Nothing here phones home.'],
     mcps: ['MCPs', 'Connect local MCP servers so the assistant can use their tools. Servers run on this machine; CodeFox never sends your code to them or anywhere else.'],
     rules: ['Rules', 'Rules are your instructions to the assistant — how CodeFox should write code, what to never do, your architecture contracts. They are the system prompt the model sees.'],
-    advanced: ['Advanced', 'Shell tool, approvals, and which files CodeFox ignores.'],
+    advanced: ['Advanced', 'Shell tool, agent loop, approvals, and which files CodeFox ignores.'],
   };
   const sec = state.settingsSection || 'model';
   el.innerHTML = `
@@ -1412,14 +1899,32 @@ async function renderSettingsConnections() {
   const proj = state.activeProject;
   const bridgePath = state.projectPath ? state.projectPath + '/Assets/Editor/CodeFoxBridge.cs' : '';
   // Status is derived live from whether the bridge file exists — never faked.
-  const bridgeExists = bridgePath ? await rb.fs.exists(bridgePath) : false;
+  let bridgeExists = bridgePath ? await rb.fs.exists(bridgePath) : false;
+  // Auto-install (v0.5.0): opening Connections on a Unity project
+  // without a bridge installs it now. A real failure (e.g. the folder
+  // is not writable) is shown as the status, not hidden.
+  let bridgeError = null;
+  if (!bridgeExists && state.projectPath) {
+    const hasAssets = await rb.fs.exists(state.projectPath + '/Assets');
+    if (hasAssets) {
+      try {
+        const ensured = await rb.unity.ensureBridge(state.projectPath);
+        if (ensured && ensured.ok) bridgeExists = true;
+        else if (ensured) bridgeError = ensured.error || 'Bridge install failed';
+      } catch (e) { bridgeError = e.message || 'Bridge install failed'; }
+    }
+  }
+  // Installed Unity packages, from Packages/manifest.json — read live
+  // so the list (and the model, via the project scan) never goes stale.
+  let pkgInfo = null;
+  try { pkgInfo = await rb.unity.listPackages(state.projectPath); } catch { pkgInfo = null; }
   const rows = [];
   if (filter === 'all' || filter === 'unity') {
     rows.push(`
     <div class="conn-row">
       <span class="conn-ico">⬢</span>
       <span class="conn-row-info"><span class="conn-name">Unity Project — ${escHtml(proj ? proj.name : 'No project')}</span><br>
-      <span class="conn-status ${bridgeExists ? 'connected' : ''}">${bridgeExists ? 'Connected — bridge installed' : 'Not connected — bridge not installed'}</span><br>
+      <span class="conn-status ${bridgeExists ? 'connected' : ''}">${bridgeExists ? 'Connected — bridge installed' : (bridgeError ? 'Bridge install failed: ' + escHtml(bridgeError) : 'Not connected — bridge not installed')}</span><br>
       <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(state.projectPath || 'No folder set')}</span></span>
       <button class="btn btn-secondary" onclick="updateUnityBridge()" title="Re-install the bridge into Assets/Editor/">Update plugin</button>
       <label class="switch" title="${bridgeExists ? 'Disable the bridge (removes it from the project)' : 'Enable the bridge (installs it into the project)'}"><input type="checkbox" ${bridgeExists ? 'checked' : ''} onchange="toggleUnityBridge(this.checked)"><span class="slider"></span></label>
@@ -1428,6 +1933,7 @@ async function renderSettingsConnections() {
     <div id="conn-menu-row" class="hidden" style="margin:-4px 0 10px;text-align:right;">
       <button class="btn btn-danger" onclick="disconnectUnityBridge()">Disconnect — remove the bridge from this project</button>
     </div>`);
+    rows.push(unityPackagesSectionHtml(pkgInfo));
   }
   if (filter === 'all' || filter === 'folders') {
     state.localFolders.forEach((folder, i) => {
@@ -1446,6 +1952,52 @@ async function renderSettingsConnections() {
     }
   }
   list.innerHTML = rows.join('');
+}
+
+// Packages section, shared by Settings > Connections and the
+// Connections view: installed packages read live from
+// Packages/manifest.json, each with a Remove button that needs a
+// confirm click. Returns '' when no project folder is set.
+function unityPackagesSectionHtml(pkgInfo) {
+  if (!state.projectPath) return '';
+  let inner = '';
+  if (pkgInfo && pkgInfo.ok) {
+    const deps = pkgInfo.dependencies || {};
+    const names = Object.keys(deps);
+    inner = names.length
+      ? names.map(n => {
+          const locked = pkgInfo.locked && pkgInfo.locked[n];
+          const ver = deps[n] || '';
+          return `<div class="conn-row">
+            <span class="conn-ico">▣</span>
+            <span class="conn-row-info"><span class="conn-name">${escHtml(n)}</span><br>
+            <span class="conn-status" style="font-family:var(--mono);">${escHtml(ver)}${locked && locked !== ver ? ' · locked ' + escHtml(locked) : ''}</span></span>
+            <button class="btn btn-secondary" onclick="removeUnityPackage('${n.replace(/'/g, "\\'")}', this)">Remove</button>
+          </div>`;
+        }).join('')
+      : '<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No packages in Packages/manifest.json yet — ask the assistant to install one, or add it by hand.</div>';
+  } else {
+    inner = '<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No Packages/manifest.json in this project yet — package installs need a Unity project folder.</div>';
+  }
+  return `<h3 class="settings-subhead">Packages</h3>
+    <p class="settings-note">Installed Unity packages, read live from Packages/manifest.json. Removing a package backs the manifest up first and asks Unity to refresh. The assistant can install packages too — every install asks first.</p>
+    ${inner}`;
+}
+
+// Remove a package from the manifest. First click arms the button;
+// the second click really removes it (via unity:removePackage,
+// which backs the manifest up first).
+async function removeUnityPackage(name, btn) {
+  if (!name) return;
+  if (!btn || btn.dataset.armed !== '1') {
+    if (btn) { btn.dataset.armed = '1'; btn.textContent = 'Click again to confirm'; }
+    return;
+  }
+  const res = await rb.unity.removePackage({ name, projectPath: state.projectPath });
+  if (res.ok) showToast('✓ Removed ' + name + ' — manifest backed up, Unity will refresh');
+  else showToast('⚠ ' + (res.error || 'Remove failed'));
+  if (state.mode === 'settings') renderSettingsView();
+  if (state.mode === 'connections') renderConnectionsView();
 }
 
 function toggleConnMenu() {
@@ -1802,8 +2354,23 @@ function renderAdvancedPane(body) {
         <button class="btn btn-teal" onclick="runManualCommand()">Run</button>
       </div>
       <pre id="shell-manual-output" class="settings-output">No command run yet.</pre>
-      <p class="settings-note">Dangerous commands are never run automatically: rm, del, Remove-Item, format, rm -rf, and Remove-Item -Recurse always ask first, even if they match an auto-approved prefix.</p>
+      <p class="settings-note">Dangerous commands are never run automatically: rm, del, Remove-Item, format, rm -rf, Remove-Item -Recurse, Remove-Item -Force -Recurse, rmdir /s, and rd /s always ask first, even if they match an auto-approved prefix.</p>
     </div>
+    <h3 class="settings-subhead">Agent loop</h3>
+    <p class="settings-note">In Agent mode, CodeFox runs a loop: after each reply it runs the model's safe commands, applies its file changes, and installs the packages it asked for, then sends the results back to the model so it can fix errors and try again — without you prompting again. Ask and Plan modes never loop.</p>
+    <label class="field-label">Max tool rounds per reply (1–10)
+      <div style="display:flex;gap:8px;">
+        <input id="agent-max-rounds" type="number" min="1" max="10" step="1" value="${state.agentMaxRounds}" style="flex:1;" />
+        <button class="btn btn-secondary" onclick="saveAgentMaxRounds()" style="flex-shrink:0;">Save</button>
+      </div>
+      <span class="field-note">Default: 5. When the max is reached the loop stops and says so — it never runs unbounded. Click Stop under the reply to end a loop early.</span>
+    </label>
+    <h3 class="settings-subhead">What runs automatically, what always asks</h3>
+    <div class="settings-note-box">• Safe auto-approved commands run automatically in Auto Mode.
+• Dangerous commands (rm, del, Remove-Item, format, rm -rf, rmdir /s, rd /s, Remove-Item -Recurse) always ask first.
+• Package installs and removals always ask first — even in Auto Mode, even with auto-accept on.
+• File changes ask first unless auto-accept is on (and are snapshotted first either way).
+• Nothing runs while the shell is off, and no package is installed while no project folder is set.</div>
     <h3 class="settings-subhead">Editor Integration</h3>
     <p class="settings-note">The Unity bridge is CodeFox's editor integration — it refreshes Unity's AssetDatabase when CodeFox writes files, and runs editor commands from Unity. There is nothing else to configure here.</p>
     <button class="btn btn-secondary" onclick="showSettings('connections')">Manage the Unity bridge in Connections →</button>`;
@@ -1819,6 +2386,16 @@ async function setShellToggle(key, checked) {
   if (key === 'shell_enabled') {
     showToast(on ? 'Shell tool enabled — commands can run from this app' : 'Shell tool disabled — no commands can run');
   }
+}
+
+async function saveAgentMaxRounds() {
+  const raw = parseInt(document.getElementById('agent-max-rounds')?.value, 10);
+  if (isNaN(raw)) { showToast('Enter a number from 1 to 10'); return; }
+  const max = clampAgentMaxRounds(raw);
+  state.agentMaxRounds = max;
+  await rb.db.setSetting('agent_max_rounds', String(max));
+  renderSettingsView();
+  showToast('✓ Max agent rounds saved: ' + max);
 }
 
 async function addAutoApprove() {
@@ -1881,9 +2458,10 @@ function appendShellResultTo(el, cmd, res) {
 // the shell tool is on, Auto Mode is on, the command's first line
 // starts with an auto-approved prefix, and the command is not
 // dangerous. Dangerous commands — rm, del, Remove-Item, format,
-// rm -rf, Remove-Item -Recurse — always require an explicit Run click,
-// even if they match a prefix. Anything else the assistant suggests
-// gets a Run / Dismiss bar instead.
+// rm -rf, Remove-Item -Recurse, Remove-Item -Force -Recurse,
+// rmdir /s, rd /s — always require an explicit Run click, even if
+// they match a prefix. Anything else the assistant suggests gets a
+// Run / Dismiss bar instead.
 function extractShellBlocks(text) {
   const out = [];
   const re = /```(powershell|pwsh|shell)\s*\n([\s\S]*?)```/gi;
@@ -1902,7 +2480,7 @@ function firstCommandLine(cmd) {
 function isDangerousCommand(cmd) {
   const text = String(cmd || '');
   const first = firstCommandLine(cmd);
-  const patterns = [/^\s*rm\b/i, /^\s*del\b/i, /^\s*format\b/i, /^\s*remove-item\b/i, /rm\s+-rf/i, /remove-item\s+.*-recurse/i];
+  const patterns = [/^\s*rm\b/i, /^\s*del\b/i, /^\s*format\b/i, /^\s*remove-item\b/i, /^\s*rmdir\b/i, /^\s*rd\b/i, /rm\s+-rf/i, /remove-item\s+.*-recurse/i, /remove-item\s+.*-force\s+.*-recurse/i, /remove-item\s+.*-recurse\s+.*-force/i, /rmdir\s+\/s/i, /\brd\s+\/s/i];
   return patterns.some(re => re.test(text) || re.test(first));
 }
 
@@ -1925,9 +2503,9 @@ async function handleShellBlocks(text) {
   }
 }
 
-function showShellBar(cmd) {
+function showShellBar(cmd, onDecision) {
   if (!window._shellQueue) window._shellQueue = [];
-  window._shellQueue.push(cmd);
+  window._shellQueue.push({ cmd, onDecision: onDecision || null });
   renderShellBar();
 }
 
@@ -1935,8 +2513,10 @@ function renderShellBar() {
   const existing = document.getElementById('shell-bar');
   if (existing) existing.remove();
   const queue = window._shellQueue || [];
-  const cmd = queue[0];
-  if (!cmd) return;
+  const entry = queue[0];
+  if (!entry) return;
+  const cmd = entry.cmd || entry;
+  const onDecision = entry.onDecision || null;
   const bar = document.createElement('div');
   bar.id = 'shell-bar';
   bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
@@ -1946,23 +2526,35 @@ function renderShellBar() {
   const runBtn = document.createElement('button');
   runBtn.className = 'btn btn-teal';
   runBtn.textContent = '▶ Run';
-  runBtn.onclick = () => runShellCommand(cmd);
+  runBtn.onclick = () => runShellCommand(cmd, onDecision);
   const dismissBtn = document.createElement('button');
   dismissBtn.className = 'btn btn-secondary';
   dismissBtn.textContent = 'Dismiss';
-  dismissBtn.onclick = () => { window._shellQueue.shift(); renderShellBar(); };
+  dismissBtn.onclick = () => {
+    if (window._shellQueue) window._shellQueue.shift();
+    renderShellBar();
+    if (onDecision) onDecision({ decision: 'declined' });
+  };
   bar.appendChild(label);
   bar.appendChild(runBtn);
   bar.appendChild(dismissBtn);
   document.body.appendChild(bar);
 }
 
-async function runShellCommand(cmd) {
+async function runShellCommand(cmd, onDecision) {
   const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+  if (window._shellQueue) {
+    const i = window._shellQueue.findIndex(e => (e.cmd || e) === cmd);
+    if (i >= 0) window._shellQueue.splice(i, 1);
+  }
+  renderShellBar();
+  if (onDecision) {
+    // Agent loop: the loop appends the tool result itself.
+    onDecision({ decision: 'run', result: res });
+    return;
+  }
   const output = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim() || '(no output)';
   addSystemMessage('$ ' + cmd + '\n' + output + (res.ok === false ? '\n⚠ ' + (res.error || ('Command exited with code ' + res.code)) : ''));
-  if (window._shellQueue) window._shellQueue.shift();
-  renderShellBar();
 }
 
 
@@ -2019,8 +2611,19 @@ function extractFileChanges(responseText) {
       const m = line.match(pat);
       if (m) { pendingPath = m[1].trim(); break; }
     }
-    // Any fenced code block (```csharp, ```json, ```, …)
-    if (line.match(/^```\s*\S*\s*$/)) {
+    // Any fenced code block (```csharp, ```json, ```, …) — except
+    // action blocks (powershell / upm-install / upm-remove), which
+    // are not files and are handled by the agent loop instead.
+    const fenceMatch = line.match(/^```\s*(\S*)\s*$/);
+    if (fenceMatch) {
+      const fenceLang = (fenceMatch[1] || '').toLowerCase();
+      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove') {
+        let j = i + 1;
+        while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;
+        i = j;
+        pendingPath = null;
+        continue;
+      }
       let code = '';
       let j = i + 1;
       while (j < lines.length && !lines[j].match(/^```\s*$/)) {
@@ -2072,8 +2675,9 @@ function diffLines(oldLines, newLines) {
 }
 
 let pendingDiffChanges = null;
-async function showDiffOverlay(changes) {
+async function showDiffOverlay(changes, onDecision) {
   pendingDiffChanges = changes;
+  window._diffOnDecision = onDecision || null;
   const content = document.getElementById('diff-content');
   const overlay = document.getElementById('diff-overlay');
   if (!content || !overlay) return;
@@ -2100,16 +2704,25 @@ function closeDiffOverlay() {
 }
 function applyFromDiff() {
   if (!pendingDiffChanges) return;
+  const changes = pendingDiffChanges;
+  const onDecision = window._diffOnDecision || null;
+  window._diffOnDecision = null;
   closeDiffOverlay();
-  applyFileChanges(pendingDiffChanges);
+  applyFileChanges(changes).then(summary => {
+    if (onDecision) onDecision({ decision: 'applied', summary });
+  });
 }
 
-function showApplyBar(changes) {
+function showApplyBar(changes, onDecision) {
   // Remove existing bar if any
   const existing = document.getElementById('apply-bar');
   if (existing) existing.remove();
   if (!changes.length) return;
-  if (state.autoAcceptChanges) {
+  // Auto-accept only applies on the plain (non-loop) path. When the
+  // agent loop is waiting on this bar, the loop already applied
+  // directly when auto-accept is on — reaching here means the user
+  // must be asked.
+  if (state.autoAcceptChanges && !onDecision) {
     // Auto-accept is on (Settings > Advanced): apply without waiting.
     // applyFileChanges snapshots first, and the revert bar is always
     // shown afterwards, so the user can still undo.
@@ -2132,17 +2745,23 @@ function showApplyBar(changes) {
   const applyBtn = document.createElement('button');
   applyBtn.className = 'btn btn-teal';
   applyBtn.textContent = '▶ Apply changes';
-  applyBtn.onclick = () => applyFileChanges(changes);
+  applyBtn.onclick = async () => {
+    const summary = await applyFileChanges(changes);
+    if (onDecision) onDecision({ decision: 'applied', summary });
+  };
 
   const diffBtn = document.createElement('button');
   diffBtn.className = 'btn btn-secondary';
   diffBtn.textContent = 'Review diff';
-  diffBtn.onclick = () => showDiffOverlay(changes);
+  diffBtn.onclick = () => showDiffOverlay(changes, onDecision);
 
   const dismissBtn = document.createElement('button');
   dismissBtn.className = 'btn btn-secondary';
   dismissBtn.textContent = 'Dismiss';
-  dismissBtn.onclick = () => bar.remove();
+  dismissBtn.onclick = () => {
+    bar.remove();
+    if (onDecision) onDecision({ decision: 'declined' });
+  };
 
   bar.appendChild(label);
   bar.appendChild(fileList);
@@ -2225,6 +2844,7 @@ async function applyFileChanges(changes) {
 
   // ── Step 4: Show revert bar ──────────────────────────────────────
   showRevertBar(snapshotId, label, backedUp.length, newFiles.length);
+  return { written, failed, errors, snapshotId, label };
 }
 
 function resolvePath(filePath) {
@@ -2361,6 +2981,9 @@ async function switchProject(id) {
   if (dd) dd.classList.add('hidden');
   const proj = await rb.project.switch(id);
   if (!proj) { showToast('⚠ Could not switch project'); return; }
+  if (proj.bridge && !proj.bridge.ok && !proj.bridge.skipped) {
+    showToast('⚠ Bridge install failed: ' + proj.bridge.error);
+  }
   state.activeProjectId = Number(proj.id);
   state.activeProject = proj;
   state.projectPath = proj.path || '';
@@ -2816,13 +3439,14 @@ async function renderConnectionsView() {
   const list = document.getElementById('connections-list');
   if (!list) return;
 
-  const [llmStatus, ollamaStatus, bridgeExists, figmaToken, jiraToken, jiraUrl] = await Promise.all([
+  const [llmStatus, ollamaStatus, bridgeExists, figmaToken, jiraToken, jiraUrl, pkgInfo] = await Promise.all([
     rb.llm.status().catch(() => ({ running: false })),
     rb.ollama.status().catch(() => ({ running: false })),
     state.projectPath ? rb.fs.exists(state.projectPath + '/Assets/Editor/CodeFoxBridge.cs') : Promise.resolve(false),
     rb.db.getSetting('figma_token'),
     rb.db.getSetting('jira_token'),
     rb.db.getSetting('jira_url'),
+    rb.unity.listPackages(state.projectPath).catch(() => null),
   ]);
   const lmRunning = llmStatus.provider !== 'ollama' && llmStatus.running;
   const rows = [
@@ -2871,7 +3495,7 @@ async function renderConnectionsView() {
       <span class="conn-row-info"><span class="conn-name">${escHtml(r.name)}</span><br>
       <span class="conn-status ${r.connected ? 'connected' : ''}">${escHtml(r.status)}</span></span>
       ${r.action}
-    </div>`).join('');
+    </div>`).join('') + unityPackagesSectionHtml(pkgInfo);
 }
 
 async function installUnityBridge() {

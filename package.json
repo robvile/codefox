@@ -1,16 +1,16 @@
 {
   "name": "codefox",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "node scripts/prepare-icons.js && npm run clean && electron-builder",
-    "build:win": "node scripts/prepare-icons.js && npm run clean && electron-builder --win",
-    "build:mac": "node scripts/prepare-icons.js && npm run clean && electron-builder --mac",
-    "build:linux": "node scripts/prepare-icons.js && npm run clean && electron-builder --linux",
+    "build": "node scripts/embed-bridge.js && node scripts/prepare-icons.js && npm run clean && electron-builder",
+    "build:win": "node scripts/embed-bridge.js && node scripts/prepare-icons.js && npm run clean && electron-builder --win",
+    "build:mac": "node scripts/embed-bridge.js && node scripts/prepare-icons.js && npm run clean && electron-builder --mac",
+    "build:linux": "node scripts/embed-bridge.js && node scripts/prepare-icons.js && npm run clean && electron-builder --linux",
     "test": "node test/smoke.js",
     "clean": "node scripts/clean-dist.js"
   },
@@ -35,6 +35,10 @@
       "app.js",
       "index.html",
       "package.json",
+      "upm-manifest.js",
+      "unity-bridge.js",
+      "unity-bridge-source.js",
+      "unity-companion/**/*",
       "node_modules/**/*",
       "build/icon.png"
     ],

@@ -199,6 +199,7 @@
   #chat-input-area { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; }
   #chat-input { flex: 1; background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: var(--font); resize: none; min-height: 38px; max-height: 160px; outline: none; line-height: 1.5; }
   #chat-input:focus { border-color: var(--accent); }
+  #loop-status { padding: 6px 16px; font-size: 11px; color: var(--text3); font-family: var(--mono); flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ── Editor mode (ruleset / plan / page) ── */
   #editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
@@ -376,7 +377,7 @@
         <div class="nav-item" id="nav-connections" onclick="showConnections()"><span class="nav-ico">⇄</span>Connections</div>
       </div>
 
-      <div id="sidebar-footer">CodeFox 0.4.0 — Local · No account needed</div>
+      <div id="sidebar-footer">CodeFox 0.5.0 — Local · No account needed</div>
     </div>
 
     <!-- CENTER -->
@@ -441,8 +442,10 @@
             <button class="tool-btn" onclick="buildCheck()">Build check</button>
           </div>
           <div id="chat-messages"></div>
+          <div id="loop-status" class="hidden"></div>
           <div id="chat-input-area">
             <textarea id="chat-input" placeholder="Ask about CodeFox..." rows="1" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
+            <button id="stop-loop-btn" class="btn btn-danger hidden" onclick="stopAgentLoop()" title="Stop the agent loop">Stop</button>
             <button class="btn btn-primary" onclick="sendChat()">Send</button>
           </div>
         </div>

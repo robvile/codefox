@@ -2,6 +2,7 @@
 // Run: node test/smoke.js
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
@@ -12,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-bridge.js', 'unity-bridge-source.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -21,9 +22,9 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
   }
 }
 
-// 2. package.json version is 0.4.0.
+// 2. package.json version is 0.5.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.4.0', pkg.version === '0.4.0', 'got ' + pkg.version);
+check('package.json version is 0.5.0', pkg.version === '0.5.0', 'got ' + pkg.version);
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -139,6 +140,143 @@ check('build scripts regenerate icons first', typeof pkg.scripts['build:win'] ==
 check('package.json win icon is build/icon.ico', pkg.build && pkg.build.win && pkg.build.win.icon === 'build/icon.ico', 'got ' + (pkg.build && pkg.build.win && pkg.build.win.icon));
 check('package.json build icon is build/icon.png', pkg.build && pkg.build.icon === 'build/icon.png', 'got ' + (pkg.build && pkg.build.icon));
 check('kitsune mark still in index.html', indexHtml.includes('kitsune-mark'));
+
+// 10. v0.5.0 agent loop + Unity Package Manager.
+check('main.js has unity:listPackages IPC', mainJs.includes("ipcMain.handle('unity:listPackages'"));
+check('main.js has unity:addPackage IPC', mainJs.includes("ipcMain.handle('unity:addPackage'"));
+check('main.js has unity:removePackage IPC', mainJs.includes("ipcMain.handle('unity:removePackage'"));
+check('main.js has updateManifest helper', mainJs.includes('function updateManifest'));
+check('main.js has agent_max_rounds default', mainJs.includes("'agent_max_rounds', '5'"));
+check('preload.js exposes rb.unity listPackages/addPackage/removePackage',
+  preloadJs.includes('listPackages') && preloadJs.includes('addPackage') && preloadJs.includes('removePackage'));
+check('app.js has agent loop (runAgentTurn)', appJs.includes('runAgentTurn') && appJs.includes('streamOneTurn'));
+check('app.js has agent_max_rounds setting', appJs.includes('agent_max_rounds') && appJs.includes('saveAgentMaxRounds'));
+check('app.js has Stop button + loop status', appJs.includes('stop-loop-btn') && appJs.includes('stopAgentLoop') && appJs.includes('loop-status') && appJs.includes('setLoopStatus'));
+check('app.js parses upm-install / upm-remove blocks', appJs.includes('upm-install') && appJs.includes('upm-remove') && appJs.includes('parseUpmBlocks'));
+check('app.js has package approval bar', appJs.includes('package-bar') && appJs.includes('showPackageBar'));
+check('app.js loop ends at max rounds', appJs.includes('Stopped after ') && appJs.includes('tool rounds'));
+check('app.js loop stop message', appJs.includes('Stopped by user.'));
+check('app.js tool results are user messages', appJs.includes('Tool result — ') && appJs.includes('appendToolResult'));
+check('app.js Agent prompt mentions tool results', appJs.includes('come back to you as tool results'));
+check('dangerous list includes rmdir / rd', appJs.includes('rmdir') && appJs.includes('Remove-Item -Force -Recurse'));
+check('index.html has Stop button + loop status', indexHtml.includes('stop-loop-btn') && indexHtml.includes('loop-status'));
+check('README documents the agent loop', readme.includes('Agent mode (the loop)') && readme.includes('agent_max_rounds'));
+check('README documents Unity Package Manager', readme.includes('Unity Package Manager') && readme.includes('upm-install'));
+// Package installs are only reachable from the approval bar: the
+// install call appears exactly once, inside showPackageBar, and the
+// remove call only in showPackageBar and the confirm-click remover.
+function enclosingFunction(src, idx) {
+  const head = src.slice(0, idx);
+  let best = null, bestIdx = -1;
+  for (const m of head.matchAll(/function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (m.index > bestIdx) { bestIdx = m.index; best = m[1]; }
+  }
+  return best;
+}
+const addPkgIdx = appJs.indexOf('rb.unity.addPackage');
+check('package install call appears once', appJs.split('rb.unity.addPackage').length - 1 === 1);
+check('package install call is inside showPackageBar', addPkgIdx !== -1 && enclosingFunction(appJs, addPkgIdx) === 'showPackageBar');
+const removePkgIdxs = [];
+{ let i = -1; while ((i = appJs.indexOf('rb.unity.removePackage', i + 1)) !== -1) removePkgIdxs.push(i); }
+check('package remove call appears twice (bar + confirm)', removePkgIdxs.length === 2);
+check('package remove calls are in approval handlers',
+  removePkgIdxs.length === 2 && removePkgIdxs.every(i => ['showPackageBar', 'removeUnityPackage'].includes(enclosingFunction(appJs, i))));
+check('app.js has Packages list + remove', appJs.includes('unityPackagesSectionHtml') && appJs.includes('removeUnityPackage'));
+
+// 11. v0.5.0 bridge install fix: packaging, embedded fallback, auto-install.
+// The old error text is built from parts (as with FORBIDDEN above)
+// so this file itself does not contain it.
+const COPY_BY_HAND = ['Copy unity-companion/CodeFoxBridge.cs', ' to Assets/Editor/', ' by hand'].join('');
+check('package.json build.files includes unity-companion',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('unity-companion/**/*'));
+check('package.json build.files includes new runtime helpers',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('upm-manifest.js')
+  && pkg.build.files.includes('unity-bridge.js') && pkg.build.files.includes('unity-bridge-source.js'));
+check('build scripts regenerate the embedded bridge first',
+  typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('scripts/embed-bridge.js'));
+check('main.js has no copy-by-hand bridge error',
+  !mainJs.includes(COPY_BY_HAND));
+check('main.js uses the bridge helper with embedded fallback',
+  mainJs.includes("require('./unity-bridge')") && mainJs.includes('installBridgeFile') && mainJs.includes('unity:ensureBridge'));
+check('main.js auto-installs the bridge on connect/startup',
+  (mainJs.match(/ensureBridge\(/g) || []).length >= 5);
+check('preload.js exposes rb.unity.ensureBridge', preloadJs.includes('ensureBridge'));
+check('app.js auto-installs the bridge from Connections', appJs.includes('rb.unity.ensureBridge'));
+check('app.js shows a real bridge error, not a copy-by-hand note',
+  appJs.includes('Bridge install failed: ') && !appJs.includes(COPY_BY_HAND));
+check('scripts/embed-bridge.js exists', fs.existsSync(path.join(root, 'scripts', 'embed-bridge.js')));
+check('unity-bridge-source.js exists', fs.existsSync(path.join(root, 'unity-bridge-source.js')));
+const bridgeSrc = require(path.join(root, 'unity-bridge-source.js'));
+const bridgeCs = fs.readFileSync(path.join(root, 'unity-companion', 'CodeFoxBridge.cs'), 'utf8');
+check('embedded bridge source matches CodeFoxBridge.cs', bridgeSrc.BRIDGE_SOURCE === bridgeCs);
+
+// 12. Manifest add/remove round-trip against a temp directory.
+const upm = require(path.join(root, 'upm-manifest.js'));
+const tmpUpm = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-upm-'));
+try {
+  fs.mkdirSync(path.join(tmpUpm, 'Packages'), { recursive: true });
+  fs.writeFileSync(path.join(tmpUpm, 'Packages', 'manifest.json'),
+    JSON.stringify({ dependencies: { 'com.unity.textmeshpro': '3.0.6' } }, null, 2));
+  let r = upm.updateManifest(tmpUpm, (m) => { m.dependencies['com.unity.inputsystem'] = '1.8.2'; });
+  check('manifest add succeeds', r.ok === true);
+  let after = JSON.parse(fs.readFileSync(path.join(tmpUpm, 'Packages', 'manifest.json'), 'utf8'));
+  check('manifest add keeps existing + adds new',
+    after.dependencies['com.unity.textmeshpro'] === '3.0.6' && after.dependencies['com.unity.inputsystem'] === '1.8.2');
+  check('manifest backup written', fs.existsSync(path.join(tmpUpm, 'Packages', 'manifest.json.codefox-bak')));
+  check('manifest backup holds the original',
+    JSON.parse(fs.readFileSync(path.join(tmpUpm, 'Packages', 'manifest.json.codefox-bak'), 'utf8')).dependencies['com.unity.inputsystem'] === undefined);
+  check('manifest kept 2-space indent',
+    fs.readFileSync(path.join(tmpUpm, 'Packages', 'manifest.json'), 'utf8').includes('\n  "dependencies"'));
+  r = upm.updateManifest(tmpUpm, (m) => { delete m.dependencies['com.unity.textmeshpro']; });
+  check('manifest remove succeeds', r.ok === true);
+  after = JSON.parse(fs.readFileSync(path.join(tmpUpm, 'Packages', 'manifest.json'), 'utf8'));
+  check('manifest remove deletes only that package',
+    !('com.unity.textmeshpro' in after.dependencies) && after.dependencies['com.unity.inputsystem'] === '1.8.2');
+  check('manifest validation accepts real names/versions',
+    upm.isValidPackageName('com.unity.textmeshpro') && upm.isValidPackageVersion('3.0.6')
+    && upm.isValidPackageVersion('https://github.com/user/repo.git#1.0.0'));
+  check('manifest validation rejects bad names/versions',
+    !upm.isValidPackageName('notaname') && !upm.isValidPackageName('') && !upm.isValidPackageVersion(''));
+  check('manifest add refuses a missing manifest',
+    upm.updateManifest(path.join(tmpUpm, 'no-such-project'), () => {}).ok === false);
+  const spec = upm.parsePackageSpec('com.unity.textmeshpro@3.0.6');
+  check('manifest parse name@version', spec && spec.name === 'com.unity.textmeshpro' && spec.version === '3.0.6');
+  check('manifest parse name-only needs a version',
+    upm.parsePackageSpec('com.unity.textmeshpro').version === '');
+  check('manifest parse git URL', upm.parsePackageSpec('https://github.com/user/repo.git#1.0.0').isGit === true);
+} finally {
+  fs.rmSync(tmpUpm, { recursive: true, force: true });
+}
+
+// 13. Bridge fallback: install from the embedded copy when the disk
+// file is absent (temp app dir with no unity-companion folder).
+const bridge = require(path.join(root, 'unity-bridge.js'));
+const tmpBridge = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-bridge-'));
+const tmpAppDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-appdir-'));
+try {
+  fs.mkdirSync(path.join(tmpBridge, 'Assets'), { recursive: true });
+  const installed = bridge.installBridgeFile(tmpBridge, tmpAppDir);
+  check('bridge installs from embedded copy when disk file is absent',
+    installed.ok === true && installed.from === 'embedded');
+  check('bridge file written to Assets/Editor',
+    fs.existsSync(path.join(tmpBridge, 'Assets', 'Editor', 'CodeFoxBridge.cs')));
+  check('installed bridge matches the embedded source',
+    fs.readFileSync(path.join(tmpBridge, 'Assets', 'Editor', 'CodeFoxBridge.cs'), 'utf8') === bridge.embeddedSource());
+  check('ensureBridge no-ops when bridge already installed',
+    bridge.ensureBridge(tmpBridge, tmpAppDir).already === true);
+  check('ensureBridge refuses a missing project folder',
+    bridge.ensureBridge(path.join(tmpBridge, 'no-such-project'), tmpAppDir).ok === false);
+  const tmpNoAssets = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-noassets-'));
+  try {
+    const skipped = bridge.ensureBridge(tmpNoAssets, tmpAppDir);
+    check('ensureBridge skips a folder with no Assets folder', skipped.skipped === true);
+  } finally { fs.rmSync(tmpNoAssets, { recursive: true, force: true }); }
+  check('bridge disk source preferred when present',
+    bridge.resolveBridgeSource(root).from === 'disk');
+} finally {
+  fs.rmSync(tmpBridge, { recursive: true, force: true });
+  fs.rmSync(tmpAppDir, { recursive: true, force: true });
+}
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');

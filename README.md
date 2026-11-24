@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.4.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.5.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -18,12 +18,14 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 - **Multiple projects** — keep several local projects in CodeFox, each with its own conversations, rulesets, plans, and references. Switch from the project selector at the top of the sidebar, or create a new one with **New Project**. No accounts, no teams, no sync — everything stays on this machine
 - **Chat** with a local LLM about your codebase across persistent conversations
 - **Ask / Plan / Agent modes** — Ask answers and explains only, Plan drafts steps and file lists without writing code, Agent works step by step and outputs complete code in fenced blocks with file paths
+- **Agent mode (the loop)** — in Agent mode the assistant runs its own commands, reads the output, and tries again on its own (build, see the error, fix it, rebuild), up to a max number of tool rounds, with a Stop button and approval bars for anything risky
+- **Unity Package Manager** — the assistant can install and remove Unity packages by editing `Packages/manifest.json` (backed up first, Unity refreshes after). Package installs always ask first, and a missing version is never guessed — you type it in the approval bar
 - **Project scan** — reads your Unity project (version, packages, scenes, prefabs, scripts) and includes a summary in every prompt, so the model knows what actually exists instead of guessing
 - **Rulesets** — define project rules, architecture contracts, naming conventions. Auto-injected into every prompt.
 - **Plans** — describe what you want done. The AI proposes steps and lists files before touching anything. You approve, then execute.
 - **References** — pages and plans in one list: AI-authored architecture docs (pages) and step-by-step plans, kept per project so they grow into a living knowledge base
 - **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it
-- **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/` (and can be removed again from Settings → Connections, which deletes the file); Figma/Jira tokens are stored locally and used only for those imports
+- **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/` (and can be removed again from Settings → Connections, which deletes the file); it installs automatically whenever a Unity project is connected, and opening Settings → Connections on a project without a bridge installs it then. Figma/Jira tokens are stored locally and used only for those imports
 - **MCPs** — configure local MCP servers (command, arguments, environment) in Settings → MCPs. Servers run on this machine; the assistant does not call MCP tools yet, and the UI says so — the settings are stored so that wiring can be added without reconfiguring
 - **Shell tool** — with the shell off by default, the assistant's PowerShell blocks never run on their own. Turn it on in Settings → Advanced to run commands, auto-approve safe prefixes, or auto-accept project changes (still snapshotted first, always revertible)
 - **File tree** — browse your project, view files, add them to chat with one click. Search across all files instantly.
@@ -108,7 +110,7 @@ Use the **Ask / Plan / Agent** buttons above the chat input:
 
 - **Ask** — the model answers and explains only. It will not propose file writes.
 - **Plan** — the model outputs a plan: `FILE:` lines for every file to touch, then numbered steps. No code yet.
-- **Agent** — the model works step by step and outputs complete code, one file per fenced block, each preceded by `**File Path:** \`path\``.
+- **Agent** — the model works step by step and outputs complete code, one file per fenced block, each preceded by `**File Path:** \`path\``. In Agent mode CodeFox also runs the loop: after each reply it runs the model's safe commands, applies its file changes, and installs the packages it asked for, then sends the results back to the model so it can fix errors and retry — without you prompting again. See "Agent mode (the loop)" below.
 
 ### Tools
 
@@ -146,6 +148,52 @@ Click **▶ Execute plan** — CodeFox creates a dedicated thread, sends the pla
 - **Review diff** — shows added/removed/unchanged lines per file before you apply
 - **Revert** — restores all modified files from the snapshot, and deletes files that were newly created by the apply. Triggers Unity refresh
 - **Snapshot history** — last 5 snapshots shown in the left panel, each with a ↩ revert button
+
+### Agent mode (the loop)
+
+In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each assistant reply:
+
+1. It parses the reply for actions, in order: file changes (the usual `**File Path:**` + fenced block), ```powershell / ```pwsh / ```shell blocks, and ```upm-install / ```upm-remove blocks.
+2. Safe actions run on their own: shell commands that match your auto-approved list when the shell is on and Auto Mode is on, and file changes when auto-accept is on.
+3. Anything risky pauses the loop on its approval bar instead of running: dangerous shell commands, any package install or removal, and file changes when auto-accept is off. Click Run / Apply / Install and the loop resumes from that point; click Dismiss and the loop resumes with a "User declined" note so the model can try a different approach.
+4. Every executed action's result is appended to the conversation as a tool-result message (`Tool result — <command> (exit 0): …`) and sent to the model with the next turn, so it can see the build error and fix it, then rebuild — without you prompting again.
+5. The loop ends when a reply contains no actions (the final reply is the answer), when you click **Stop** under the reply, or when the max rounds are reached.
+
+**Max rounds** — Settings → Advanced → "Max tool rounds per reply", default 5, range 1–10. When the max is hit the loop stops and says "Stopped after N tool rounds — the task may need more steps. Ask me to continue if you want." The max is a hard cap even if the model keeps producing actions. While looping, a status line under the reply shows what it is doing ("Working… round 2/5 — ran `dotnet build`").
+
+**Approval rules** (also in Settings → Advanced, under "What runs automatically, what always asks"):
+- Safe auto-approved commands run automatically in Auto Mode.
+- Dangerous commands always ask: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `rmdir /s`, `rd /s`, `Remove-Item -Recurse` — even in Auto Mode, even if they match an auto-approved prefix.
+- Package installs and removals always ask — even in Auto Mode, even with auto-accept on. There is no way to auto-approve them.
+- File changes ask unless auto-accept is on (and are snapshotted first either way).
+- Nothing runs while the shell is off, and no package is installed while no project folder is set.
+
+The model can only trigger actions by writing the fenced blocks — if it answers in plain prose with no blocks, the loop ends and that answer is shown as-is.
+
+### Unity Package Manager
+
+CodeFox manages Unity packages by editing the project's `Packages/manifest.json` — it does not talk to Unity's Package Manager API directly. Unity itself resolves the packages when it refreshes (CodeFox writes the same refresh trigger the bridge watches). Every edit is backed up first to `Packages/manifest.json.codefox-bak`.
+
+The assistant requests packages with fenced blocks in its reply. Three formats:
+
+```
+```upm-install
+com.unity.textmeshpro@3.0.6
+```
+```upm-install
+com.unity.textmeshpro
+```
+```upm-install
+https://github.com/user/repo.git#1.0.0
+```
+```
+
+- `name@version` — installs that exact version (`3.0.6`, a git URL, or a tarball / file path are all accepted as the version).
+- `name` with no version — CodeFox does **not** guess a version. The approval bar shows an editable version field (empty) and Install stays disabled until you type a version.
+- A git URL on its own — the package name is not in the URL, so the approval bar asks you to type the package name too, and the URL becomes the version.
+- Removals use a ```upm-remove block with one package name per line, and the same approval bar with a Remove button.
+
+Package installs and removals **always** need approval (see above). The project scan includes the installed packages (with requested and locked versions), so the model knows what is already installed and does not re-install it. Settings → Connections (and the Connections view) lists the installed packages under the Unity row, each with a Remove button that needs a confirm click.
 
 ### References
 Click **References** in the sidebar to see the project's pages and plans in one list — plans are labelled "Plan", pages are labelled "Reference". After a plan executes, create a Reference documenting what was done. The AI can draft it. References become permanent architecture docs you can discuss in chat.
@@ -186,11 +234,11 @@ If no Unity Editor path is set, Run tests tells you exactly that and how to set 
 
 ## Unity integration (optional)
 
-Copy the companion script into your Unity project:
+CodeFox installs the companion script automatically whenever a Unity project is connected (creating it, switching to it, changing its folder, opening Settings → Connections, or starting the app with a project already set). The bridge file lives at `Assets/Editor/CodeFoxBridge.cs` in your project, and the Connections view shows "Connected" once it is there. If the install fails for a real reason (for example the folder is not writable), Settings → Connections shows that error instead of hiding it.
 
-```
-unity-companion/CodeFoxBridge.cs  →  Assets/Editor/CodeFoxBridge.cs
-```
+You can also install or remove the bridge from Settings → Connections (Update plugin re-installs it, the toggle removes it). The bridge source also ships in the repo at `unity-companion/CodeFoxBridge.cs` for reference.
+
+The installed app always carries the bridge two ways: the `unity-companion/` folder is packaged with the app, and the bridge source is also embedded in the app (regenerated from the `.cs` file before every build by `scripts/embed-bridge.js`), so installing it never fails for a missing source file.
 
 Unity compiles it automatically. It watches for file changes from CodeFox and calls `AssetDatabase.Refresh()` so Unity recompiles without you switching to it manually.
 
@@ -225,7 +273,7 @@ The titlebar status dot shows the active provider and selected model (e.g. "LM S
 
 ### Connections
 
-**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** re-installs `CodeFoxBridge.cs` into `Assets/Editor/`, the toggle enables/disables it (off removes the file), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists. A **Manage MCP connections →** button jumps to the MCPs section.
+**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** re-installs `CodeFoxBridge.cs` into `Assets/Editor/`, the toggle enables/disables it (off removes the file), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists. A **Packages** list under the Unity row shows the installed packages from `Packages/manifest.json`, each with a Remove button (confirm click). A **Manage MCP connections →** button jumps to the MCPs section.
 
 ### MCPs
 
@@ -243,7 +291,9 @@ Per-ruleset enabled toggles and priorities (higher = sent first), a **prompt bud
 - **Auto-approved commands** — editable list of command prefixes (defaults: `git status`, `git diff`, `npm test`, `npm run test`, `dotnet build`, `dotnet test`).
 - **Excluded File Types** — file types hidden from project scans and file search (defaults include `meta`, `mat`, `anim`, `controller`, `png`, `jpg`, `asset`, `package-lock.json`, and more), with Add and Restore default.
 - **Run a command** — a manual input + Run button + output area to test the shell tool directly.
-- Dangerous commands are never run automatically: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, and `Remove-Item -Recurse` always ask first, even if they match an auto-approved prefix.
+- **Agent loop** — "Max tool rounds per reply" (`agent_max_rounds`, default 5, 1–10) caps how many tool rounds Agent mode runs before stopping. See "Agent mode (the loop)" above.
+- **What runs automatically, what always asks** — a plain-language summary: safe auto-approved commands run automatically in Auto Mode; dangerous commands always ask; package installs/removals always ask; file changes ask unless auto-accept is on; nothing runs while the shell is off, and no package is installed while no project folder is set.
+- Dangerous commands are never run automatically: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `Remove-Item -Recurse`, `Remove-Item -Force -Recurse`, `rmdir /s`, and `rd /s` always ask first, even if they match an auto-approved prefix.
 - **Editor Integration** — the Unity bridge is CodeFox's editor integration; there is nothing else to configure here.
 
 CodeFox has no workspace settings — it is a single-user local app with no accounts, no teams, and no sync, so there is nothing workspace-wide to configure.
@@ -263,7 +313,14 @@ main.js       Electron main process — DB, IPC, file system, LLM providers
               (llm:status / llm:listModels / llm:verify / llm:chat, project:scan,
               project:list / project:create / project:switch / project:update /
               project:delete, skills:list / skills:set, unity:runTests /
-              unity:buildCheck / unity:installBridge, fs:moveFile), Ollama process management
+              unity:buildCheck / unity:installBridge / unity:removeBridge /
+              unity:ensureBridge, unity:listPackages / unity:addPackage /
+              unity:removePackage, fs:moveFile), Ollama process management
+upm-manifest.js Unity Package Manager manifest helpers — read / back up /
+              edit Packages/manifest.json (plain Node, no Electron)
+unity-bridge.js Unity bridge install helpers — bundled file first,
+              embedded copy as fallback; auto-install on connect
+unity-bridge-source.js Generated embedded bridge source (scripts/embed-bridge.js)
 preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills)
 app.js        All UI logic — Home, projects, state, chat, modes, tools, plans, file tree, apply/revert, diff
 index.html    Layout — top bar, sidebar, Home / chat / editor / connections / references, right build panel + file tree
@@ -306,6 +363,8 @@ This is early software. Contributions welcome.
 - [ ] Plugin system for language-specific tooling
 - [ ] Git integration (auto-commit after successful apply)
 - [x] Multiple project support
+- [x] Agent loop (Agent mode) + Unity Package Manager (manifest-based, always asks first)
+- [x] Unity bridge auto-install on connect, with an embedded fallback so the install cannot fail for a missing source file
 - [ ] Simultaneous multi-user editing (see "Working together (planned)")
 
 ---
