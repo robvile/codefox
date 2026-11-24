@@ -125,7 +125,7 @@
   .home-section-head h2 { font-size: 15px; font-weight: 600; }
   .home-section-head .manage-link { color: var(--text3); font-size: 12px; cursor: pointer; background: none; border: none; font-family: var(--font); }
   .home-section-head .manage-link:hover { color: var(--accent); }
-  .conn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .conn-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .conn-card { display: flex; gap: 12px; align-items: center; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; cursor: pointer; text-align: left; font-family: var(--font); color: var(--text); }
   .conn-card:hover { border-color: var(--accent); }
   .conn-ico { width: 40px; height: 40px; border-radius: 10px; background: var(--bg4); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
@@ -341,7 +341,7 @@
         <div class="nav-item" id="nav-connections" onclick="showConnections()"><span class="nav-ico">⇄</span>Connections</div>
       </div>
 
-      <div id="sidebar-footer">CodeFox 0.3.1 — Local · No account needed</div>
+      <div id="sidebar-footer">CodeFox 0.3.2 — Local · No account needed</div>
     </div>
 
     <!-- CENTER -->
@@ -369,10 +369,6 @@
             <button class="conn-card" id="conn-unity" onclick="onUnityCard()">
               <span class="conn-ico">⬢</span>
               <span><span class="conn-name">Add Unity Project</span><br><span class="conn-status" id="conn-unity-status">No connections yet</span></span>
-            </button>
-            <button class="conn-card" id="conn-unreal" onclick="onUnrealCard()">
-              <span class="conn-ico">◆</span>
-              <span><span class="conn-name">Add Unreal Project</span><br><span class="conn-status" id="conn-unreal-status">No connections yet</span></span>
             </button>
             <button class="conn-card" id="conn-folders" onclick="onLocalFoldersCard()">
               <span class="conn-ico">▣</span>
@@ -436,7 +432,7 @@
     <div id="right">
       <div id="right-build">
         <div id="build-empty">
-          <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 6C20 6 12 16 12 28v24l6-5 6 5 6-5 6 5 6-5 6 5 6-5V28C52 16 44 6 32 6z" fill="none" stroke="#777" stroke-width="2" stroke-linejoin="round"/><circle cx="25" cy="28" r="3" fill="#777"/><circle cx="39" cy="28" r="3" fill="#777"/></svg>
+          <svg id="kitsune-mark" width="96" height="96" viewBox="0 0 120 120" role="img" aria-label="CodeFox nine-tailed fox mark"><path d="M 60.9 105.1 Q 31.9 91.5 5.0 90.1 Q 27.6 104.8 59.1 110.9 Z" fill="#7c6fff" opacity="0.92"/><path d="M 61.8 105.6 Q 36.1 82.0 9.1 71.0 Q 27.9 93.3 58.2 110.4 Z" fill="#9d8cff" opacity="0.92"/><path d="M 62.4 106.2 Q 43.7 73.7 20.1 53.1 Q 32.4 81.9 57.6 109.8 Z" fill="#5a4ecc" opacity="0.92"/><path d="M 62.9 107.1 Q 54.3 67.7 37.5 38.6 Q 40.9 72.0 57.1 108.9 Z" fill="#2dd4a0" opacity="0.92"/><path d="M 63.0 108.0 Q 67.0 65.1 60.0 30.0 Q 53.0 65.1 57.0 108.0 Z" fill="#4caf7d" opacity="0.92"/><path d="M 62.9 108.9 Q 79.1 72.0 82.5 38.6 Q 65.7 67.7 57.1 107.1 Z" fill="#f5a623" opacity="0.92"/><path d="M 62.4 109.8 Q 87.6 81.9 99.9 53.1 Q 76.3 73.7 57.6 106.2 Z" fill="#ff8a5c" opacity="0.92"/><path d="M 61.8 110.4 Q 92.1 93.3 110.9 71.0 Q 83.9 82.0 58.2 105.6 Z" fill="#ff6b6b" opacity="0.92"/><path d="M 60.9 110.9 Q 92.4 104.8 115.0 90.1 Q 88.1 91.5 59.1 105.1 Z" fill="#c084fc" opacity="0.92"/><path d="M46 94 L50 74 L60 88 Z" fill="#f5a623"/><path d="M74 94 L70 74 L60 88 Z" fill="#f5a623"/><path d="M49 90 L51 79 L57 87 Z" fill="#ff8a5c"/><path d="M71 90 L69 79 L63 87 Z" fill="#ff8a5c"/><ellipse cx="60" cy="97" rx="14" ry="11" fill="#f5a623"/><circle cx="54" cy="95" r="1.8" fill="#1a1a1a"/><circle cx="66" cy="95" r="1.8" fill="#1a1a1a"/><path d="M60 101 L57 98 L63 98 Z" fill="#1a1a1a"/></svg>
           <h2>What do you want to build?</h2>
           <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
             <button class="build-pill" onclick="setHomePrompt('debug')">Debug an issue</button>
