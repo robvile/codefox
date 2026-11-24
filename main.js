@@ -225,6 +225,22 @@ async function initDB() {
     file_count INTEGER NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
   )`);
+  // v0.3.0: multi-project workspaces. Threads, rulesets, plans and pages
+  // belong to one project; snapshots/file_backups stay global for now.
+  db.run(`CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS skills (
+    name TEXT PRIMARY KEY,
+    installed INTEGER NOT NULL DEFAULT 0,
+    installed_at TEXT
+  )`);
+  for (const t of ['threads', 'rulesets', 'plans', 'pages']) {
+    try { db.run(`ALTER TABLE ${t} ADD COLUMN project_id INTEGER`); } catch {}
+  }
 
   // Default settings. A brand-new database defaults to LM Studio; an
   // existing database (which already has a project_path) keeps Ollama
@@ -254,6 +270,36 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('unity_exe_path', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_model', 'qwen2.5-coder:32b-instruct')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_url', 'http://localhost:11434')");
+  }
+
+  // ── v0.3.0 migration: one project row per workspace ─────────────
+  // If no projects exist, create one from the existing project_path
+  // setting (name = last folder segment, or "My Project" if empty)
+  // and make it active. Existing rows get the active project's id.
+  const projCount = db.exec('SELECT COUNT(*) as c FROM projects');
+  const projTotal = projCount.length ? projCount[0].values[0][0] : 0;
+  let activeProjectId = readSetting('active_project_id', null);
+  if (projTotal === 0) {
+    const ppath = readSetting('project_path', '') || '';
+    const segs = String(ppath).split(/[\\/]+/).filter(Boolean);
+    const pname = segs.length ? segs[segs.length - 1] : 'My Project';
+    db.run('INSERT INTO projects (name, path) VALUES (?, ?)', [pname, ppath]);
+    const idRes = db.exec('SELECT CAST(last_insert_rowid() AS TEXT) as id');
+    activeProjectId = idRes.length ? idRes[0].values[0][0] : null;
+    if (activeProjectId) {
+      db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_project_id', ?)", [String(activeProjectId)]);
+    }
+  } else if (!activeProjectId) {
+    const first = db.exec('SELECT CAST(id AS TEXT) as id FROM projects ORDER BY id ASC LIMIT 1');
+    if (first.length) {
+      activeProjectId = first[0].values[0][0];
+      db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_project_id', ?)", [String(activeProjectId)]);
+    }
+  }
+  if (activeProjectId) {
+    for (const t of ['threads', 'rulesets', 'plans', 'pages']) {
+      try { db.run(`UPDATE ${t} SET project_id = ? WHERE project_id IS NULL`, [Number(activeProjectId)]); } catch {}
+    }
   }
 
   saveDB();
@@ -347,6 +393,96 @@ ipcMain.handle('db:setSetting', (_, key, value) => {
   return true;
 });
 
+// ── Project workspaces (v0.3.0) ────────────────────────────────────
+function projectRows() {
+  const result = db.exec('SELECT id, name, path, created_at FROM projects ORDER BY id ASC');
+  if (!result.length) return [];
+  const { columns, values } = result[0];
+  return values.map(row => Object.fromEntries(columns.map((c, i) => [c, row[i]])));
+}
+function projectById(id) {
+  const result = db.exec(`SELECT id, name, path, created_at FROM projects WHERE id = ${Number(id)}`);
+  if (!result.length) return null;
+  const { columns, values } = result[0];
+  return Object.fromEntries(columns.map((c, i) => [c, values[0][i]]));
+}
+function setActiveProject(project) {
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_project_id', ?)", [String(project.id)]);
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('project_path', ?)", [project.path || '']);
+  saveDB();
+}
+
+ipcMain.handle('project:list', () => projectRows());
+
+ipcMain.handle('project:create', (_, name, projectPath) => {
+  const cleanName = String(name || '').trim() || 'My Project';
+  db.run('INSERT INTO projects (name, path) VALUES (?, ?)', [cleanName, projectPath || '']);
+  const project = projectById(db.exec('SELECT CAST(last_insert_rowid() AS TEXT) as id')[0].values[0][0]);
+  setActiveProject(project);
+  return project;
+});
+
+ipcMain.handle('project:switch', (_, id) => {
+  const project = projectById(id);
+  if (!project) return null;
+  setActiveProject(project);
+  return project;
+});
+
+ipcMain.handle('project:update', (_, id, data) => {
+  const project = projectById(id);
+  if (!project) return false;
+  const name = data && data.name != null ? String(data.name).trim() || project.name : project.name;
+  const projectPath = data && data.path != null ? String(data.path) : project.path;
+  db.run('UPDATE projects SET name = ?, path = ? WHERE id = ?', [name, projectPath, Number(id)]);
+  const activeId = readSetting('active_project_id', null);
+  if (activeId != null && Number(activeId) === Number(id)) {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('project_path', ?)", [projectPath]);
+  }
+  saveDB();
+  return true;
+});
+
+// Deleting a project deletes its threads (and their messages), pages,
+// plans and rulesets with it. Refused when it is the last project left.
+ipcMain.handle('project:delete', (_, id) => {
+  const all = projectRows();
+  if (all.length <= 1) return { ok: false, error: 'Cannot delete the last project.' };
+  const target = projectById(id);
+  if (!target) return { ok: false, error: 'Project not found.' };
+  const pid = Number(id);
+  db.run('DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE project_id = ?)', [pid]);
+  for (const t of ['threads', 'rulesets', 'plans', 'pages']) {
+    db.run(`DELETE FROM ${t} WHERE project_id = ?`, [pid]);
+  }
+  db.run('DELETE FROM projects WHERE id = ?', [pid]);
+  let nextActive = null;
+  const activeId = readSetting('active_project_id', null);
+  if (activeId != null && Number(activeId) === pid) {
+    const remaining = projectRows();
+    nextActive = remaining[0] || null;
+    if (nextActive) setActiveProject(nextActive);
+  }
+  saveDB();
+  return { ok: true, activeProjectId: nextActive ? nextActive.id : null };
+});
+
+// ── Skills install state (v0.3.0) ──────────────────────────────────
+ipcMain.handle('skills:list', () => {
+  const result = db.exec('SELECT name, installed, installed_at FROM skills');
+  if (!result.length) return [];
+  const { columns, values } = result[0];
+  return values.map(row => Object.fromEntries(columns.map((c, i) => [c, row[i]])));
+});
+
+ipcMain.handle('skills:set', (_, name, installed) => {
+  const on = installed ? 1 : 0;
+  db.run('INSERT OR REPLACE INTO skills (name, installed, installed_at) VALUES (?, ?, ?)',
+    [String(name), on, on ? new Date().toISOString() : null]);
+  saveDB();
+  return true;
+});
+
 // ── File system IPC handlers ─────────────────────────────────────
 
 ipcMain.handle('fs:readFile', (_, filePath) => {
@@ -402,6 +538,11 @@ ipcMain.handle('fs:pickExe', async (_, title) => {
 ipcMain.handle('fs:pickFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   return result.canceled ? null : result.filePaths[0];
+});
+
+ipcMain.handle('fs:exists', (_, filePath) => {
+  try { return !!filePath && fs.existsSync(filePath); }
+  catch { return false; }
 });
 
 // ── Unified LLM IPC (LM Studio + Ollama) ─────────────────────────
@@ -727,6 +868,21 @@ ipcMain.handle('unity:refresh', async (_, projectPath) => {
   try {
     fs.writeFileSync(sentinelPath, Date.now().toString());
     return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Copies the bundled companion script into the project's Assets/Editor
+// folder (creating it if needed). Honest install: it really writes the file.
+ipcMain.handle('unity:installBridge', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
+  const src = path.join(__dirname, 'unity-companion', 'CodeFoxBridge.cs');
+  if (!fs.existsSync(src)) return { ok: false, error: 'Companion script not found in the app install. Copy unity-companion/CodeFoxBridge.cs to Assets/Editor/ by hand.' };
+  const dest = path.join(root, 'Assets', 'Editor', 'CodeFoxBridge.cs');
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    return { ok: true, dest };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 

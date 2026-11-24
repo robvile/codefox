@@ -16,8 +16,22 @@ contextBridge.exposeInMainWorld('rb', {
     deleteFile: (path) => ipcRenderer.invoke('fs:deleteFile', path),
     moveFile: (src, dest) => ipcRenderer.invoke('fs:moveFile', src, dest),
     readDir: (path) => ipcRenderer.invoke('fs:readDir', path),
+    exists: (path) => ipcRenderer.invoke('fs:exists', path),
     pickFolder: () => ipcRenderer.invoke('fs:pickFolder'),
     pickExe: (title) => ipcRenderer.invoke('fs:pickExe', title),
+  },
+  project: {
+    list: () => ipcRenderer.invoke('project:list'),
+    create: (name, path) => ipcRenderer.invoke('project:create', name, path),
+    switch: (id) => ipcRenderer.invoke('project:switch', id),
+    update: (id, data) => ipcRenderer.invoke('project:update', id, data),
+    delete: (id) => ipcRenderer.invoke('project:delete', id),
+    scan: (projectPath) => ipcRenderer.invoke('project:scan', projectPath),
+    moveAsset: (src, dest) => ipcRenderer.invoke('fs:moveFile', src, dest),
+  },
+  skills: {
+    list: () => ipcRenderer.invoke('skills:list'),
+    set: (name, installed) => ipcRenderer.invoke('skills:set', name, installed),
   },
   llm: {
     status: () => ipcRenderer.invoke('llm:status'),
@@ -47,13 +61,10 @@ contextBridge.exposeInMainWorld('rb', {
       ipcRenderer.removeAllListeners('ollama:stream-done');
     }
   },
-  project: {
-    scan: (projectPath) => ipcRenderer.invoke('project:scan', projectPath),
-    moveAsset: (src, dest) => ipcRenderer.invoke('fs:moveFile', src, dest),
-  },
   unity: {
     refresh: (projectPath) => ipcRenderer.invoke('unity:refresh', projectPath),
     runTests: (payload) => ipcRenderer.invoke('unity:runTests', payload || {}),
     buildCheck: (payload) => ipcRenderer.invoke('unity:buildCheck', payload || {}),
+    installBridge: (projectPath) => ipcRenderer.invoke('unity:installBridge', projectPath),
   }
 });
