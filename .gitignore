@@ -6,3 +6,5 @@ out/
 .DS_Store
 Thumbs.db
 *.log
+build/icon.png
+build/icon.ico

@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.3.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.4.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -14,7 +14,7 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 
 ## What it does
 
-- **Home** — the default view when CodeFox opens: a banner for the active project, connection cards (Unity / local folders), a Discover Skills grid, recent references, and a "What do you want to build?" panel that starts a new conversation
+- **Home** — the default view when CodeFox opens: a banner for the active project, connection cards (Unity / local folders), a Discover Skills grid, recent references, and a "What do you want to build?" panel that starts a new conversation. The app icon is the same kitsune nine-tails mark shown on Home
 - **Multiple projects** — keep several local projects in CodeFox, each with its own conversations, rulesets, plans, and references. Switch from the project selector at the top of the sidebar, or create a new one with **New Project**. No accounts, no teams, no sync — everything stays on this machine
 - **Chat** with a local LLM about your codebase across persistent conversations
 - **Ask / Plan / Agent modes** — Ask answers and explains only, Plan drafts steps and file lists without writing code, Agent works step by step and outputs complete code in fenced blocks with file paths
@@ -23,7 +23,9 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 - **Plans** — describe what you want done. The AI proposes steps and lists files before touching anything. You approve, then execute.
 - **References** — pages and plans in one list: AI-authored architecture docs (pages) and step-by-step plans, kept per project so they grow into a living knowledge base
 - **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it
-- **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/`; Figma/Jira tokens are stored locally and used only for those imports
+- **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/` (and can be removed again from Settings → Connections, which deletes the file); Figma/Jira tokens are stored locally and used only for those imports
+- **MCPs** — configure local MCP servers (command, arguments, environment) in Settings → MCPs. Servers run on this machine; the assistant does not call MCP tools yet, and the UI says so — the settings are stored so that wiring can be added without reconfiguring
+- **Shell tool** — with the shell off by default, the assistant's PowerShell blocks never run on their own. Turn it on in Settings → Advanced to run commands, auto-approve safe prefixes, or auto-accept project changes (still snapshotted first, always revertible)
 - **File tree** — browse your project, view files, add them to chat with one click. Search across all files instantly.
 - **Apply changes** — LLM responses containing code blocks get a one-click "Apply changes" button that writes files to disk. A **Review diff** button shows a line-by-line diff before you apply.
 - **Snapshots + Revert** — before writing anything, CodeFox backs up every file it touches, and records new files so revert can delete them. One click to revert if something breaks.
@@ -125,6 +127,8 @@ The tools row above the chat input:
 ### Rulesets
 Click **+ New ruleset** in the left panel. Write your project's rules, architecture contracts, hard constraints. Every chat message automatically includes these — the model always knows your standards.
 
+Settings → **Rules** controls how much of them the model sees: each ruleset has an enabled toggle and a priority (higher is sent first), and a **prompt budget** (default 4000 characters, 1000–12000) caps how many characters of rules go with each message — whole rulesets only, never cut off mid-way. The section shows what was included in the last message and what was left out. **Condense rules** asks the model to squeeze the enabled rulesets under 500 characters while keeping every hard constraint; with **Use condensed rules when over budget** on, that condensed version is sent instead of dropping rules. If the model can't be reached, condensing fails honestly and changes nothing.
+
 ### Plans
 Click **+ New plan**. Write what you want done in plain English, listing files to touch:
 ```
@@ -168,7 +172,7 @@ Click **Connections** at the bottom of the sidebar for LM Studio, Ollama, the Un
 - **Figma / Jira** — "Not connected" until you save a token (and a site URL for Jira) in the Configure dialog. Tokens are stored locally and used only for those imports; there is no Figma or Jira import yet, and the UI says so.
 - **GitHub** — managed in Muse, not in CodeFox; there is no action to take here.
 
-The **Your Connections** cards on Home are the quick version: the Unity card shows "1 Connected" when the project folder has an `Assets` folder (clicking it scans the project), and Local Folders tracks extra folders you add. CodeFox is Unity-focused — Unreal projects are not supported yet, so there is no Unreal card.
+The **Your Connections** cards on Home are the quick version: the Unity card shows "1 Connected" when the project folder has an `Assets` folder (clicking it scans the project), and "Connected · Bridge installed" when the bridge file is present; Local Folders tracks extra folders you add. CodeFox is Unity-focused — Unreal projects are not supported yet, so there is no Unreal card. Full connection management lives in Settings → **Connections**: the Unity row shows the active project's name and path with a live Connected/Not connected status, an **Update plugin** button that re-installs the bridge, an enable toggle (off removes the bridge file from the project), and a ⋯ menu with **Disconnect**; local folders each have a Remove button.
 
 ### Test loop
 1. Use **Generate tests** to create an EditMode test file for a script.
@@ -198,6 +202,10 @@ Menu items added in Unity: **CodeFox > Refresh**, **CodeFox > Run EditMode Tests
 
 ## Settings
 
+Click ⚙ **Settings** in the sidebar or the top bar. Settings is a full window in the centre column (not a popup), with its own sub-nav: **Model**, **Connections**, **MCPs**, **Rules**, **Advanced**.
+
+### Model
+
 | Setting | Description |
 |---|---|
 | LLM provider | LM Studio (default) or Ollama |
@@ -214,6 +222,31 @@ Menu items added in Unity: **CodeFox > Refresh**, **CodeFox > Run EditMode Tests
 | Unity Editor executable path | Needed for Run tests, e.g. the Unity.exe under your Unity Hub install |
 
 The titlebar status dot shows the active provider and selected model (e.g. "LM Studio · qwen2.5-coder-14b"), "LM Studio offline", or "No model selected".
+
+### Connections
+
+**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** re-installs `CodeFoxBridge.cs` into `Assets/Editor/`, the toggle enables/disables it (off removes the file), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists. A **Manage MCP connections →** button jumps to the MCPs section.
+
+### MCPs
+
+Configure local MCP servers — name, command, arguments, and `KEY=value` environment lines — each with an enabled toggle. Servers run on this machine; CodeFox never sends your code to them or anywhere else. Honest scope: MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring. There is no cloud MCP marketplace and no one-click installs.
+
+### Rules
+
+Per-ruleset enabled toggles and priorities (higher = sent first), a **prompt budget** (default 4000 characters, 1000–12000) that caps how many characters of rules go with each message — whole rulesets only, never cut off mid-way — and a readout of what was included in the last message and what was left out. **Condense rules** asks the model for a sub-500-character version that keeps every hard constraint; with **Use condensed rules when over budget** on, that version is sent instead of dropping rules. If the model can't be reached, condensing fails honestly and changes nothing.
+
+### Advanced
+
+- **Shell Tool** — off by default. When off, no command can run from the app at all and the rest of the section is greyed out. When on, CodeFox runs PowerShell commands (PowerShell on Windows, the system shell elsewhere) in the project folder, with a 60-second timeout.
+- **Auto Mode** — when on, commands that match your auto-approved list run automatically. Everything else asks first, via a Run / Dismiss bar under the assistant's reply.
+- **Approvals** — **Auto-accept project changes** keeps project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo.
+- **Auto-approved commands** — editable list of command prefixes (defaults: `git status`, `git diff`, `npm test`, `npm run test`, `dotnet build`, `dotnet test`).
+- **Excluded File Types** — file types hidden from project scans and file search (defaults include `meta`, `mat`, `anim`, `controller`, `png`, `jpg`, `asset`, `package-lock.json`, and more), with Add and Restore default.
+- **Run a command** — a manual input + Run button + output area to test the shell tool directly.
+- Dangerous commands are never run automatically: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, and `Remove-Item -Recurse` always ask first, even if they match an auto-approved prefix.
+- **Editor Integration** — the Unity bridge is CodeFox's editor integration; there is nothing else to configure here.
+
+CodeFox has no workspace settings — it is a single-user local app with no accounts, no teams, and no sync, so there is nothing workspace-wide to configure.
 
 ---
 
@@ -300,7 +333,7 @@ npm run build:linux  # Linux AppImage + .deb
 
 Output goes to the `dist/` folder. There is only ever one installer, and every build overwrites it: `dist/CodeFox-Setup.exe` on Windows (the build cleans `dist/` first, and the filename has no version number in it). If you still have old versioned installers in `dist/` from earlier builds, delete them once — new builds will never create another one.
 
-**Before building:** add icon files to `assets/` — see `assets/ICONS_NEEDED.md` for details. Without icons the build still works but uses electron-builder's default icon.
+**App icon:** the build uses the kitsune mark — the icon files are stored in the repo as base64 text (`build/icon.png.b64`, `build/icon.ico.b64`) and `scripts/prepare-icons.js` regenerates the real files automatically before every build, so there is nothing to add by hand.
 
 ### GitHub Actions (CI builds)
 

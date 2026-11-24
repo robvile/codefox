@@ -21,9 +21,9 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
   }
 }
 
-// 2. package.json version is 0.3.2.
+// 2. package.json version is 0.4.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.3.2', pkg.version === '0.3.2', 'got ' + pkg.version);
+check('package.json version is 0.4.0', pkg.version === '0.4.0', 'got ' + pkg.version);
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -100,6 +100,45 @@ check('app.js has connections view', appJs.includes('renderConnectionsView') && 
 check('app.js has no Invite button', !appJs.includes('Invite') && !indexHtml.includes('Invite'));
 check('README mentions multiple projects', readme.includes('Multiple projects') || readme.includes('New Project'));
 check('README has planned-collaboration note', readme.includes('Working together (planned)'));
+
+const preloadJs = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+
+// 8. v0.4.0 Settings as a full window — centre view, no modal.
+check('app.js has Settings centre view', (appJs.includes("setMode('settings'") || appJs.includes('showSettingsView')) && appJs.includes('showSettings') && !appJs.includes('function openSettings'));
+check('index.html has settings-mode element', indexHtml.includes('settings-mode'));
+check('index.html Settings nav opens the view', indexHtml.includes("onclick=\"showSettings()\""));
+check('main.js has unity:removeBridge IPC', mainJs.includes("ipcMain.handle('unity:removeBridge'"));
+check('main.js has shell:run IPC', mainJs.includes("ipcMain.handle('shell:run'"));
+check('preload.js exposes rb.shell', preloadJs.includes('shell:') && preloadJs.includes("ipcRenderer.invoke('shell:run'"));
+check('preload.js exposes unity.removeBridge', preloadJs.includes('removeBridge'));
+check('shell defaults off', mainJs.includes("'shell_enabled', '0'") && mainJs.includes('Shell tool is disabled'));
+check('app.js has rules budget + condensed rules', appJs.includes('rules_char_budget') && appJs.includes('condensed_rules'));
+check('app.js has ruleset enabled/priority', appJs.includes('toggleRulesetEnabled') && appJs.includes('moveRulesetPriority'));
+check('excluded file types present', mainJs.includes('excluded_file_types') && appJs.includes('excluded_file_types') && mainJs.includes('isExcludedFile'));
+check('MCPs section present', (indexHtml.includes('MCPs') || appJs.includes('MCPs')) && appJs.includes('mcp_servers'));
+check('app.js has shell command bar', appJs.includes('shell-bar') && appJs.includes('handleShellBlocks'));
+check('app.js has auto-accept gating', appJs.includes('autoAcceptChanges') && appJs.includes('applyFileChanges(changes)'));
+for (const [label, content] of [['index.html', indexHtml], ['app.js', appJs], ['README', readme]]) {
+  check(label + ' has no "Workspace settings"', !content.includes('Workspace settings'));
+}
+
+// 9. v0.4.0 app icon — kitsune mark as the packaged icon.
+// Binaries cannot be pushed through the text-only push flow, so the repo
+// stores them as base64 and scripts/prepare-icons.js regenerates them.
+// Check the .b64 files decode to real PNG / ICO magic bytes.
+function b64DecodesTo(file, magic) {
+  try {
+    const buf = Buffer.from(fs.readFileSync(path.join(root, file), 'utf8').trim(), 'base64');
+    return buf.length > 1000 && buf.subarray(0, magic.length).equals(Buffer.from(magic));
+  } catch { return false; }
+}
+check('build/icon.png.b64 decodes to a PNG', b64DecodesTo('build/icon.png.b64', [0x89, 0x50, 0x4e, 0x47]));
+check('build/icon.ico.b64 decodes to an ICO', b64DecodesTo('build/icon.ico.b64', [0x00, 0x00, 0x01, 0x00]));
+check('scripts/prepare-icons.js exists', fs.existsSync(path.join(root, 'scripts', 'prepare-icons.js')));
+check('build scripts regenerate icons first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('scripts/prepare-icons.js'));
+check('package.json win icon is build/icon.ico', pkg.build && pkg.build.win && pkg.build.win.icon === 'build/icon.ico', 'got ' + (pkg.build && pkg.build.win && pkg.build.win.icon));
+check('package.json build icon is build/icon.png', pkg.build && pkg.build.icon === 'build/icon.png', 'got ' + (pkg.build && pkg.build.icon));
+check('kitsune mark still in index.html', indexHtml.includes('kitsune-mark'));
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');
