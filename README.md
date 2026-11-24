@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.3.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.3.1-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -298,7 +298,7 @@ npm run build:mac    # macOS .dmg
 npm run build:linux  # Linux AppImage + .deb
 ```
 
-Output goes to the `dist/` folder.
+Output goes to the `dist/` folder. There is only ever one installer, and every build overwrites it: `dist/CodeFox-Setup.exe` on Windows (the build cleans `dist/` first, and the filename has no version number in it). If you still have old versioned installers in `dist/` from earlier builds, delete them once — new builds will never create another one.
 
 **Before building:** add icon files to `assets/` — see `assets/ICONS_NEEDED.md` for details. Without icons the build still works but uses electron-builder's default icon.
 
