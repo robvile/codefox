@@ -1,5 +1,9 @@
 # CodeFox Dependency Setup
-# Runs after installation to check/install Ollama and optionally pull the model
+# Runs after installation to set up a local model backend.
+# LM Studio is the default backend: install it, load a coding model, and start
+# its local server (http://localhost:1234), then pick the model in CodeFox Settings.
+# Ollama is supported as an alternative backend — this script can install it
+# and pull a model for you if you prefer Ollama.
 
 $ErrorActionPreference = "SilentlyContinue"
 
@@ -35,7 +39,7 @@ $ollamaExe = Find-Ollama
 
 if (-not $ollamaExe) {
     $result = [System.Windows.Forms.MessageBox]::Show(
-        "Ollama is required for CodeFox to work.`n`nOllama runs AI models locally on your machine. It's free and open source.`n`nClick OK to download and install Ollama now (about 150MB).`nClick Cancel to skip — you can install it later from ollama.com",
+        "LM Studio is the default backend for CodeFox — install it, load a coding model, and start its local server, then pick the model in CodeFox Settings.`n`nOllama is an optional alternative backend. It runs AI models locally on your machine and is free and open source.`n`nClick OK to download and install Ollama now (about 150MB) as the alternative backend.`nClick Cancel to skip — CodeFox will use LM Studio by default, and you can install Ollama later from ollama.com if you prefer it",
         "CodeFox — Install Ollama?",
         [System.Windows.Forms.MessageBoxButtons]::OKCancel,
         [System.Windows.Forms.MessageBoxIcon]::Information
@@ -85,7 +89,7 @@ if (-not $ollamaExe) {
         }
     } else {
         [System.Windows.Forms.MessageBox]::Show(
-            "No problem — you can install Ollama later from ollama.com`n`nCodeFox will still open, but won't be able to chat until Ollama is running.",
+            "No problem — CodeFox defaults to LM Studio.`n`nInstall LM Studio, load a coding model, start its local server, then pick the model in CodeFox Settings. You can install Ollama later from ollama.com if you prefer it as the alternative backend.",
             "CodeFox — Skipping Ollama",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
@@ -148,7 +152,7 @@ if ($ollamaExe) {
 
 # ── Done ─────────────────────────────────────────────────────────
 [System.Windows.Forms.MessageBox]::Show(
-    "CodeFox setup complete!`n`nLaunch CodeFox from your desktop or Start Menu.",
+    "CodeFox setup complete!`n`nLaunch CodeFox from your desktop or Start Menu, then open Settings to verify your local backend (LM Studio by default) and pick a model.",
     "CodeFox — Ready",
     [System.Windows.Forms.MessageBoxButtons]::OK,
     [System.Windows.Forms.MessageBoxIcon]::Information
