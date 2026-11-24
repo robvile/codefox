@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — 2026-11-24
+
+- **One installer, always the same name.** The Windows installer is now always `dist/CodeFox-Setup.exe` — no version number in the filename, so rebuilding overwrites the previous one instead of piling up `CodeFox Setup 0.2.0.exe`, `CodeFox Setup 0.3.0.exe`, and so on. Every build script (`build`, `build:win`, `build:mac`, `build:linux`) cleans `dist/` first via `scripts/clean-dist.js`. Delete any old versioned installers in `dist/` once; new builds will never create another one.
+
 ## 0.3.0 — 2026-11-24
 
 - **Home view.** CodeFox now opens on Home instead of jumping straight into a chat: a project banner (CSS-only pattern, "Local" badge, Edit button), Your Connections cards, a Discover Skills grid, Recent References, and a "What do you want to build?" panel with starter pills (Debug an issue / Build a tool / Write a script), a composer, the Ask/Plan/Agent dropdown, the active model name, and a status dot. The top bar has a centred title, a sidebar toggle, and new-conversation / focus / panel buttons; the LM Studio status dot lives there.

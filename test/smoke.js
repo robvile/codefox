@@ -21,9 +21,11 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
   }
 }
 
-// 2. package.json version is 0.3.0.
+// 2. package.json version is 0.3.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.3.0', pkg.version === '0.3.0', 'got ' + pkg.version);
+check('package.json version is 0.3.1', pkg.version === '0.3.1', 'got ' + pkg.version);
+check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
+check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
 
 // 3. No occurrence of the forbidden word (case-insensitive) in any
