@@ -13,56 +13,129 @@ let state = {
   messages: [],          // current thread messages
   streaming: false,
   expandedDirs: new Set(),
+  // LLM provider (LM Studio is the default for new installs)
+  provider: 'lmstudio',
+  lmstudioUrl: 'http://localhost:1234/v1',
+  lmstudioModel: '',
+  lmstudioModels: [],
+  lmstudioApiKey: '',
+  temperature: 0.2,
+  maxTokens: 4096,
+  unityExePath: '',
+  chatMode: 'agent',     // 'ask' | 'plan' | 'agent'
+  projectScan: null,     // cached result of project:scan
+  autoAccept: false,
 };
 
-// ── Ollama management ────────────────────────────────────────────
-function setOllamaStatus(status, label) {
+// ── LLM management (LM Studio default, Ollama supported) ─────────
+function setLlmStatus(dotClass, label) {
   const dot = document.getElementById('ollama-dot');
   const lbl = document.getElementById('ollama-label');
   if (!dot || !lbl) return;
   dot.className = '';
-  if (status === 'running') {
-    dot.classList.add('green');
-    lbl.textContent = 'Ollama';
-  } else if (status === 'starting') {
-    dot.classList.add('yellow');
-    lbl.textContent = 'Starting...';
-  } else if (status === 'not_found') {
-    dot.classList.add('red');
-    lbl.textContent = 'Not installed';
-  } else {
-    dot.classList.add('red');
-    lbl.textContent = 'Offline';
+  if (dotClass) dot.classList.add(dotClass);
+  lbl.textContent = label;
+}
+// Backwards-compatible name used by the titlebar.
+function setOllamaStatus(status, label) {
+  if (status === 'running') setLlmStatus('green', label || providerLabel());
+  else if (status === 'starting') setLlmStatus('yellow', label || 'Starting...');
+  else setLlmStatus('red', label || 'Offline');
+}
+function providerLabel() {
+  return state.provider === 'ollama' ? 'Ollama' : 'LM Studio';
+}
+function currentModel() {
+  return state.provider === 'ollama' ? state.ollamaModel : state.lmstudioModel;
+}
+function currentUrl() {
+  return state.provider === 'ollama' ? state.ollamaUrl : state.lmstudioUrl;
+}
+
+async function initLLM() {
+  setLlmStatus('yellow', 'Checking...');
+  try {
+    const status = await rb.llm.status();
+    if (status.running) {
+      if (status.models) state.lmstudioModels = status.models;
+      updateModelDropdown();
+      if (!currentModel()) {
+        setLlmStatus('yellow', providerLabel() + ' · No model selected');
+        showToast('⚠ ' + providerLabel() + ' is reachable — pick a model in Settings');
+      } else {
+        setLlmStatus('green', providerLabel() + ' · ' + currentModel());
+      }
+      return;
+    }
+    // Offline. For Ollama, try to auto-launch it; LM Studio has no
+    // auto-launch — the user starts its local server from the app.
+    if (state.provider === 'ollama') {
+      const oStatus = await rb.ollama.status();
+      if (!oStatus.exePath) {
+        setLlmStatus('red', 'Ollama · Not installed');
+        showToast('⚠ Ollama not found. Install from ollama.com');
+        return;
+      }
+      setLlmStatus('yellow', 'Starting...');
+      const result = await rb.ollama.launch();
+      if (result.status === 'running' || result.status === 'launched') {
+        setLlmStatus('green', 'Ollama · ' + (state.ollamaModel || ''));
+        showToast('✓ Ollama started');
+      } else {
+        setLlmStatus('red', 'Ollama · Offline');
+        showToast('⚠ Could not start Ollama: ' + (result.error || result.status));
+      }
+    } else {
+      setLlmStatus('red', providerLabel() + ' offline');
+      showToast('⚠ LM Studio is not reachable at ' + state.lmstudioUrl + ' — start its local server and pick a model in Settings');
+    }
+  } catch (e) {
+    setLlmStatus('red', providerLabel() + ' offline');
   }
 }
 
-async function initOllama() {
-  setOllamaStatus('starting', 'Checking...');
-  const status = await rb.ollama.status();
-  if (status.running) {
-    setOllamaStatus('running');
-    return;
+async function refreshModels() {
+  const res = await rb.llm.listModels({
+    provider: state.provider,
+    lmstudioUrl: state.lmstudioUrl,
+    lmstudioApiKey: state.lmstudioApiKey,
+    ollamaUrl: state.ollamaUrl,
+  });
+  if (res.ok) {
+    state.lmstudioModels = res.models;
+    updateModelDropdown();
+    return res;
   }
-  if (!status.exePath) {
-    setOllamaStatus('not_found');
-    showToast('⚠ Ollama not found. Install from ollama.com');
-    return;
+  showToast('⚠ Could not list models: ' + res.error);
+  return res;
+}
+
+function updateModelDropdown() {
+  const sel = document.getElementById('s-lm-model');
+  if (!sel) return;
+  const current = state.lmstudioModel;
+  sel.innerHTML = '<option value="">— Select a model —</option>' +
+    state.lmstudioModels.map(m => `<option value="${escHtml(m.id)}" ${m.id === current ? 'selected' : ''}>${escHtml(m.id)}</option>`).join('');
+  if (current && !state.lmstudioModels.some(m => m.id === current)) {
+    sel.innerHTML += `<option value="${escHtml(current)}" selected>${escHtml(current)} (not loaded)</option>`;
   }
-  // Not running but found — launch it
-  setOllamaStatus('starting', 'Starting...');
-  const result = await rb.ollama.launch();
-  if (result.status === 'running' || result.status === 'launched') {
-    setOllamaStatus('running');
-    showToast('✓ Ollama started');
-  } else if (result.status === 'timeout') {
-    setOllamaStatus('red', 'Timeout');
-    showToast('⚠ Ollama is taking a while to start...');
-    // Keep polling
-    pollOllamaStatus();
+}
+
+async function verifyLmStudio() {
+  const statusEl = document.getElementById('s-lm-status');
+  const url = document.getElementById('s-lm-url')?.value?.trim() || state.lmstudioUrl;
+  const apiKey = document.getElementById('s-lm-key')?.value?.trim() || '';
+  const model = document.getElementById('s-lm-model')?.value || '';
+  if (statusEl) { statusEl.style.color = 'var(--text3)'; statusEl.textContent = 'Checking ' + url + ' …'; }
+  const res = await rb.llm.verify({ provider: 'lmstudio', lmstudioUrl: url, lmstudioApiKey: apiKey, model });
+  if (res.ok) {
+    state.lmstudioModels = res.models || [];
+    updateModelDropdown();
+    if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ ' + (res.message || ('Connected — ' + (res.models || []).length + ' model(s) found.')); }
   } else {
-    setOllamaStatus('red', 'Error');
-    showToast('⚠ Could not start Ollama: ' + (result.error || result.status));
+    if (statusEl) { statusEl.style.color = 'var(--coral)'; statusEl.textContent = '✕ ' + (res.error || 'Connection failed'); }
   }
+  return res;
 }
 
 let ollamaPoller = null;
@@ -71,7 +144,7 @@ function pollOllamaStatus() {
   ollamaPoller = setInterval(async () => {
     const status = await rb.ollama.status();
     if (status.running) {
-      setOllamaStatus('running');
+      setLlmStatus('green', 'Ollama · ' + (state.ollamaModel || ''));
       clearInterval(ollamaPoller);
       ollamaPoller = null;
     }
@@ -81,8 +154,10 @@ function pollOllamaStatus() {
 async function retryOllama() {
   const dot = document.getElementById('ollama-dot');
   if (dot && dot.classList.contains('green')) return; // already running
-  await initOllama();
+  await initLLM();
 }
+// initOllama kept as an alias — older code / titlebar used that name.
+async function initOllama() { return initLLM(); }
 
 // ── Init ─────────────────────────────────────────────────────────
 async function init() {
@@ -91,12 +166,21 @@ async function init() {
   state.ollamaUrl   = await rb.db.getSetting('ollama_url')   || state.ollamaUrl;
   state.ollamaExePath = await rb.db.getSetting('ollama_exe_path') || '';
   state.projectContext = await rb.db.getSetting('project_context') || '';
+  state.provider = await rb.db.getSetting('llm_provider') || 'lmstudio';
+  state.lmstudioUrl = await rb.db.getSetting('lmstudio_url') || 'http://localhost:1234/v1';
+  state.lmstudioModel = await rb.db.getSetting('lmstudio_model') || '';
+  state.lmstudioApiKey = await rb.db.getSetting('lmstudio_api_key') || '';
+  state.temperature = parseFloat(await rb.db.getSetting('llm_temperature') || '0.2') || 0.2;
+  state.maxTokens = parseInt(await rb.db.getSetting('llm_max_tokens') || '4096', 10) || 4096;
+  state.unityExePath = await rb.db.getSetting('unity_exe_path') || '';
+  state.chatMode = await rb.db.getSetting('chat_mode') || 'agent';
   if (state.ollamaExePath) await rb.ollama.setPath(state.ollamaExePath);
   document.getElementById('project-path-label').textContent = state.projectPath || 'No project set';
   document.getElementById('file-path-label').textContent = state.projectPath || 'No project set';
 
-  // Start Ollama check/launch in parallel — don't block UI
-  initOllama();
+  // Check the LLM backend in parallel — don't block UI
+  initLLM();
+  updateModeButtons();
 
   await refreshSidebar();
   await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
@@ -379,8 +463,8 @@ async function sendChat() {
   assistantMsgEl.className = 'msg msg-assistant';
   msgsEl.appendChild(assistantMsgEl);
 
-  rb.ollama.removeListeners();
-  rb.ollama.onChunk(chunk => {
+  rb.llm.removeListeners();
+  rb.llm.onChunk(chunk => {
     thinkingEl.remove();
     assistantContent += chunk;
     assistantMsgEl.textContent = assistantContent;
@@ -389,28 +473,33 @@ async function sendChat() {
   // Capture thread ID now — state may change if user navigates away
   const currentThreadId = state.activeThreadId;
 
-  rb.ollama.onDone(async () => {
+  rb.llm.onDone(async () => {
     state.streaming = false;
     await rb.db.insert('messages', { thread_id: currentThreadId, role: 'assistant', content: assistantContent });
     if (state.activeThreadId === currentThreadId) {
       state.messages.push({ role: 'assistant', content: assistantContent });
     }
-    rb.ollama.removeListeners();
+    rb.llm.removeListeners();
     // Parse response for file changes and show apply bar if any found
     const changes = extractFileChanges(assistantContent);
     if (changes.length) showApplyBar(changes);
   });
 
   try {
-    await rb.ollama.chat({
+    await rb.llm.chat({
       messages: state.messages.map(m => ({ role: m.role, content: m.content })),
       systemPrompt,
-      model: state.ollamaModel,
+      provider: state.provider,
+      model: currentModel(),
+      lmstudioUrl: state.lmstudioUrl,
+      lmstudioApiKey: state.lmstudioApiKey,
       ollamaUrl: state.ollamaUrl,
+      temperature: state.temperature,
+      maxTokens: state.maxTokens,
     });
   } catch (e) {
     thinkingEl.remove();
-    assistantMsgEl.textContent = '⚠ Could not reach Ollama. Is it running at ' + state.ollamaUrl + '?';
+    assistantMsgEl.textContent = '⚠ Could not reach ' + providerLabel() + ' at ' + currentUrl() + '. ' + (e.message || '') + (currentModel() ? '' : ' No model is selected — open Settings, verify the connection, and pick a model.');
     state.streaming = false;
   }
 }
@@ -418,12 +507,148 @@ async function sendChat() {
 function buildSystemPrompt(rulesets) {
   const ctx = state.projectContext || 'a software project';
   let prompt = 'You are an expert software developer working on ' + ctx + '.\n';
+  prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. If you do not know something, say so instead of guessing.\n';
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
+  const scan = projectScanSummary();
+  if (scan) prompt += '## Project context (from a scan of the project folder)\n\n' + scan + '\n\n';
   if (rulesets.length) {
     prompt += '## Project Rules\n\n';
     rulesets.forEach(r => { prompt += '### ' + r.name + '\n' + r.content + '\n\n'; });
   }
+  if (state.chatMode === 'ask') {
+    prompt += '## Mode: Ask\nAnswer and explain only. Do not propose file writes, do not output code blocks meant to be applied, and do not change any files.\n';
+  } else if (state.chatMode === 'plan') {
+    prompt += '## Mode: Plan\nOutput a plan only: FILE: lines for every file to touch, then numbered steps. Do not write code yet.\n';
+  } else {
+    prompt += '## Mode: Agent\nWork step by step. Output complete code in fenced code blocks, each preceded by **File Path:** `path`, one file per block. No placeholders, no TODOs, no truncated code. If a step is too large for one reply, do the first step only and say what remains.\n';
+  }
   return prompt;
+}
+
+// ── Chat modes + tools ──────────────────────────────────────────────
+function setChatMode(mode) {
+  state.chatMode = mode;
+  rb.db.setSetting('chat_mode', mode);
+  updateModeButtons();
+  const input = document.getElementById('chat-input');
+  if (input) {
+    input.placeholder = mode === 'ask' ? 'Ask about your code — no files will be changed…'
+      : mode === 'plan' ? 'Describe what you want — the model drafts a plan, no code yet…'
+      : 'Describe what to build — the model works step by step…';
+  }
+}
+function updateModeButtons() {
+  ['ask', 'plan', 'agent'].forEach(m => {
+    const btn = document.getElementById('mode-btn-' + m);
+    if (btn) btn.classList.toggle('active', state.chatMode === m);
+  });
+}
+function insertPrompt(text) {
+  if (state.mode !== 'chat') {
+    document.getElementById('chat-mode').classList.remove('hidden');
+    document.getElementById('editor-mode').classList.add('hidden');
+    document.getElementById('plan-mode').classList.add('hidden');
+    state.mode = 'chat';
+  }
+  const input = document.getElementById('chat-input');
+  input.value = text;
+  input.focus();
+  autoResize(input);
+}
+function addSystemMessage(text) {
+  state.messages.push({ role: 'system', content: text });
+  renderMessages();
+}
+function projectScanSummary() {
+  const scan = state.projectScan;
+  if (!scan || !scan.ok) return '';
+  const parts = [];
+  if (scan.unityVersion) parts.push('Unity version: ' + scan.unityVersion);
+  const pkgs = Object.keys(scan.packages || {});
+  if (pkgs.length) parts.push('Packages: ' + pkgs.slice(0, 30).join(', '));
+  if (scan.scenes && scan.scenes.length) parts.push('Scenes: ' + scan.scenes.map(x => x.path + (x.gameObjects.length ? ' (' + x.gameObjects.slice(0, 10).join(', ') + ')' : '')).join('; ').slice(0, 1200));
+  if (scan.prefabs && scan.prefabs.length) parts.push('Prefabs: ' + scan.prefabs.map(x => x.path).slice(0, 40).join(', '));
+  parts.push('Scripts: ' + scan.scriptCount + ' C# files' + (scan.scripts ? ' — ' + scan.scripts.slice(0, 60).join(', ') : ''));
+  parts.push('Files: ' + scan.fileCount);
+  return parts.join('\n').slice(0, 4000);
+}
+async function scanProject() {
+  showToast('Scanning project…');
+  const scan = await rb.project.scan(state.projectPath);
+  if (!scan.ok) { showToast('⚠ ' + scan.error); return scan; }
+  state.projectScan = scan;
+  const pkgCount = Object.keys(scan.packages || {}).length;
+  showToast(`✓ Scanned: ${scan.scriptCount} scripts, ${scan.scenes.length} scenes, ${scan.prefabs.length} prefabs, ${pkgCount} packages`);
+  addSystemMessage(`Project scan — Unity ${scan.unityVersion || 'unknown'}, ${scan.scriptCount} scripts, ${scan.scenes.length} scenes, ${scan.prefabs.length} prefabs, ${pkgCount} packages. This context is now included in every chat prompt.`);
+  return scan;
+}
+function diagnoseError() {
+  setChatMode('ask');
+  insertPrompt(`I pasted a Unity console error / log below. Diagnose it:
+1. What the error means, in plain language
+2. The most likely file(s) and line(s) causing it
+3. The smallest fix to try first
+
+\`\`\`
+PASTE THE ERROR OR LOG HERE
+\`\`\`
+`);
+}
+function generateTests() {
+  const file = state.activeFilePath ? state.activeFilePath.split(/[\\/]/).pop() : null;
+  setChatMode('agent');
+  insertPrompt(file
+    ? `Write EditMode tests for ${file} (currently open in the viewer). Create a new test file under Assets/Tests/ named after the class under test, using NUnit. Cover the main behaviour and the obvious edge cases. Output the complete test file with **File Path:** \`Assets/Tests/...\` and a fenced code block. Then tell me how to run it with the Run tests button.`
+    : 'Write EditMode tests for a script in this project. First ask me which file to test, or pick the most central gameplay script from the project scan and say which one you chose. Create the test file under Assets/Tests/ using NUnit, and output it with **File Path:** and a fenced code block.');
+}
+function buildAnimator() {
+  setChatMode('agent');
+  insertPrompt(`Generate a Unity Editor script that builds an Animator Controller for me. I will describe the states and parameters below — fill in what I leave out with sensible defaults, and say so.
+
+Controller name: 
+Parameters (name, type: Float/Int/Bool/Trigger): 
+States (name, motion clip if any, speed): 
+Transitions (from -> to, parameter + condition): 
+
+Output the complete C# Editor script with **File Path:** \`Assets/Editor/GenerateAnimator.cs\` in a fenced code block. The script must use AnimatorController.CreateAnimatorControllerAtPath and be runnable from the Unity menu. Do not invent motion clips that do not exist in the project — check the project scan first and only reference clips that are listed there.`);
+}
+function buildUI() {
+  setChatMode('agent');
+  insertPrompt(`Generate a Unity Editor script that builds a UI screen for me. Describe the screen below (Canvas, panels, text, buttons, layout) and I will generate the complete C# Editor script with **File Path:** \`Assets/Editor/GenerateUI.cs\` in a fenced code block. The script must create the Canvas, RectTransforms and Unity UI components (Text, Button, Image, Panel) in code, use anchors sensibly, and be runnable from the Unity menu. Keep it simple — local models do layout best one screen at a time.
+
+Screen to build: `);
+}
+async function runTests() {
+  showToast('Running EditMode tests… (Unity batch mode, up to 10 min)');
+  addSystemMessage('Running EditMode tests in Unity batch mode…');
+  const res = await rb.unity.runTests({ projectPath: state.projectPath, unityExePath: state.unityExePath });
+  if (!res.ok && !res.summary) {
+    addSystemMessage('⚠ Tests could not run: ' + res.error);
+    showToast('⚠ ' + res.error);
+    return res;
+  }
+  const sum = res.summary || {};
+  const msg = 'Test results: ' + (sum.passed ?? '?') + ' passed, ' + (sum.failed ?? '?') + ' failed, ' + (sum.skipped ?? 0) + ' skipped (total ' + (sum.total ?? '?') + ')' + (res.exitCode != null ? ' ' + String.fromCharCode(8212) + ' Unity exit code ' + res.exitCode : '') + '.' + (sum.failed ? '\n\nTail of the test output:\n' + (res.rawTail || '').slice(-1500) + '\n\nAsk the model to fix the failures, one at a time.' : '\nAll tests passed.');
+  addSystemMessage(msg);
+  showToast(sum.failed ? `⚠ Tests: ${sum.failed} failed` : '✓ All tests passed');
+  return res;
+}
+async function buildCheck() {
+  showToast('Running dotnet build check…');
+  const res = await rb.unity.buildCheck({ projectPath: state.projectPath });
+  if (!res.ok && !res.solution) {
+    addSystemMessage('⚠ Build check could not run: ' + res.error);
+    showToast('⚠ ' + res.error);
+    return res;
+  }
+  addSystemMessage(res.ok
+    ? `✓ Build check passed (${res.solution}).`
+    : `⚠ Build check failed (exit ${res.exitCode}, ${res.solution}). Tail:
+${(res.rawTail || '').slice(-2000)}
+
+Paste this into chat and ask the model to fix the first error.`);
+  showToast(res.ok ? '✓ Build check passed' : '⚠ Build check failed');
+  return res;
 }
 
 // ── Plan execution ────────────────────────────────────────────────
@@ -439,7 +664,10 @@ async function executePlan() {
   // Build prompt before switching threads
   const rulesets = await rb.db.getAll('rulesets');
   const systemPrompt = buildSystemPrompt(rulesets);
-  const prompt = `You are executing a development plan for the CodeFox Unity project (Unity 6000.3, URP 2D).
+  const scan = projectScanSummary();
+  const prompt = `You are executing a development plan for this project.
+
+Project context: ${state.projectContext || 'a Unity project'}${scan ? '\n' + scan : ''}
 
 Read the plan carefully. For each step, write the complete C# code. Be specific about:
 - Exact file paths
@@ -730,42 +958,118 @@ async function renameThread() {
 function openSettings() {
   const overlay = document.getElementById('modal-overlay');
   const modal = document.getElementById('modal');
-  const inp = (id, val) => `<input id="${id}" value="${val}" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />`;
+  const isLm = state.provider === 'lmstudio';
+  const inp = (id, val, ph) => `<input id="${id}" value="${escHtml(val || '')}" placeholder="${ph || ''}" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />`;
 
   modal.innerHTML = `
     <h2>Settings</h2>
-    <div style="display:flex;flex-direction:column;gap:12px;max-height:70vh;overflow-y:auto;padding-right:4px;">
-      <label style="color:var(--text2);font-size:12px;">Ollama URL
-        ${inp('s-url', state.ollamaUrl)}
+    <div style="display:flex;flex-direction:column;gap:14px;max-height:70vh;overflow-y:auto;padding-right:4px;">
+      <label style="color:var(--text2);font-size:12px;">LLM provider
+        <select id="s-provider" onchange="onProviderChange()" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;">
+          <option value="lmstudio" ${isLm ? 'selected' : ''}>LM Studio (default)</option>
+          <option value="ollama" ${!isLm ? 'selected' : ''}>Ollama</option>
+        </select>
       </label>
-      <label style="color:var(--text2);font-size:12px;">Model name
-        ${inp('s-model', state.ollamaModel)}
-      </label>
-      <label style="color:var(--text2);font-size:12px;">
-        Ollama executable path
-        <span style="color:var(--text3);font-size:11px;margin-left:6px;">leave blank to auto-detect</span>
-        <div style="display:flex;gap:6px;margin-top:4px;">
-          <input id="s-exe" value="${state.ollamaExePath}" placeholder="C:\...\ollama.exe"
-            style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
-          <button class="btn btn-secondary" onclick="browseOllamaExe()" style="flex-shrink:0;">Browse</button>
+
+      <div id="s-lm-section" style="display:${isLm ? 'flex' : 'none'};flex-direction:column;gap:12px;">
+        <label style="color:var(--text2);font-size:12px;">LM Studio server URL
+          ${inp('s-lm-url', state.lmstudioUrl, 'http://localhost:1234/v1')}
+          <span style="color:var(--text3);font-size:11px;">Default: http://localhost:1234/v1 — start the local server in LM Studio first. A trailing /chat/completions is stripped automatically.</span>
+        </label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-secondary" onclick="verifyLmStudio()">Verify connection</button>
+          <button class="btn btn-secondary" onclick="refreshModels().then(r => { const el = document.getElementById('s-lm-status'); if (el && r.ok) { el.style.color = 'var(--green)'; el.textContent = '✓ ' + r.models.length + ' model(s) found.'; } })">Refresh models</button>
         </div>
-        <div id="s-exe-detected" style="margin-top:4px;font-size:11px;color:var(--text3);"></div>
+        <div id="s-lm-status" style="font-size:12px;color:var(--text3);">Not verified yet — click Verify connection.</div>
+        <label style="color:var(--text2);font-size:12px;">Model (from the live server list)
+          <select id="s-lm-model" style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;">
+            <option value="">— Select a model —</option>
+          </select>
+        </label>
+        <label style="color:var(--text2);font-size:12px;">API key (optional — LM Studio needs none by default)
+          <input id="s-lm-key" type="password" value="${escHtml(state.lmstudioApiKey || '')}" placeholder="Leave blank unless your server requires one"
+            style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+        </label>
+      </div>
+
+      <div id="s-ollama-section" style="display:${!isLm ? 'flex' : 'none'};flex-direction:column;gap:12px;">
+        <label style="color:var(--text2);font-size:12px;">Ollama URL
+          ${inp('s-url', state.ollamaUrl)}
+        </label>
+        <label style="color:var(--text2);font-size:12px;">Ollama model name
+          ${inp('s-model', state.ollamaModel)}
+        </label>
+        <label style="color:var(--text2);font-size:12px;">
+          Ollama executable path
+          <span style="color:var(--text3);font-size:11px;margin-left:6px;">leave blank to auto-detect</span>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <input id="s-exe" value="${escHtml(state.ollamaExePath || '')}" placeholder="C:\\...\\ollama.exe"
+              style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+            <button class="btn btn-secondary" onclick="browseOllamaExe()" style="flex-shrink:0;">Browse</button>
+          </div>
+          <div id="s-exe-detected" style="margin-top:4px;font-size:11px;color:var(--text3);"></div>
+        </label>
+      </div>
+
+      <label style="color:var(--text2);font-size:12px;">Temperature (0 = focused, 1 = creative)
+        ${inp('s-temp', String(state.temperature), '0.2')}
+      </label>
+      <label style="color:var(--text2);font-size:12px;">Max tokens per reply
+        ${inp('s-maxtokens', String(state.maxTokens), '4096')}
       </label>
       <label style="color:var(--text2);font-size:12px;">Project path
         ${inp('s-path', state.projectPath)}
       </label>
+      <label style="color:var(--text2);font-size:12px;">Project context
+        <input id="s-ctx" value="${escHtml(state.projectContext || '')}" placeholder="e.g. a Unity 6 card game"
+          style="margin-top:4px;display:block;width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+      </label>
+      <label style="color:var(--text2);font-size:12px;">
+        Unity Editor executable path
+        <span style="color:var(--text3);font-size:11px;margin-left:6px;">needed for Run tests</span>
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <input id="s-unity-exe" value="${escHtml(state.unityExePath || '')}" placeholder="C:\\Program Files\\Unity\\Hub\\Editor\\...\\Unity.exe"
+            style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;font-family:var(--font);outline:none;" />
+          <button class="btn btn-secondary" onclick="browseUnityExe()" style="flex-shrink:0;">Browse</button>
+        </div>
+      </label>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-      <button class="btn btn-secondary" onclick="location.reload()">Cancel</button>
+      <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
       <button class="btn btn-primary" onclick="saveSettings()">Save</button>
     </div>
   `;
   overlay.classList.add('open');
-
-  // Show auto-detected path as hint
-  rb.ollama.status().then(s => {
+  updateModelDropdown();
+  // Try to populate the model list right away if LM Studio is up.
+  if (isLm) refreshModels();
+  rb.ollama.status().then(st => {
     const el = document.getElementById('s-exe-detected');
-    if (el) el.textContent = s.exePath ? 'Auto-detected: ' + s.exePath : 'Could not auto-detect — use Browse to locate ollama.exe';
+    if (el) el.textContent = st.exePath ? 'Auto-detected: ' + st.exePath : 'Could not auto-detect — use Browse to locate ollama.exe';
+  });
+}
+
+function onProviderChange() {
+  const provider = document.getElementById('s-provider')?.value || 'lmstudio';
+  document.getElementById('s-lm-section').style.display = provider === 'lmstudio' ? 'flex' : 'none';
+  document.getElementById('s-ollama-section').style.display = provider === 'ollama' ? 'flex' : 'none';
+  if (provider === 'lmstudio') refreshModels();
+}
+
+function closeSettings() {
+  // Restore the generic modal content so newItem/newThread still work.
+  document.getElementById('modal-overlay').classList.remove('open');
+  document.getElementById('modal').innerHTML = `
+    <h2 id="modal-title">New item</h2>
+    <input id="modal-name" placeholder="Name..." />
+    <div id="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmModal()">Create</button>
+    </div>
+  `;
+  document.getElementById('modal-name').addEventListener('keydown', e => {
+    if (e.key === 'Enter') confirmModal();
+    if (e.key === 'Escape') closeModal();
   });
 }
 
@@ -777,21 +1081,54 @@ async function browseOllamaExe() {
   }
 }
 
+async function browseUnityExe() {
+  const chosen = await rb.fs.pickExe('Find Unity.exe');
+  if (chosen) {
+    const input = document.getElementById('s-unity-exe');
+    if (input) input.value = chosen;
+  }
+}
+
 async function saveSettings() {
-  const url   = document.getElementById('s-url')?.value?.trim();
-  const model = document.getElementById('s-model')?.value?.trim();
-  const path  = document.getElementById('s-path')?.value?.trim();
-  const exe   = document.getElementById('s-exe')?.value?.trim();
-  if (url)   { state.ollamaUrl      = url;   await rb.db.setSetting('ollama_url', url); }
-  if (model) { state.ollamaModel    = model; await rb.db.setSetting('ollama_model', model); }
-  if (path)  { state.projectPath    = path;  await rb.db.setSetting('project_path', path); }
-  // exe can be empty string (to clear custom path)
-  state.ollamaExePath = exe || '';
-  await rb.db.setSetting('ollama_exe_path', exe || '');
-  await rb.ollama.setPath(exe || '');
+  const provider = document.getElementById('s-provider')?.value || state.provider;
+  state.provider = provider;
+  await rb.db.setSetting('llm_provider', provider);
+  if (provider === 'lmstudio') {
+    const url = document.getElementById('s-lm-url')?.value?.trim();
+    const model = document.getElementById('s-lm-model')?.value || '';
+    const apiKey = document.getElementById('s-lm-key')?.value?.trim() || '';
+    if (url) { state.lmstudioUrl = url; await rb.db.setSetting('lmstudio_url', url); }
+    state.lmstudioModel = model;
+    await rb.db.setSetting('lmstudio_model', model);
+    state.lmstudioApiKey = apiKey;
+    await rb.db.setSetting('lmstudio_api_key', apiKey);
+  } else {
+    const url = document.getElementById('s-url')?.value?.trim();
+    const model = document.getElementById('s-model')?.value?.trim();
+    const exe = document.getElementById('s-exe')?.value?.trim();
+    if (url) { state.ollamaUrl = url; await rb.db.setSetting('ollama_url', url); }
+    if (model) { state.ollamaModel = model; await rb.db.setSetting('ollama_model', model); }
+    state.ollamaExePath = exe || '';
+    await rb.db.setSetting('ollama_exe_path', exe || '');
+    await rb.ollama.setPath(exe || '');
+  }
+  const temp = parseFloat(document.getElementById('s-temp')?.value);
+  if (!isNaN(temp)) { state.temperature = Math.min(2, Math.max(0, temp)); await rb.db.setSetting('llm_temperature', String(state.temperature)); }
+  const mt = parseInt(document.getElementById('s-maxtokens')?.value, 10);
+  if (!isNaN(mt) && mt > 0) { state.maxTokens = mt; await rb.db.setSetting('llm_max_tokens', String(mt)); }
+  const pathVal = document.getElementById('s-path')?.value?.trim();
+  if (pathVal) { state.projectPath = pathVal; await rb.db.setSetting('project_path', pathVal); }
   const ctx = document.getElementById('s-ctx')?.value?.trim();
   if (ctx !== undefined) { state.projectContext = ctx; await rb.db.setSetting('project_context', ctx); }
-  location.reload();
+  const unityExe = document.getElementById('s-unity-exe')?.value?.trim() || '';
+  state.unityExePath = unityExe;
+  await rb.db.setSetting('unity_exe_path', unityExe);
+  closeSettings();
+  // Re-init the LLM connection without losing the thread (no reload).
+  document.getElementById('project-path-label').textContent = state.projectPath || 'No project set';
+  document.getElementById('file-path-label').textContent = state.projectPath || 'No project set';
+  await initLLM();
+  showToast('✓ Settings saved');
 }
 
 // ── Unity refresh ─────────────────────────────────────────────────
@@ -824,52 +1161,44 @@ function showToast(msg) {
 
 // ── File apply from LLM response ─────────────────────────────────
 
+const NEW_FILE_SENTINEL = '__CODEFOX_NEW_FILE__';
+const CODE_EXTS = 'cs|unity|prefab|asset|json|shader|md|txt|js|ts';
+
 function extractFileChanges(responseText) {
   const changes = [];
-  // Match patterns like:
-  //   **File Path:** `Assets/Scripts/Foo.cs`
-  //   Assets/Scripts/Foo.cs
-  //   // Assets/Scripts/Foo.cs
-  // followed by a ```csharp or ``` code block
-
   const lines = responseText.split('\n');
   let pendingPath = null;
+  const extRe = new RegExp('([A-Za-z][\\w/\\.-]+\\.(' + CODE_EXTS + '))', 'i');
+  const pathPatterns = [
+    /\*\*File Path:\*\*\s*`([^`]+)`/i,
+    /\*\*Script:\*\*\s*`([^`]+)`/i,
+    /\*\*File:\*\*\s*`([^`]+)`/i,
+    /^FILE:\s*(.+?)\s*$/,
+    /^[`\s]*([A-Za-z][\w/\.-]+\.(?:cs|unity|prefab|asset|json|shader|md|txt|js|ts))\s*$/,
+    /`([A-Za-z\/\][\w/\.-]+\.(?:cs|unity|prefab|asset|json|shader|md|txt|js|ts))`/,
+  ];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-
-    // Detect file path hints
-    const pathPatterns = [
-      /\*\*File Path:\*\*\s*`([^`]+\.cs)`/i,
-      /\*\*Script:\*\*\s*`([^`]+\.cs)`/i,
-      /\*\*File:\*\*\s*`([^`]+\.cs)`/i,
-      /^[`\s]*([A-Za-z][\w/\.-]+\.cs)\s*$/,
-      /`([A-Za-z\/\][\w/\.-]+\.cs)`/,
-    ];
-
     for (const pat of pathPatterns) {
       const m = line.match(pat);
       if (m) { pendingPath = m[1].trim(); break; }
     }
-
-    // Detect opening code fence
-    if (line.match(/^```(csharp|cs|c#)?\s*$/i)) {
-      // Collect until closing fence
+    // Any fenced code block (```csharp, ```json, ```, …)
+    if (line.match(/^```\s*\S*\s*$/)) {
       let code = '';
       let j = i + 1;
       while (j < lines.length && !lines[j].match(/^```\s*$/)) {
-        // Check if first line of code block is a path comment
-        if (j === i + 1 && lines[j].match(/^\/\/\s*([A-Za-z][\w/\.-]+\.cs)/)) {
-          const m = lines[j].match(/^\/\/\s*([A-Za-z][\w/\.-]+\.cs)/);
-          if (!pendingPath) pendingPath = m[1].trim();
-          j++;
-          continue;
+        if (j === i + 1) {
+          const cm = lines[j].match(/^\/\/\s*([A-Za-z][\w/\.-]+\.(?:cs|unity|prefab|asset|json|shader|md|txt|js|ts))/);
+          if (cm) { if (!pendingPath) pendingPath = cm[1].trim(); j++; continue; }
+          const cm2 = lines[j].match(/^#\s*([A-Za-z][\w/\.-]+\.(?:cs|unity|prefab|asset|json|shader|md|txt|js|ts))/);
+          if (cm2) { if (!pendingPath) pendingPath = cm2[1].trim(); j++; continue; }
         }
         code += lines[j] + '\n';
         j++;
       }
-      i = j; // skip past closing fence
-
+      i = j;
       if (pendingPath && code.trim()) {
         changes.push({ path: pendingPath, code: code.trimEnd() });
       }
@@ -877,6 +1206,67 @@ function extractFileChanges(responseText) {
     }
   }
   return changes;
+}
+
+// ── Diff preview (simple line-based diff) ─────────────────────────
+function diffLines(oldLines, newLines) {
+  // LCS diff; falls back to whole-file replace for very large files.
+  if (oldLines.length * newLines.length > 250000) {
+    return [
+      ...oldLines.map(l => ({ type: 'del', text: l })),
+      ...newLines.map(l => ({ type: 'add', text: l })),
+    ];
+  }
+  const n = oldLines.length, m = newLines.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = oldLines[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (oldLines[i] === newLines[j]) { out.push({ type: 'ctx', text: oldLines[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: 'del', text: oldLines[i] }); i++; }
+    else { out.push({ type: 'add', text: newLines[j] }); j++; }
+  }
+  while (i < n) { out.push({ type: 'del', text: oldLines[i] }); i++; }
+  while (j < m) { out.push({ type: 'add', text: newLines[j] }); j++; }
+  return out;
+}
+
+let pendingDiffChanges = null;
+async function showDiffOverlay(changes) {
+  pendingDiffChanges = changes;
+  const content = document.getElementById('diff-content');
+  const overlay = document.getElementById('diff-overlay');
+  if (!content || !overlay) return;
+  content.innerHTML = '<div style="color:var(--text3);padding:12px;">Loading current files…</div>';
+  overlay.classList.add('open');
+  let html = '';
+  for (const change of changes) {
+    const fullPath = resolvePath(change.path);
+    const existing = await rb.fs.readFile(fullPath);
+    const oldText = existing.ok ? existing.content : '';
+    const diff = diffLines(oldText.split('\n'), change.code.split('\n'));
+    const adds = diff.filter(d => d.type === 'add').length;
+    const dels = diff.filter(d => d.type === 'del').length;
+    html += `<div style="margin-bottom:16px;">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--text);margin-bottom:6px;">${escHtml(change.path)} <span style="color:var(--text3);">${existing.ok ? `(${adds} added, ${dels} removed)` : '(new file)'}</span></div>
+      <div class="diff-view">${diff.map(d => `<div class="diff-line diff-${d.type}">${escHtml(d.text) || ' '}</div>`).join('')}</div>
+    </div>`;
+  }
+  content.innerHTML = html;
+}
+function closeDiffOverlay() {
+  const overlay = document.getElementById('diff-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+function applyFromDiff() {
+  if (!pendingDiffChanges) return;
+  closeDiffOverlay();
+  applyFileChanges(pendingDiffChanges);
 }
 
 function showApplyBar(changes) {
@@ -902,6 +1292,11 @@ function showApplyBar(changes) {
   applyBtn.textContent = '▶ Apply changes';
   applyBtn.onclick = () => applyFileChanges(changes);
 
+  const diffBtn = document.createElement('button');
+  diffBtn.className = 'btn btn-secondary';
+  diffBtn.textContent = 'Review diff';
+  diffBtn.onclick = () => showDiffOverlay(changes);
+
   const dismissBtn = document.createElement('button');
   dismissBtn.className = 'btn btn-secondary';
   dismissBtn.textContent = 'Dismiss';
@@ -909,6 +1304,7 @@ function showApplyBar(changes) {
 
   bar.appendChild(label);
   bar.appendChild(fileList);
+  bar.appendChild(diffBtn);
   bar.appendChild(applyBtn);
   bar.appendChild(dismissBtn);
   document.body.appendChild(bar);
@@ -926,6 +1322,7 @@ async function applyFileChanges(changes) {
   const label = changes.map(c => c.path.split(/[\/]/).pop()).join(', ');
   const backedUp = [];
 
+  const newFiles = [];
   for (const change of changes) {
     const fullPath = resolvePath(change.path);
     const existing = await rb.fs.readFile(fullPath);
@@ -937,15 +1334,22 @@ async function applyFileChanges(changes) {
         content: existing.content
       });
       backedUp.push(fullPath);
+    } else {
+      // New file — record a sentinel row so revert deletes it.
+      await rb.db.insert('file_backups', {
+        snapshot_id: snapshotId,
+        file_path: fullPath,
+        content: NEW_FILE_SENTINEL
+      });
+      newFiles.push(fullPath);
     }
-    // New files have no backup entry — revert will delete them
   }
 
   // Record the snapshot
   await rb.db.insert('snapshots', {
     id: snapshotId,
     label: label.substring(0, 200),
-    file_count: backedUp.length
+    file_count: backedUp.length + newFiles.length
   });
 
   // ── Step 2: Write the new files ──────────────────────────────────
@@ -978,7 +1382,7 @@ async function applyFileChanges(changes) {
   }
 
   // ── Step 4: Show revert bar ──────────────────────────────────────
-  showRevertBar(snapshotId, label, backedUp.length, changes.length - backedUp.length);
+  showRevertBar(snapshotId, label, backedUp.length, newFiles.length);
 }
 
 function resolvePath(filePath) {
@@ -1033,6 +1437,13 @@ async function confirmRevert(snapshotId, bar) {
   let failed = 0;
 
   for (const backup of snapBackups) {
+    if (backup.content === NEW_FILE_SENTINEL) {
+      // File did not exist before the apply — delete it (and its .meta).
+      const result = await rb.fs.deleteFile(backup.file_path);
+      if (result.ok) { restored++; await rb.fs.deleteFile(backup.file_path + '.meta'); }
+      else { failed++; console.error('Revert failed for:', backup.file_path, result.error); }
+      continue;
+    }
     const result = await rb.fs.writeFile(backup.file_path, backup.content);
     if (result.ok) restored++;
     else { failed++; console.error('Revert failed for:', backup.file_path, result.error); }
