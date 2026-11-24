@@ -125,7 +125,7 @@
   /* ── Modal ── */
   #modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
   #modal-overlay.open { display: flex; }
-  #modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 24px; width: 420px; display: flex; flex-direction: column; gap: 14px; }
+  #modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 24px; width: 560px; max-width: 92vw; display: flex; flex-direction: column; gap: 14px; }
   #modal h2 { font-size: 15px; font-weight: 500; }
   #modal input, #modal textarea { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; font-family: var(--font); width: 100%; outline: none; }
   #modal input:focus, #modal textarea:focus { border-color: var(--accent); }
@@ -141,6 +141,25 @@
 
   .hidden { display: none !important; }
   #apply-bar { box-shadow: 0 -2px 12px rgba(0,0,0,0.3); }
+
+  /* ── Mode selector + tools row ── */
+  #mode-row { display: flex; gap: 6px; padding: 8px 16px 0; flex-shrink: 0; align-items: center; flex-wrap: wrap; }
+  .mode-btn { padding: 4px 12px; border-radius: 12px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text2); font-size: 11px; cursor: pointer; font-family: var(--font); }
+  .mode-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #tools-row { display: flex; gap: 6px; padding: 8px 16px 0; flex-shrink: 0; flex-wrap: wrap; }
+  .tool-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text2); font-size: 11px; cursor: pointer; font-family: var(--font); }
+  .tool-btn:hover { color: var(--text); border-color: var(--accent); }
+
+  /* ── Diff overlay ── */
+  #diff-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: none; align-items: center; justify-content: center; z-index: 200; }
+  #diff-overlay.open { display: flex; }
+  #diff-modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 20px; width: 860px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column; gap: 12px; }
+  #diff-content { flex: 1; overflow-y: auto; font-family: var(--mono); font-size: 11px; line-height: 1.6; }
+  .diff-view { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; max-height: 300px; overflow-y: auto; }
+  .diff-line { padding: 1px 10px; white-space: pre; color: var(--text2); }
+  .diff-add { background: rgba(76,175,125,0.15); color: #8fd8ae; }
+  .diff-del { background: rgba(255,107,107,0.15); color: #ff9d9d; }
+  .diff-ctx { color: var(--text3); }
 
   /* ── Ollama status dot ── */
   #ollama-status { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text3); -webkit-app-region: no-drag; cursor: pointer; padding: 3px 8px; border-radius: 6px; transition: background 0.15s; }
@@ -204,6 +223,21 @@
       <div id="center-body">
         <!-- Chat mode -->
         <div id="chat-mode">
+          <div id="mode-row">
+            <button class="mode-btn" id="mode-btn-ask" onclick="setChatMode('ask')">Ask</button>
+            <button class="mode-btn" id="mode-btn-plan" onclick="setChatMode('plan')">Plan</button>
+            <button class="mode-btn active" id="mode-btn-agent" onclick="setChatMode('agent')">Agent</button>
+            <span style="color:var(--text3);font-size:11px;margin-left:6px;">Ask answers only · Plan drafts steps · Agent writes code step by step</span>
+          </div>
+          <div id="tools-row">
+            <button class="tool-btn" onclick="scanProject()">Scan project</button>
+            <button class="tool-btn" onclick="diagnoseError()">Diagnose error</button>
+            <button class="tool-btn" onclick="generateTests()">Generate tests</button>
+            <button class="tool-btn" onclick="buildAnimator()">Animator</button>
+            <button class="tool-btn" onclick="buildUI()">UI</button>
+            <button class="tool-btn" onclick="runTests()">Run tests</button>
+            <button class="tool-btn" onclick="buildCheck()">Build check</button>
+          </div>
           <div id="chat-messages"></div>
           <div id="chat-input-area">
             <textarea id="chat-input" placeholder="Ask about CodeFox..." rows="1" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
@@ -255,6 +289,18 @@
     <div id="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="confirmModal()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diff preview overlay -->
+<div id="diff-overlay">
+  <div id="diff-modal">
+    <h2 style="font-size:15px;font-weight:500;">Review diff</h2>
+    <div id="diff-content"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeDiffOverlay()">Close</button>
+      <button class="btn btn-teal" onclick="applyFromDiff()">▶ Apply changes</button>
     </div>
   </div>
 </div>
