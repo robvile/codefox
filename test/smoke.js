@@ -21,9 +21,9 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
   }
 }
 
-// 2. package.json version is 0.2.0.
+// 2. package.json version is 0.3.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.2.0', pkg.version === '0.2.0', 'got ' + pkg.version);
+check('package.json version is 0.3.0', pkg.version === '0.3.0', 'got ' + pkg.version);
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
 
 // 3. No occurrence of the forbidden word (case-insensitive) in any
@@ -67,6 +67,35 @@ check('app.js has Ask/Plan/Agent modes', appJs.includes("setChatMode") && appJs.
 check('app.js has diff preview', appJs.includes('showDiffOverlay') && appJs.includes('diffLines'));
 check('app.js uses rb.llm.chat', appJs.includes('rb.llm.chat'));
 check('app.js has no hardcoded Unity version prompt', !appJs.includes('Unity 6000.3'));
+
+// 7. v0.3.0 Home view: Conversations / References renames, New Project,
+// project IPC, skills table — and no trace of the removed items.
+const indexHtml = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+check('index.html has Conversations', indexHtml.includes('Conversations'));
+check('index.html has References', indexHtml.includes('References'));
+check('app.js has Conversations rename', appJs.includes('New conversation') && appJs.includes('conversations-list'));
+check('app.js has References', appJs.includes('References'));
+check('index.html has New Project entry point', indexHtml.includes('New Project') || appJs.includes('New Project'));
+check('app.js has New Project', appJs.includes('New Project'));
+check('main.js has project:list IPC', mainJs.includes("ipcMain.handle('project:list'"));
+check('main.js has project:create IPC', mainJs.includes("ipcMain.handle('project:create'"));
+check('main.js has project:switch IPC', mainJs.includes("ipcMain.handle('project:switch'"));
+check('main.js has project:update IPC', mainJs.includes("ipcMain.handle('project:update'"));
+check('main.js has project:delete IPC', mainJs.includes("ipcMain.handle('project:delete'"));
+check('main.js has projects table', mainJs.includes('CREATE TABLE IF NOT EXISTS projects'));
+check('main.js has skills table', mainJs.includes('CREATE TABLE IF NOT EXISTS skills'));
+check('main.js has unity:installBridge IPC', mainJs.includes("ipcMain.handle('unity:installBridge'"));
+check('main.js migrates project_id onto threads', mainJs.includes('ADD COLUMN project_id'));
+for (const [label, content] of [['index.html', indexHtml], ['app.js', appJs], ['README', readme]]) {
+  check(label + ' has no removed proofs section', !content.includes('All ' + 'Proofs'));
+  check(label + ' has no workspace-named project button', !content.includes('New ' + 'Workspace'));
+}
+check('app.js has Home mode', appJs.includes("'home'") && appJs.includes('showHome'));
+check('app.js has skills grid', appJs.includes('renderSkillsGrid') && appJs.includes('/document-project') && appJs.includes('/audit-project-structure'));
+check('app.js has connections view', appJs.includes('renderConnectionsView') && appJs.includes('installUnityBridge'));
+check('app.js has no Invite button', !appJs.includes('Invite') && !indexHtml.includes('Invite'));
+check('README mentions multiple projects', readme.includes('Multiple projects') || readme.includes('New Project'));
+check('README has planned-collaboration note', readme.includes('Working together (planned)'));
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');
