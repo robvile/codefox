@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.2.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.3.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -14,12 +14,16 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 
 ## What it does
 
-- **Chat** with a local LLM about your codebase across persistent threads
+- **Home** — the default view when CodeFox opens: a banner for the active project, connection cards (Unity / Unreal / local folders), a Discover Skills grid, recent references, and a "What do you want to build?" panel that starts a new conversation
+- **Multiple projects** — keep several local projects in CodeFox, each with its own conversations, rulesets, plans, and references. Switch from the project selector at the top of the sidebar, or create a new one with **New Project**. No accounts, no teams, no sync — everything stays on this machine
+- **Chat** with a local LLM about your codebase across persistent conversations
 - **Ask / Plan / Agent modes** — Ask answers and explains only, Plan drafts steps and file lists without writing code, Agent works step by step and outputs complete code in fenced blocks with file paths
 - **Project scan** — reads your Unity project (version, packages, scenes, prefabs, scripts) and includes a summary in every prompt, so the model knows what actually exists instead of guessing
 - **Rulesets** — define project rules, architecture contracts, naming conventions. Auto-injected into every prompt.
 - **Plans** — describe what you want done. The AI proposes steps and lists files before touching anything. You approve, then execute.
-- **Pages** — AI-authored architecture docs written after each plan executes. Grows into a living knowledge base of your project.
+- **References** — pages and plans in one list: AI-authored architecture docs (pages) and step-by-step plans, kept per project so they grow into a living knowledge base
+- **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it
+- **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/`; Figma/Jira tokens are stored locally and used only for those imports
 - **File tree** — browse your project, view files, add them to chat with one click. Search across all files instantly.
 - **Apply changes** — LLM responses containing code blocks get a one-click "Apply changes" button that writes files to disk. A **Review diff** button shows a line-by-line diff before you apply.
 - **Snapshots + Revert** — before writing anything, CodeFox backs up every file it touches, and records new files so revert can delete them. One click to revert if something breaks.
@@ -84,6 +88,18 @@ Smaller models are faster but weaker at multi-file refactors. Keep prompts and p
 
 ## How to use
 
+### Home
+
+CodeFox opens on **Home**: the project banner, connection cards, skills, and recent references for the active project. The right-hand panel asks "What do you want to build?" — pick a starter pill (**Debug an issue**, **Build a tool**, **Write a script**) or type your own prompt, and it starts a new conversation in chat mode. The `@` button mentions the file open in the viewer; the **Agent** dropdown switches Ask / Plan / Agent, and the model name opens Settings.
+
+### Projects
+
+The project selector at the top of the sidebar shows the active project. Click it to switch projects, open **Project Settings** (rename, change the project folder), or create a **New Project** (name + folder). Each project keeps its own conversations, rulesets, plans, and references; switching refreshes the sidebar, file tree, and Home view. Deleting a project deletes its conversations and references with it, and the last project cannot be deleted.
+
+### Conversations
+
+Click a conversation in the sidebar to open it, or **＋ New conversation** to start one. The first item in the list is always the new-conversation entry.
+
 ### Modes
 
 Use the **Ask / Plan / Agent** buttons above the chat input:
@@ -127,8 +143,32 @@ Click **▶ Execute plan** — CodeFox creates a dedicated thread, sends the pla
 - **Revert** — restores all modified files from the snapshot, and deletes files that were newly created by the apply. Triggers Unity refresh
 - **Snapshot history** — last 5 snapshots shown in the left panel, each with a ↩ revert button
 
-### Pages
-After a plan executes, create a Page documenting what was done. The AI can draft it. Pages become permanent architecture docs you can reference in future chats.
+### References
+Click **References** in the sidebar to see the project's pages and plans in one list — plans are labelled "Plan", pages are labelled "Reference". After a plan executes, create a Reference documenting what was done. The AI can draft it. References become permanent architecture docs you can discuss in chat.
+
+### Skills
+From Home, **Discover Skills** offers six actions:
+
+| Skill | What it does |
+|---|---|
+| /document-project | Creates a "Game Design Document" reference and asks the model to draft it from the project scan; the finished draft is saved into the reference |
+| /prototype-this | Creates a plan from a starter template and opens the plan editor |
+| /convert-to-ui-toolkit | Asks the model (Agent mode) for a UGUI → UI Toolkit migration plan and code, starting with the file open in the viewer |
+| /audit-project-structure | Scans the project, asks the model for a cleanup audit, and saves the report as a reference |
+| /work-with-figma | Needs a Figma connection — Configure opens the Connections view |
+| /work-with-jira | Needs a Jira connection — Configure opens the Connections view |
+
+Installed skills stay installed (tracked in the local database). **Manage Skills →** lists all six with Install/Uninstall toggles.
+
+### Connections
+Click **Connections** at the bottom of the sidebar for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a live status:
+
+- **LM Studio / Ollama** — status from the running backend; Configure opens Settings.
+- **Unity Bridge** — "Installed" when `Assets/Editor/CodeFoxBridge.cs` exists in the project; otherwise **Install bridge** really copies the bundled companion script there.
+- **Figma / Jira** — "Not connected" until you save a token (and a site URL for Jira) in the Configure dialog. Tokens are stored locally and used only for those imports; there is no Figma or Jira import yet, and the UI says so.
+- **GitHub** — managed in Muse, not in CodeFox; there is no action to take here.
+
+The **Your Connections** cards on Home are the quick version: the Unity card shows "1 Connected" when the project folder has an `Assets` folder (clicking it scans the project), the Unreal card connects a folder containing a `.uproject` file, and Local Folders tracks extra folders you add.
 
 ### Test loop
 1. Use **Generate tests** to create an EditMode test file for a script.
@@ -177,15 +217,23 @@ The titlebar status dot shows the active provider and selected model (e.g. "LM S
 
 ---
 
+## Working together (planned)
+
+Simultaneous multi-user editing is **not in this release**. CodeFox is a local, single-user app: one project database on one machine, no accounts, no sync, no invites.
+
+The data model is already per-project (a `projects` table, and a `project_id` on conversations, rulesets, plans, and references), so a sync layer can be added later without restructuring. That layer would need: a shared project store all collaborators can reach, presence (who is looking at what), and conflict handling for apply/revert (two people writing the same file, snapshots taken on different machines). None of that exists yet — do not expect two copies of CodeFox to stay in sync by sharing a folder.
+
 ## Architecture
 
 ```
 main.js       Electron main process — DB, IPC, file system, LLM providers
               (llm:status / llm:listModels / llm:verify / llm:chat, project:scan,
-              unity:runTests / unity:buildCheck, fs:moveFile), Ollama process management
-preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity)
-app.js        All UI logic — state, chat, modes, tools, plans, file tree, apply/revert, diff
-index.html    Three-column layout — left nav, center chat/editor, right file tree
+              project:list / project:create / project:switch / project:update /
+              project:delete, skills:list / skills:set, unity:runTests /
+              unity:buildCheck / unity:installBridge, fs:moveFile), Ollama process management
+preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills)
+app.js        All UI logic — Home, projects, state, chat, modes, tools, plans, file tree, apply/revert, diff
+index.html    Layout — top bar, sidebar, Home / chat / editor / connections / references, right build panel + file tree
 ```
 
 LLM backends:
@@ -224,7 +272,8 @@ This is early software. Contributions welcome.
 - [ ] macOS / Linux Ollama path detection
 - [ ] Plugin system for language-specific tooling
 - [ ] Git integration (auto-commit after successful apply)
-- [ ] Multiple project support
+- [x] Multiple project support
+- [ ] Simultaneous multi-user editing (see "Working together (planned)")
 
 ---
 
