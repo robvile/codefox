@@ -242,6 +242,11 @@ async function initDB() {
     try { db.run(`ALTER TABLE ${t} ADD COLUMN project_id INTEGER`); } catch {}
   }
 
+  // v0.4.0: rulesets gain an enabled flag and a priority (higher = sent
+  // to the model first) for the Rules budget in Settings.
+  try { db.run('ALTER TABLE rulesets ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
+  try { db.run('ALTER TABLE rulesets ADD COLUMN priority INTEGER NOT NULL DEFAULT 0'); } catch {}
+
   // Default settings. A brand-new database defaults to LM Studio; an
   // existing database (which already has a project_path) keeps Ollama
   // as its provider so existing users are not switched silently.
@@ -258,6 +263,15 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('unity_exe_path', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_model', 'qwen2.5-coder:32b-instruct')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_url', 'http://localhost:11434')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('rules_char_budget', '4000')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('use_condensed_rules', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('condensed_rules', '')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('mcp_servers', '[]')");
   } else {
     // Migration for existing databases: add the new keys without
     // overwriting anything the user already set.
@@ -270,6 +284,15 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('unity_exe_path', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_model', 'qwen2.5-coder:32b-instruct')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_url', 'http://localhost:11434')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('rules_char_budget', '4000')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('use_condensed_rules', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('condensed_rules', '')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('mcp_servers', '[]')");
   }
 
   // ── v0.3.0 migration: one project row per workspace ─────────────
@@ -318,6 +341,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 600,
     backgroundColor: '#1a1a1a',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -749,6 +773,25 @@ ipcMain.handle('ollama:chat', async (event, payload) => {
 
 // ── Project scan ─────────────────────────────────────────────────
 const SCAN_IGNORE = new Set(['.git', 'Library', 'Temp', 'obj', 'bin', 'node_modules', '.vs', 'Logs', '.idea', 'dist']);
+const DEFAULT_EXCLUDED_FILE_TYPES = ['meta', 'mat', 'anim', 'controller', 'overrideController', 'physicMaterial', 'physicsMaterial2D', 'renderTexture', 'cubemap', 'flare', 'guiskin', 'avatarMask', 'terrainlayer', 'preset', 'playable', 'spriteatlas', 'scenetemplate', 'shadervariants', 'lighting', 'png', 'jpg', 'asset', 'package-lock.json'];
+function excludedFileList() {
+  try {
+    const v = JSON.parse(readSetting('excluded_file_types', '[]'));
+    if (Array.isArray(v)) return v;
+  } catch {}
+  return DEFAULT_EXCLUDED_FILE_TYPES;
+}
+// A name is excluded when it matches an entry exactly (e.g.
+// package-lock.json) or ends with '.' + an entry (e.g. .meta, .png).
+function isExcludedFile(name) {
+  const lower = String(name || '').toLowerCase();
+  for (const entry of excludedFileList()) {
+    const e = String(entry).toLowerCase();
+    if (!e) continue;
+    if (lower === e || lower.endsWith('.' + e)) return true;
+  }
+  return false;
+}
 function walkProject(dir, out, depth) {
   if (depth > 12) return;
   let items;
@@ -757,7 +800,7 @@ function walkProject(dir, out, depth) {
     if (SCAN_IGNORE.has(item.name) || item.name.startsWith('.codefox')) continue;
     const full = path.join(dir, item.name);
     if (item.isDirectory()) walkProject(full, out, depth + 1);
-    else if (item.isFile()) out.push(full);
+    else if (item.isFile() && !isExcludedFile(item.name)) out.push(full);
   }
 }
 function parseUnityNames(filePath, cap) {
@@ -884,6 +927,47 @@ ipcMain.handle('unity:installBridge', async (_, projectPath) => {
     fs.copyFileSync(src, dest);
     return { ok: true, dest };
   } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Removes the companion script from the project's Assets/Editor folder
+// (and the refresh sentinel if one is present). Returns whether the
+// bridge file was actually there.
+ipcMain.handle('unity:removeBridge', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
+  const dest = path.join(root, 'Assets', 'Editor', 'CodeFoxBridge.cs');
+  const sentinel = path.join(root, 'Assets', '.codefox-refresh-trigger');
+  let removed = false;
+  try {
+    if (fs.existsSync(dest)) { fs.unlinkSync(dest); removed = true; }
+    if (fs.existsSync(sentinel)) fs.unlinkSync(sentinel);
+    return { ok: true, removed };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// ── Shell execution (Settings > Advanced) ─────────────────────────
+// Runs one command through the system shell. Refused outright while
+// the shell tool is off (Settings > Advanced, default off). On Windows
+// this is PowerShell (pwsh if powershell.exe is missing); elsewhere it
+// is the system shell via sh -c. 60-second timeout, output truncated
+// to 8000 characters per stream.
+ipcMain.handle('shell:run', async (_, payload) => {
+  if (readSetting('shell_enabled', '0') !== '1') {
+    return { ok: false, error: 'Shell tool is disabled. Turn it on in Settings > Advanced to run commands.' };
+  }
+  const command = String((payload && payload.command) || '').trim();
+  if (!command) return { ok: false, error: 'No command given.' };
+  const cwd = (payload && payload.cwd) || readSetting('project_path', '') || undefined;
+  const isWin = process.platform === 'win32';
+  const shell = isWin ? 'powershell.exe' : 'sh';
+  const args = isWin ? ['-NoProfile', '-NonInteractive', '-Command', command] : ['-c', command];
+  let r = await runProcess(shell, args, { cwd, windowsHide: true }, 60000);
+  // powershell.exe missing (e.g. a minimal Windows install) — retry with pwsh.
+  if (isWin && r.code === -1 && /ENOENT/i.test(r.stderr || '')) {
+    r = await runProcess('pwsh', ['-NoProfile', '-NonInteractive', '-Command', command], { cwd, windowsHide: true }, 60000);
+  }
+  if (r.timedOut) return { ok: false, error: 'Command timed out after 60 seconds.', stdout: String(r.stdout || '').slice(0, 8000), stderr: String(r.stderr || '').slice(0, 8000) };
+  return { ok: r.code === 0, code: r.code, stdout: String(r.stdout || '').slice(0, 8000), stderr: String(r.stderr || '').slice(0, 8000) };
 });
 
 // ── Ollama management IPC ─────────────────────────────────────────

@@ -66,5 +66,9 @@ contextBridge.exposeInMainWorld('rb', {
     runTests: (payload) => ipcRenderer.invoke('unity:runTests', payload || {}),
     buildCheck: (payload) => ipcRenderer.invoke('unity:buildCheck', payload || {}),
     installBridge: (projectPath) => ipcRenderer.invoke('unity:installBridge', projectPath),
+    removeBridge: (projectPath) => ipcRenderer.invoke('unity:removeBridge', projectPath),
+  },
+  shell: {
+    run: (payload) => ipcRenderer.invoke('shell:run', payload || {}),
   }
 });

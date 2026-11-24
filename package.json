@@ -1,16 +1,16 @@
 {
   "name": "codefox",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "npm run clean && electron-builder",
-    "build:win": "npm run clean && electron-builder --win",
-    "build:mac": "npm run clean && electron-builder --mac",
-    "build:linux": "npm run clean && electron-builder --linux",
+    "build": "node scripts/prepare-icons.js && npm run clean && electron-builder",
+    "build:win": "node scripts/prepare-icons.js && npm run clean && electron-builder --win",
+    "build:mac": "node scripts/prepare-icons.js && npm run clean && electron-builder --mac",
+    "build:linux": "node scripts/prepare-icons.js && npm run clean && electron-builder --linux",
     "test": "node test/smoke.js",
     "clean": "node scripts/clean-dist.js"
   },
@@ -24,6 +24,7 @@
   "build": {
     "appId": "com.codefox.app",
     "productName": "CodeFox",
+    "icon": "build/icon.png",
     "copyright": "Copyright \u00a9 2026 CodeFox Contributors",
     "directories": {
       "output": "dist"
@@ -34,7 +35,8 @@
       "app.js",
       "index.html",
       "package.json",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "build/icon.png"
     ],
     "win": {
       "target": [
@@ -45,7 +47,8 @@
           ]
         }
       ],
-      "artifactName": "CodeFox-Setup.${ext}"
+      "artifactName": "CodeFox-Setup.${ext}",
+      "icon": "build/icon.ico"
     },
     "mac": {
       "target": [
