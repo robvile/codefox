@@ -21,9 +21,9 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'test/smoke.js']) {
   }
 }
 
-// 2. package.json version is 0.3.1.
+// 2. package.json version is 0.3.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.3.1', pkg.version === '0.3.1', 'got ' + pkg.version);
+check('package.json version is 0.3.2', pkg.version === '0.3.2', 'got ' + pkg.version);
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -93,6 +93,8 @@ for (const [label, content] of [['index.html', indexHtml], ['app.js', appJs], ['
   check(label + ' has no workspace-named project button', !content.includes('New ' + 'Workspace'));
 }
 check('app.js has Home mode', appJs.includes("'home'") && appJs.includes('showHome'));
+check('no Unreal UI elements', !indexHtml.includes('conn-unreal') && !indexHtml.includes('Unreal') && !appJs.includes('Unreal') && !appJs.includes('onUnrealCard'));
+check('kitsune nine-tails mark present', indexHtml.includes('kitsune-mark'));
 check('app.js has skills grid', appJs.includes('renderSkillsGrid') && appJs.includes('/document-project') && appJs.includes('/audit-project-structure'));
 check('app.js has connections view', appJs.includes('renderConnectionsView') && appJs.includes('installUnityBridge'));
 check('app.js has no Invite button', !appJs.includes('Invite') && !indexHtml.includes('Invite'));

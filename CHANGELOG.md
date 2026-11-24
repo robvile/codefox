@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 — 2026-11-24
+
+- **Unreal UI elements removed.** The "Add Unreal Project" card is gone from Home, along with its handler and stored-path state. CodeFox is Unity-focused and cannot program in Unreal yet, so the UI no longer implies otherwise. (The README says so plainly.)
+- **New mark: a nine-tailed fox.** The ghost-like icon on Home is gone — it looked too close to another app's mascot. In its place is an original kitsune mark: a fox head with nine tails fanning out behind it, drawn as inline SVG in CodeFox's own colours.
+
 ## 0.3.1 — 2026-11-24
 
 - **One installer, always the same name.** The Windows installer is now always `dist/CodeFox-Setup.exe` — no version number in the filename, so rebuilding overwrites the previous one instead of piling up `CodeFox Setup 0.2.0.exe`, `CodeFox Setup 0.3.0.exe`, and so on. Every build script (`build`, `build:win`, `build:mac`, `build:linux`) cleans `dist/` first via `scripts/clean-dist.js`. Delete any old versioned installers in `dist/` once; new builds will never create another one.
