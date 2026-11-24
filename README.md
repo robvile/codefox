@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.3.1-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.3.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -14,7 +14,7 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 
 ## What it does
 
-- **Home** — the default view when CodeFox opens: a banner for the active project, connection cards (Unity / Unreal / local folders), a Discover Skills grid, recent references, and a "What do you want to build?" panel that starts a new conversation
+- **Home** — the default view when CodeFox opens: a banner for the active project, connection cards (Unity / local folders), a Discover Skills grid, recent references, and a "What do you want to build?" panel that starts a new conversation
 - **Multiple projects** — keep several local projects in CodeFox, each with its own conversations, rulesets, plans, and references. Switch from the project selector at the top of the sidebar, or create a new one with **New Project**. No accounts, no teams, no sync — everything stays on this machine
 - **Chat** with a local LLM about your codebase across persistent conversations
 - **Ask / Plan / Agent modes** — Ask answers and explains only, Plan drafts steps and file lists without writing code, Agent works step by step and outputs complete code in fenced blocks with file paths
@@ -168,7 +168,7 @@ Click **Connections** at the bottom of the sidebar for LM Studio, Ollama, the Un
 - **Figma / Jira** — "Not connected" until you save a token (and a site URL for Jira) in the Configure dialog. Tokens are stored locally and used only for those imports; there is no Figma or Jira import yet, and the UI says so.
 - **GitHub** — managed in Muse, not in CodeFox; there is no action to take here.
 
-The **Your Connections** cards on Home are the quick version: the Unity card shows "1 Connected" when the project folder has an `Assets` folder (clicking it scans the project), the Unreal card connects a folder containing a `.uproject` file, and Local Folders tracks extra folders you add.
+The **Your Connections** cards on Home are the quick version: the Unity card shows "1 Connected" when the project folder has an `Assets` folder (clicking it scans the project), and Local Folders tracks extra folders you add. CodeFox is Unity-focused — Unreal projects are not supported yet, so there is no Unreal card.
 
 ### Test loop
 1. Use **Generate tests** to create an EditMode test file for a script.
