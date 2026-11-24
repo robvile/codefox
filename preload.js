@@ -13,15 +13,33 @@ contextBridge.exposeInMainWorld('rb', {
   fs: {
     readFile: (path) => ipcRenderer.invoke('fs:readFile', path),
     writeFile: (path, content) => ipcRenderer.invoke('fs:writeFile', path, content),
+    deleteFile: (path) => ipcRenderer.invoke('fs:deleteFile', path),
+    moveFile: (src, dest) => ipcRenderer.invoke('fs:moveFile', src, dest),
     readDir: (path) => ipcRenderer.invoke('fs:readDir', path),
     pickFolder: () => ipcRenderer.invoke('fs:pickFolder'),
+    pickExe: (title) => ipcRenderer.invoke('fs:pickExe', title),
+  },
+  llm: {
+    status: () => ipcRenderer.invoke('llm:status'),
+    listModels: (payload) => ipcRenderer.invoke('llm:listModels', payload || {}),
+    verify: (payload) => ipcRenderer.invoke('llm:verify', payload || {}),
+    chat: (payload) => ipcRenderer.invoke('llm:chat', payload),
+    onChunk: (cb) => ipcRenderer.on('llm:stream-chunk', (_, chunk) => cb(chunk)),
+    onDone: (cb) => ipcRenderer.on('llm:stream-done', () => cb()),
+    removeListeners: () => {
+      ipcRenderer.removeAllListeners('llm:stream-chunk');
+      ipcRenderer.removeAllListeners('llm:stream-done');
+      ipcRenderer.removeAllListeners('ollama:stream-chunk');
+      ipcRenderer.removeAllListeners('ollama:stream-done');
+    }
   },
   ollama: {
     status: () => ipcRenderer.invoke('ollama:status'),
     launch: () => ipcRenderer.invoke('ollama:launch'),
     setPath: (p) => ipcRenderer.invoke('ollama:setPath', p),
     pickExe: () => ipcRenderer.invoke('ollama:pickExe'),
-    chat: (payload) => ipcRenderer.invoke('ollama:chat', payload),
+    // Legacy Ollama API, delegated to the unified llm channel.
+    chat: (payload) => ipcRenderer.invoke('llm:chat', { ...(payload || {}), provider: 'ollama' }),
     onChunk: (cb) => ipcRenderer.on('ollama:stream-chunk', (_, chunk) => cb(chunk)),
     onDone: (cb) => ipcRenderer.on('ollama:stream-done', () => cb()),
     removeListeners: () => {
@@ -29,7 +47,13 @@ contextBridge.exposeInMainWorld('rb', {
       ipcRenderer.removeAllListeners('ollama:stream-done');
     }
   },
+  project: {
+    scan: (projectPath) => ipcRenderer.invoke('project:scan', projectPath),
+    moveAsset: (src, dest) => ipcRenderer.invoke('fs:moveFile', src, dest),
+  },
   unity: {
     refresh: (projectPath) => ipcRenderer.invoke('unity:refresh', projectPath),
+    runTests: (payload) => ipcRenderer.invoke('unity:runTests', payload || {}),
+    buildCheck: (payload) => ipcRenderer.invoke('unity:buildCheck', payload || {}),
   }
 });
