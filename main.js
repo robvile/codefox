@@ -6,6 +6,11 @@ const { spawn, execFile } = require('child_process');
 const upm = require('./upm-manifest');
 const unityBridge = require('./unity-bridge');
 const comfyui = require('./comfyui');
+// Static data the renderer needs (v0.6.4) — see 'app:staticData'
+// below. The main process is plain Node and can require these;
+// the preload cannot (real Electron refuses local requires there).
+const { UNITY_ASSET_EXTS } = require('./unity-assets');
+const { MCP_PRESETS } = require('./mcp-presets');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -1188,6 +1193,26 @@ ipcMain.handle('app:openDevTools', () => {
 // If this has no handler or never answers, the renderer shows a
 // banner on screen instead of failing silently.
 ipcMain.handle('app:ping', () => ({ ok: true, version: app.getVersion() }));
+
+// ── Static data for preload (v0.6.4) ─────────────────────────────
+// ROOT CAUSE of the v0.6.0 dead-buttons bug, proven in real Electron:
+// preload.js used to load two helper files with require('./…').
+// In real Electron that throws ("module not found") — the preload
+// never reaches exposeInMainWorld, window.rb is never created, and
+// every button that awaits an rb.* call silently does nothing.
+// Plain Node never showed it, because require works fine there.
+// So the preload must NEVER require a local file (the smoke test
+// enforces this), and the two static data tables it needs — the
+// Unity asset extensions and the MCP preset list — come from here
+// instead, over a synchronous channel. sendSync is safe here: the
+// data is small and constant, and this handler is registered at
+// load time, before any window (and its preload) exists. The pure
+// helpers (isUnityAssetPath, getPreset, buildServerEntry) live in
+// preload.js itself, implemented from this data, so the window.rb
+// shape the renderer sees is unchanged.
+ipcMain.on('app:staticData', (event) => {
+  event.returnValue = { unityAssetExts: UNITY_ASSET_EXTS, mcpPresets: MCP_PRESETS };
+});
 
 // ── MCP guided-setup checks (v0.6.0) ────────────────────────────
 // These are CodeFox's own checks, not user commands: they run even

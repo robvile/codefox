@@ -1,11 +1,104 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { UNITY_ASSET_EXTS, isUnityAssetPath } = require('./unity-assets');
-const { MCP_PRESETS, getPreset, buildServerEntry } = require('./mcp-presets');
+
+// ── NEVER require a local file in this file (v0.6.4) ─────────────
+// This is the root cause of the v0.6.0 dead-buttons bug, proven in
+// real Electron: this file used to start with
+// require('./unity-assets') and require('./mcp-presets'). In real
+// Electron that throws ("module not found: ./unity-assets") — the
+// preload never reaches exposeInMainWorld below, window.rb is never
+// created, and every button that awaits an rb.* call silently does
+// nothing. Plain Node never showed it, because require works fine
+// there, so the smoke test now enforces this invariant: the only
+// require allowed here is 'electron' (plus Node built-ins).
+//
+// The two static data tables the old requires provided — the Unity
+// asset extensions and the MCP preset list — now arrive from the
+// main process over a synchronous channel ('app:staticData', see
+// main.js), fetched once at load. The three pure helpers below are
+// implemented here from that data, so the window.rb shape the
+// renderer sees is unchanged and app.js needs no changes. The
+// helpers intentionally mirror unity-assets.js (isUnityAssetPath)
+// and mcp-presets.js (getPreset, buildServerEntry) line for line
+// in behaviour; the smoke test checks both implementations agree
+// on a matrix of inputs, so the two copies cannot drift silently.
+let staticData = {};
+try { staticData = ipcRenderer.sendSync('app:staticData') || {}; }
+catch (e) { staticData = {}; /* bridge must never die over static data */ }
+const UNITY_ASSET_EXTS = Array.isArray(staticData.unityAssetExts) ? staticData.unityAssetExts : [];
+const MCP_PRESETS = Array.isArray(staticData.mcpPresets) ? staticData.mcpPresets : [];
+
+// Extension of a path (lowercase, including the dot), '' when none.
+function extOf(p) {
+  const s = String(p || '');
+  const base = s.split(/[\\/]/).pop();
+  const dot = base.lastIndexOf('.');
+  return dot <= 0 ? '' : base.slice(dot).toLowerCase();
+}
+
+function isUnityAssetPath(p) {
+  return UNITY_ASSET_EXTS.indexOf(extOf(p)) !== -1;
+}
+
+function getPreset(id) {
+  return MCP_PRESETS.find(p => p.id === id) || null;
+}
+
+// Build a server entry (the shape stored in the `mcp_servers`
+// setting) from a preset plus the values the preset needs.
+// `opts` is { token, folder, fields: { site, email, apiKey, ... } }.
+// Returns { ok, error, entry }. Mirrors buildServerEntry in
+// mcp-presets.js: refuses — never guesses — when a required token,
+// field, or folder is missing. `args` is stored as the joined
+// string the manual form uses. Env placeholders are substituted
+// from the matching value: '<token>' from opts.token (or
+// fields.token), '<site>' from fields.site, '<email>' from
+// fields.email, '<apiKey>' from fields.apiKey.
+function buildServerEntry(preset, opts) {
+  const o = opts || {};
+  const fields = o.fields || {};
+  if (!preset) return { ok: false, error: 'Unknown preset', entry: null };
+  if (preset.requiresToken && !(o.token || fields.token || '').trim()) {
+    return { ok: false, error: preset.requiresToken.label + ' is required', entry: null };
+  }
+  for (const f of (preset.requiresFields || [])) {
+    const v = f.key === 'token' ? (o.token || fields.token || '') : (fields[f.key] || '');
+    if (!String(v).trim()) return { ok: false, error: f.label + ' is required', entry: null };
+  }
+  if (preset.requiresFolder && !(o.folder || '').trim()) {
+    return { ok: false, error: 'A folder is required', entry: null };
+  }
+  const valueFor = (placeholder) => {
+    if (placeholder === '<token>') return (o.token || fields.token || '').trim();
+    if (placeholder === '<site>') return (fields.site || '').trim();
+    if (placeholder === '<email>') return (fields.email || '').trim();
+    if (placeholder === '<apiKey>') return (fields.apiKey || '').trim();
+    return placeholder;
+  };
+  const env = {};
+  for (const [k, v] of Object.entries(preset.env || {})) {
+    env[k] = valueFor(v);
+  }
+  const args = (preset.args || []).map(a => (a === '<folder>' ? (o.folder || '').trim() : a)).join(' ');
+  return {
+    ok: true,
+    error: null,
+    entry: {
+      id: 'preset_' + preset.id,
+      presetId: preset.id,
+      name: preset.name,
+      command: preset.command,
+      args,
+      env,
+      enabled: true,
+    },
+  };
+}
 
 contextBridge.exposeInMainWorld('rb', {
   // Unity-native asset files (v0.5.1) — one source of truth, shared
   // with the smoke test via unity-assets.js. Used by the auto-apply
   // check in app.js: new .prefab / .asset / .unity / … files.
+  // The list itself arrives from the main process (see above).
   unityAssets: {
     exts: UNITY_ASSET_EXTS,
     isUnityAssetPath: (p) => isUnityAssetPath(p),
@@ -13,6 +106,7 @@ contextBridge.exposeInMainWorld('rb', {
   // Curated MCP presets (v0.5.3) — one source of truth, shared with
   // the smoke test via mcp-presets.js. Used by the MCPs section in
   // app.js: six recommended servers, one click to add the config.
+  // The list itself arrives from the main process (see above).
   mcpPresets: {
     list: MCP_PRESETS,
     get: (id) => getPreset(id),

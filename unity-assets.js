@@ -1,9 +1,13 @@
 // unity-assets.js — Unity-native asset files (v0.5.1).
 //
 // Plain Node, no Electron dependency, so the smoke test can exercise
-// this file directly with `node`. The renderer uses the same list
-// through preload.js (`rb.unityAssets`), so there is one source of
-// truth for which files count as Unity-native assets.
+// this file directly with `node`. The main process requires it and
+// serves the list to preload over the 'app:staticData' sync channel
+// (v0.6.4); preload exposes it as rb.unityAssets, so there is still
+// one source of truth for which files count as Unity-native assets.
+// The preload itself must NEVER require this file: real Electron
+// refuses local requires in preload ("module not found"), which
+// silently killed the whole bridge in v0.6.0 (see preload.js).
 //
 // A Unity-native asset file is a data file Unity itself owns — a
 // prefab, scene, material, animation or similar. These contain no

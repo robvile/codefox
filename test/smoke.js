@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.6.3.
+// 2. package.json version is 0.6.4.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.6.3', pkg.version === '0.6.3', 'got ' + pkg.version);
-check('sidebar footer shows 0.6.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.3 — Local'));
+check('package.json version is 0.6.4', pkg.version === '0.6.4', 'got ' + pkg.version);
+check('sidebar footer shows 0.6.4', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.4 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -104,6 +104,10 @@ check('README mentions multiple projects', readme.includes('Multiple projects') 
 check('README has planned-collaboration note', readme.includes('Working together (planned)'));
 
 const preloadJs = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+// Preload source with comments stripped: several checks below must
+// look at what the code actually requires, not what the comments
+// mention (the v0.6.4 header comment names the old requires).
+const preloadCode = preloadJs.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
 
 // 8. v0.4.0 Settings as a full window — centre view, no modal.
 check('app.js has Settings centre view', (appJs.includes("setMode('settings'") || appJs.includes('showSettingsView')) && appJs.includes('showSettings') && !appJs.includes('function openSettings'));
@@ -329,8 +333,9 @@ check('main.js seeds auto_apply_unity_assets default on',
   (mainJs.match(/auto_apply_unity_assets', '1'/g) || []).length >= 3);
 check('package.json build.files includes unity-assets.js',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('unity-assets.js'));
-check('preload.js exposes rb.unityAssets',
-  preloadJs.includes('unityAssets') && preloadJs.includes("require('./unity-assets')"));
+check('preload.js exposes rb.unityAssets without requiring the file',
+  preloadJs.includes('unityAssets') && !preloadCode.includes("require('./unity-assets')")
+  && preloadJs.includes("sendSync('app:staticData')"));
 check('preload.js exposes rb.db.deleteSnapshot',
   preloadJs.includes('deleteSnapshot'));
 check('main.js has db:deleteSnapshot handler',
@@ -614,8 +619,9 @@ check('buildServerEntry builds Blender entry with no token or folder',
   blenderOk.ok === true && blenderOk.entry.command === 'uvx' && blenderOk.entry.args === 'blender-mcp');
 check('mcp-presets.js is in package.json build.files',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('mcp-presets.js'));
-check('preload.js exposes rb.mcpPresets',
-  preloadJs.includes('mcpPresets') && preloadJs.includes("require('./mcp-presets')"));
+check('preload.js exposes rb.mcpPresets without requiring the file',
+  preloadJs.includes('mcpPresets') && !preloadCode.includes("require('./mcp-presets')")
+  && preloadJs.includes("sendSync('app:staticData')"));
 check('MCPs section has the Recommended presets heading',
   appJs.includes('Recommended for game development') && appJs.includes('renderMcpPresets'));
 check('MCPs section installs a preset via buildServerEntry',
@@ -885,12 +891,23 @@ check('Developer tools button fails visibly with a toast when the bridge is down
 // if the stub approach cannot run in this environment it SKIPs
 // (prints SKIP, does not fail the suite) rather than failing on
 // harness mechanics instead of on the code under test.
+// The stub answers the 'app:staticData' sync channel with the real
+// module data, the way main.js does — so the harness also proves
+// the preload's local copies of the helpers agree with the modules.
 try {
   const Module = require('module');
   const calls = [];
+  const realAssets = require(path.join(root, 'unity-assets.js'));
+  const realPresets = require(path.join(root, 'mcp-presets.js'));
   const stubElectron = {
     contextBridge: { exposeInMainWorld: (key, value) => { calls.push({ key, value }); } },
-    ipcRenderer: { invoke: async () => ({ ok: true }), on: () => {}, removeAllListeners: () => {} },
+    ipcRenderer: {
+      invoke: async () => ({ ok: true }),
+      on: () => {}, removeAllListeners: () => {},
+      sendSync: (channel) => (channel === 'app:staticData'
+        ? { unityAssetExts: realAssets.UNITY_ASSET_EXTS, mcpPresets: realPresets.MCP_PRESETS }
+        : undefined),
+    },
   };
   const origResolve = Module._resolveFilename;
   try {
@@ -910,8 +927,67 @@ try {
     !!exposed && typeof exposed.app.ping === 'function' && typeof exposed.app.openDevTools === 'function'
     && typeof exposed.project.list === 'function' && typeof exposed.db.insert === 'function',
     'expose calls: ' + calls.length);
+  if (exposed) {
+    // Parity: the preload's local copies of the helpers (built from
+    // the fetched static data) must agree with the real modules, so
+    // the two copies cannot drift silently.
+    check('preload rb.mcpPresets.list matches the real preset list',
+      JSON.stringify(exposed.mcpPresets.list) === JSON.stringify(realPresets.MCP_PRESETS));
+    check('preload rb.unityAssets.exts matches the real extension list',
+      JSON.stringify(exposed.unityAssets.exts) === JSON.stringify(realAssets.UNITY_ASSET_EXTS));
+    for (const p of ['Assets/Test.prefab', 'Assets/Scene.unity', 'Assets/Mat.mat', 'Assets/Script.cs', 'x.png']) {
+      check('preload isUnityAssetPath agrees with unity-assets.js for ' + p,
+        exposed.unityAssets.isUnityAssetPath(p) === realAssets.isUnityAssetPath(p));
+    }
+    check('preload rb.mcpPresets.get finds the Figma preset',
+      exposed.mcpPresets.get('figma') && exposed.mcpPresets.get('figma').id === 'figma'
+      && exposed.mcpPresets.get('nope') === null);
+    const parityCases = [
+      [{ id: 'figma' }, { token: 'figd_abc' }],
+      [{ id: 'figma' }, { token: '' }],
+      [{ id: 'filesystem' }, { folder: 'C:\\Assets' }],
+      [{ id: 'filesystem' }, { folder: '' }],
+      [{ id: 'atlassian' }, { fields: { site: 'https://x.atlassian.net', email: 'a@b.c' } }],
+      [{ id: 'atlassian' }, { fields: { site: 'https://x.atlassian.net', email: 'a@b.c', token: 'ATATT1' } }],
+      [{ id: 'trello' }, { fields: { apiKey: 'k', token: 't' } }],
+      [{ id: 'blender' }, {}],
+      [{ id: 'git' }, { folder: 'C:\\TD Pizza Racer' }],
+      [null, {}],
+    ];
+    for (const [presetRef, opts] of parityCases) {
+      const preset = presetRef ? realPresets.getPreset(presetRef.id) : null;
+      const label = 'buildServerEntry parity for ' + (preset ? preset.id : 'null preset') + ' ' + JSON.stringify(opts);
+      check('preload ' + label,
+        JSON.stringify(exposed.mcpPresets.buildServerEntry(preset, opts))
+        === JSON.stringify(realPresets.buildServerEntry(preset, opts)));
+    }
+  }
 } catch (e) {
   console.log('SKIP — preload stub harness could not run here (' + String(e && e.message).split('\n')[0] + ')');
+}
+
+// 21c. v0.6.4 — preload must never require a local file. This is
+// the invariant that, had it existed, would have caught v0.5.1:
+// in real Electron a local require in preload throws ("module not
+// found"), the bridge never gets created, and every button that
+// needs the main process silently does nothing. Only 'electron'
+// (and Node built-ins) may be required here; the static data comes
+// from the main process over the 'app:staticData' sync channel.
+{
+  const BUILTINS = new Set(require('module').builtinModules.map(m => m.replace(/^node:/, '')));
+  const specifiers = [...preloadCode.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(m => m[1]);
+  const bad = specifiers.filter(s => s.startsWith('./') || s.startsWith('../') || s.startsWith('/') || s.includes(':\\'));
+  check('preload.js has no local-file require (only electron / built-ins)',
+    bad.length === 0 && specifiers.every(s => s === 'electron' || BUILTINS.has(s.replace(/^node:/, ''))),
+    'requires found: ' + specifiers.join(', '));
+  check('preload.js fetches its static data over the sync channel',
+    preloadJs.includes("sendSync('app:staticData')"));
+  check('main.js requires unity-assets.js and mcp-presets.js',
+    mainJs.includes("require('./unity-assets')") && mainJs.includes("require('./mcp-presets')"));
+  check('main.js serves the static data on app:staticData',
+    mainJs.includes("ipcMain.on('app:staticData'") && mainJs.includes('event.returnValue'));
+  check('main.js still requires the helper modules the renderer needs',
+    mainJs.includes('UNITY_ASSET_EXTS') && mainJs.includes('MCP_PRESETS'));
 }
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).

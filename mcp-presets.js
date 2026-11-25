@@ -1,9 +1,15 @@
 // mcp-presets.js — Curated MCP server presets (v0.6.0).
 //
 // Plain Node, no Electron dependency, so the smoke test can exercise
-// this file directly with `node`. The renderer uses the same list
-// through preload.js (`rb.mcpPresets`), so there is one source of
-// truth for the presets.
+// this file directly with `node`. The main process requires it and
+// serves the list to preload over the 'app:staticData' sync channel
+// (v0.6.4); preload exposes it as rb.mcpPresets, so there is still
+// one source of truth for the presets. The preload itself must NEVER
+// require this file: real Electron refuses local requires in preload
+// ("module not found"), which silently killed the whole bridge in
+// v0.6.0 (see preload.js). buildServerEntry is mirrored in
+// preload.js (same behaviour, from the same data); the smoke test
+// checks the two agree, so they cannot drift silently.
 //
 // Ten presets only, each genuinely useful for making a Unity game.
 // This is NOT a marketplace and NOT a long list: nothing is here

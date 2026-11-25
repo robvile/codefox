@@ -1,6 +1,6 @@
 {
   "name": "codefox",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
