@@ -203,6 +203,7 @@ contextBridge.exposeInMainWorld('rb', {
     view: (payload) => ipcRenderer.invoke('comfyui:view', payload || {}),
     uploadImage: (payload) => ipcRenderer.invoke('comfyui:uploadImage', payload || {}),
     listWorkflows: (payload) => ipcRenderer.invoke('comfyui:listWorkflows', payload || {}),
+    scan: (payload) => ipcRenderer.invoke('comfyui:scan', payload || {}),
     readWorkflow: (payload) => ipcRenderer.invoke('comfyui:readWorkflow', payload || {}),
     defaultWorkflowsDir: () => ipcRenderer.invoke('comfyui:defaultWorkflowsDir'),
   },

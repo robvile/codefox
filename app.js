@@ -60,6 +60,8 @@ let state = {
   comfyuiStatus: null,
   comfyuiObjectInfo: null,
   comfyuiCapabilities: [],
+  comfyuiNodeClasses: [],
+  comfyuiScan: null,
   comfyuiSelectedId: null,
   comfyuiGenInputs: {},
   comfyuiOutputs: [],
@@ -2838,6 +2840,7 @@ async function verifyComfyui() {
       if (info.ok) {
         state.comfyuiObjectInfo = info.data;
         state.comfyuiCapabilities = info.capabilities || [];
+        state.comfyuiNodeClasses = info.nodeClasses || Object.keys(info.data || {}).sort();
       }
     } catch {}
   }
@@ -2908,6 +2911,177 @@ async function browseComfyuiWorkflowsDir() {
   await refreshComfyuiWorkflows();
   renderComfyUIView();
   showToast('✓ Workflows folder set — ' + state.comfyuiWorkflows.length + ' workflow(s) found');
+}
+
+// Scan the standard ComfyUI locations on this machine — no hunting
+// by hand. The main process checks the usual install folders, the
+// server URL, and the model folders, and reports exactly what it
+// found at each place. When a workflows folder is found it is
+// adopted automatically and its workflows imported; the manual
+// Browse picker stays as the fallback.
+async function scanComfyui() {
+  state.comfyuiScan = { scanning: true };
+  renderComfyUIView();
+  let r;
+  try { r = await rb.comfyui.scan({ url: state.comfyuiUrl }); }
+  catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
+  if (r && r.ok) {
+    if (r.server && r.server.ok) {
+      state.comfyuiStatus = r.server;
+      try {
+        const info = await rb.comfyui.objectInfo({ url: state.comfyuiUrl });
+        if (info.ok) {
+          state.comfyuiObjectInfo = info.data;
+          state.comfyuiCapabilities = info.capabilities || [];
+          state.comfyuiNodeClasses = info.nodeClasses || Object.keys(info.data || {}).sort();
+        }
+      } catch {}
+    }
+    if (r.dir) {
+      state.comfyuiWorkflowsDir = r.dir;
+      state.comfyuiWorkflows = r.workflows || [];
+      if (!state.comfyuiSelectedId && state.comfyuiWorkflows.length) {
+        state.comfyuiSelectedId = state.comfyuiWorkflows[0].id;
+      }
+      await persistComfyuiWorkflows();
+    }
+  }
+  state.comfyuiScan = r;
+  renderComfyUIView();
+  if (r && r.ok) {
+    showToast(r.dir
+      ? '✓ Scan found ' + (r.workflows || []).length + ' workflow(s) in ' + r.dir
+      : 'Scan finished — no workflows folder found in the usual locations');
+  } else {
+    showToast('⚠ Scan failed: ' + ((r && r.error) || 'unknown error'));
+  }
+}
+
+// Randomise one sampler's seed in the simple form (per-node key,
+// so a workflow with two samplers randomises only that one).
+function randomiseComfyuiSeedFor(key, inputId) {
+  const seed = Math.floor(Math.random() * 1000000000000000);
+  state.comfyuiGenInputs[key] = seed;
+  const el = document.getElementById(inputId);
+  if (el) el.value = String(seed);
+}
+
+// Set one latent node's width/height from a size preset.
+function setComfyuiSize(nodeId, w, h) {
+  state.comfyuiGenInputs[nodeId + '.width'] = w;
+  state.comfyuiGenInputs[nodeId + '.height'] = h;
+  const wEl = document.getElementById('comfyui-simple-' + nodeId + '.width');
+  const hEl = document.getElementById('comfyui-simple-' + nodeId + '.height');
+  if (wEl) wEl.value = String(w);
+  if (hEl) hEl.value = String(h);
+}
+
+// The SIMPLE generation form for one workflow (v0.7.0): prompt
+// boxes, sampler settings, and size presets — built only from
+// what the workflow actually contains. No iframe, no node editor:
+// CodeFox's own UI over the workflow's inputs. Everything here
+// writes the same state.comfyuiGenInputs the advanced panel and
+// the Run button use, so the two forms never disagree.
+//
+// The shape comes from comfyui.js describeSimpleForm(), computed
+// at import time and stored on the workflow (see
+// importWorkflowsFromDir). The renderer cannot require comfyui.js,
+// so for catalogue entries imported before 0.7.0 — which have no
+// simpleForm yet — the same rules are mirrored here over
+// wf.inputs (simpleFormFromInputs). The mirror is only a fallback
+// for those legacy entries; the next rescan replaces them.
+function simpleFormFromInputs(inputs) {
+  const list = (inputs || []).filter(i => i && typeof i === 'object');
+  const textInputs = list.filter(i => i.classType === 'CLIPTextEncode' && i.inputName === 'text');
+  const prompts = textInputs.map(i => ({
+    key: i.role === 'positive' ? 'positive' : i.role === 'negative' ? 'negative' : i.nodeId + '.text',
+    nodeId: i.nodeId,
+    role: i.role || null,
+    label: i.role === 'positive' ? 'Prompt' : i.role === 'negative' ? 'Negative prompt' : null,
+    value: i.value,
+  }));
+  const samplerFields = ['seed', 'steps', 'cfg', 'denoise'];
+  const samplerByNode = {};
+  for (const i of list) {
+    if ((i.classType === 'KSampler' || i.classType === 'KSamplerAdvanced') && samplerFields.includes(i.inputName)) {
+      (samplerByNode[i.nodeId] = samplerByNode[i.nodeId] || { nodeId: i.nodeId, classType: i.classType, fields: [] })
+        .fields.push({ key: i.nodeId + '.' + i.inputName, inputName: i.inputName, value: i.value });
+    }
+  }
+  const sizeByNode = {};
+  for (const i of list) {
+    if (i.classType === 'EmptyLatentImage' && (i.inputName === 'width' || i.inputName === 'height')) {
+      const s = (sizeByNode[i.nodeId] = sizeByNode[i.nodeId] || { nodeId: i.nodeId, width: null, height: null });
+      s[i.inputName] = typeof i.value === 'number' ? i.value : null;
+    }
+  }
+  return { prompts, samplers: Object.values(samplerByNode), sizes: Object.values(sizeByNode), hasPrompt: prompts.length > 0 };
+}
+
+function simpleComfyuiFormHtml(wf) {
+  const form = (wf.simpleForm && Array.isArray(wf.simpleForm.prompts)) ? wf.simpleForm : simpleFormFromInputs(wf.inputs);
+  const val = (key, fallback) => state.comfyuiGenInputs[key] !== undefined ? state.comfyuiGenInputs[key] : fallback;
+  let html = '';
+  const pos = form.prompts.find(p => p.role === 'positive');
+  const neg = form.prompts.find(p => p.role === 'negative');
+  const unroled = form.prompts.filter(p => !p.role);
+  if (pos) {
+    html += `<label class="field-label">Prompt
+      <textarea id="comfyui-simple-positive" oninput="onComfyuiInputChange('positive', this)" style="min-height:72px;">${escHtml(String(val('positive', pos.value == null ? '' : pos.value)))}</textarea>
+    </label>`;
+  }
+  if (neg) {
+    html += `<label class="field-label">Negative prompt
+      <textarea id="comfyui-simple-negative" oninput="onComfyuiInputChange('negative', this)" style="min-height:56px;">${escHtml(String(val('negative', neg.value == null ? '' : neg.value)))}</textarea>
+    </label>`;
+  }
+  if (!pos && !neg && unroled.length === 1) {
+    const u = unroled[0];
+    html += `<label class="field-label">Prompt
+      <textarea id="comfyui-simple-${escHtml(u.key)}" oninput="onComfyuiInputChange('${escHtml(u.key)}', this)" style="min-height:72px;">${escHtml(String(val(u.key, u.value == null ? '' : u.value)))}</textarea>
+    </label>`;
+  }
+  if (!pos && !neg && unroled.length >= 2) {
+    html += `<p style="color:var(--amber);font-size:12px;">This workflow has two text inputs, but its wiring does not say which is the positive prompt and which is the negative — labelled Prompt 1 and Prompt 2. If the first generation comes out wrong, swap them.</p>`;
+    unroled.slice(0, 2).forEach((u, i) => {
+      html += `<label class="field-label">Prompt ${i + 1}
+        <textarea id="comfyui-simple-${escHtml(u.key)}" oninput="onComfyuiInputChange('${escHtml(u.key)}', this)" style="min-height:56px;">${escHtml(String(val(u.key, u.value == null ? '' : u.value)))}</textarea>
+      </label>`;
+    });
+  }
+  if (!form.hasPrompt) {
+    html += `<p style="color:var(--text2);font-size:12px;">This workflow has no text-prompt input CodeFox can fill in — use the advanced inputs below, or pick a workflow with a prompt.</p>`;
+  }
+  // Sampler settings — only KSampler nodes, only the inputs that
+  // node actually exposes.
+  for (const s of (form.samplers || [])) {
+    html += `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">`;
+    for (const f of s.fields) {
+      const cur = val(f.key, f.value);
+      if (f.inputName === 'seed') {
+        html += `<label class="field-label" style="flex:1;min-width:180px;">Seed
+          <span style="display:flex;gap:8px;"><input id="comfyui-simple-${escHtml(f.key)}" type="number" value="${escHtml(String(cur == null ? '' : cur))}" oninput="onComfyuiInputChange('${escHtml(f.key)}', this)" style="flex:1;" /><button class="btn btn-secondary" onclick="randomiseComfyuiSeedFor('${escHtml(f.key)}', 'comfyui-simple-${escHtml(f.key)}')">Random</button></span>
+        </label>`;
+      } else {
+        html += `<label class="field-label" style="flex:0 0 110px;">${escHtml(f.inputName === 'cfg' ? 'CFG' : f.inputName[0].toUpperCase() + f.inputName.slice(1))}
+          <input id="comfyui-simple-${escHtml(f.key)}" type="number" value="${escHtml(String(cur == null ? '' : cur))}" oninput="onComfyuiInputChange('${escHtml(f.key)}', this)" />
+        </label>`;
+      }
+    }
+    html += `</div>`;
+  }
+  // Size presets — only when the workflow has a latent-size node.
+  for (const s of (form.sizes || [])) {
+    html += `<div><span style="font-size:12px;color:var(--text2);">Size</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+        <button class="btn btn-secondary" onclick="setComfyuiSize('${escHtml(s.nodeId)}', 1024, 1024)">Square 1024×1024</button>
+        <button class="btn btn-secondary" onclick="setComfyuiSize('${escHtml(s.nodeId)}', 832, 1216)">Portrait 832×1216</button>
+        <button class="btn btn-secondary" onclick="setComfyuiSize('${escHtml(s.nodeId)}', 1216, 832)">Landscape 1216×832</button>
+        <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2);">W <input id="comfyui-simple-${escHtml(s.nodeId)}.width" type="number" value="${escHtml(String(val(s.nodeId + '.width', s.width == null ? '' : s.width)))}" oninput="onComfyuiInputChange('${escHtml(s.nodeId)}.width', this)" style="width:84px;" /></label>
+        <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2);">H <input id="comfyui-simple-${escHtml(s.nodeId)}.height" type="number" value="${escHtml(String(val(s.nodeId + '.height', s.height == null ? '' : s.height)))}" oninput="onComfyuiInputChange('${escHtml(s.nodeId)}.height', this)" style="width:84px;" /></label>
+      </div></div>`;
+  }
+  return html;
 }
 
 async function onComfyuiUrlSave() {
@@ -3178,6 +3352,46 @@ async function renderComfyUIView() {
   const caps = state.comfyuiCapabilities || [];
   const selected = findComfyuiWorkflow(state.comfyuiSelectedId);
   const gen = state.comfyuiGenerating;
+  // Every node class /object_info reported — never only the
+  // familiar families, so an install with none of them still shows
+  // exactly what it does have.
+  const nodeClasses = state.comfyuiNodeClasses || (state.comfyuiObjectInfo ? Object.keys(state.comfyuiObjectInfo).sort() : []);
+  const capabilitiesHtml = !st || !st.ok
+    ? '<p style="color:var(--text3);font-size:12px;">Capabilities appear here once ComfyUI answers — they are read live from /object_info, never assumed.</p>'
+    : (state.comfyuiObjectInfo == null
+      ? '<p style="color:var(--text3);font-size:12px;">ComfyUI answered, but /object_info could not be read — capabilities cannot be listed. Press Save + Verify again.</p>'
+      : (nodeClasses.length === 0
+      ? '<p style="color:var(--text3);font-size:12px;">ComfyUI answered, but /object_info came back empty — 0 nodes listed. If ComfyUI only just started, wait a moment and press Save + Verify again.</p>'
+      : (caps.length
+        ? `<div class="chip-row">${caps.map(c => `<span class="chip">${escHtml(c.label)}</span>`).join('')}</div>`
+        : '<p style="color:var(--text3);font-size:12px;">Connected, but no familiar node families were found in /object_info. Everything this install has is listed below.</p>')
+      + `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:var(--text2);">All nodes in /object_info (${nodeClasses.length})</summary><div style="max-height:140px;overflow:auto;font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:6px;line-height:1.7;">${nodeClasses.map(c => escHtml(c)).join(', ')}</div></details>`));
+  // Scan results — what was checked, what was found, what was not.
+  const scanHtml = (() => {
+    const s = state.comfyuiScan;
+    if (!s) return '<p style="color:var(--text3);font-size:12px;">CodeFox checks the usual ComfyUI install folders on this computer — Desktop user data, Documents, portable installs — and reports what it finds. Nothing is guessed.</p>';
+    if (s.scanning) return '<p style="color:var(--text2);font-size:12px;">Scanning the usual ComfyUI locations…</p>';
+    if (!s.ok) return `<p style="color:var(--amber);font-size:12px;">Scan failed: ${escHtml(s.error || 'unknown error')}</p>`;
+    const serverLine = s.server && s.server.ok
+      ? `Server: connected at ${escHtml(s.server.url || '')}${s.server.version ? ' (v' + escHtml(String(s.server.version)) + ')' : ''}`
+      : `Server: not running at ${escHtml((s.server && s.server.url) || state.comfyuiUrl)}${s.server && s.server.error ? ' — ' + escHtml(s.server.error) : ''}`;
+    const rootRows = ((s.scan && s.scan.roots) || []).map(r => {
+      if (!r.found) return `<div style="color:var(--text3);font-size:12px;">✕ ${escHtml(r.label)} — <span style="font-family:var(--mono);font-size:11px;">${escHtml(r.path)}</span> (not found)</div>`;
+      const bits = [];
+      if (r.workflows) bits.push(r.workflows.count + ' workflow(s)');
+      if (r.models) {
+        const parts = Object.entries(r.models).filter(([, n]) => n > 0).map(([k, n]) => k + ' ' + n);
+        bits.push(parts.length ? 'models: ' + parts.join(', ') : 'models folder, no model files counted');
+      }
+      bits.push(r.customNodes ? 'custom_nodes present' : 'no custom_nodes');
+      if (r.note) bits.push(escHtml(r.note));
+      return `<div style="font-size:12px;color:var(--text2);">✓ ${escHtml(r.label)} — <span style="font-family:var(--mono);font-size:11px;">${escHtml(r.path)}</span><br><span style="color:var(--text3);">${bits.join(' · ')}</span></div>`;
+    }).join('');
+    return `<p style="font-size:12px;color:var(--text2);">${serverLine}</p>
+      ${s.dir ? `<p style="font-size:12px;color:var(--teal);">Workflows folder found: <span style="font-family:var(--mono);font-size:11px;">${escHtml(s.dir)}</span> — ${(s.workflows || []).length} workflow(s) imported.</p>` : '<p style="font-size:12px;color:var(--amber);">No workflows folder found in the usual locations — pick one with Browse below.</p>'}
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rootRows}</div>
+      ${(s.errors || []).length ? `<p style="font-size:11px;color:var(--amber);">${escHtml(s.errors.join('; '))}</p>` : ''}`;
+  })();
 
   const inputFieldHtml = (inp) => {
     const key = inp.role === 'positive' ? 'positive' : inp.role === 'negative' ? 'negative' : inp.nodeId + '.' + inp.inputName;
@@ -3230,6 +3444,11 @@ async function renderComfyUIView() {
     ? `<h3 class="settings-subhead">Generate — ${escHtml(selected.name)}</h3>
       ${selected.available ? '' : `<p style="color:var(--amber);font-size:12px;">Unavailable: ${escHtml(selected.availableReason || (selected.missing || []).join('; '))}</p>`}
       <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
+        ${simpleComfyuiFormHtml(selected)}
+      </div>
+      <h3 class="settings-subhead" style="margin-top:16px;">Advanced — all inputs</h3>
+      <p style="color:var(--text3);font-size:11px;">Every input this workflow exposes, including the ones above. Same values, same Run button.</p>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
         ${(selected.inputs || []).map(inputFieldHtml).join('')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
@@ -3276,10 +3495,14 @@ async function renderComfyUIView() {
       </span>
       <button class="btn btn-secondary" onclick="rb.shell.openExternal('${escHtml(state.comfyuiUrl)}')">Open ComfyUI ↗</button>
     </div>
+    <h3 class="settings-subhead">Find ComfyUI</h3>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+      <button class="btn btn-teal" onclick="scanComfyui()">Scan for ComfyUI</button>
+      <span style="font-size:11px;color:var(--text3);">Checks the usual install folders and the server, and imports any workflows it finds. Browse below still works by hand.</span>
+    </div>
+    ${scanHtml}
     <h3 class="settings-subhead">Discovered capabilities</h3>
-    ${st && st.ok
-      ? (caps.length ? `<div class="chip-row">${caps.map(c => `<span class="chip">${escHtml(c.label)}</span>`).join('')}</div>` : '<p style="color:var(--text3);font-size:12px;">Connected, but no familiar node families were found in /object_info.</p>')
-      : '<p style="color:var(--text3);font-size:12px;">Capabilities appear here once ComfyUI answers — they are read live from /object_info, never assumed.</p>'}
+    ${capabilitiesHtml}
     <h3 class="settings-subhead">Workflow Library</h3>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
       <input id="comfyui-workflows-dir" value="${escHtml(state.comfyuiWorkflowsDir || '')}" placeholder="Folder with your ComfyUI workflow JSON files" style="flex:1;" readonly />

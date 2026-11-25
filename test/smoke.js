@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.6.4.
+// 2. package.json version is 0.7.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.6.4', pkg.version === '0.6.4', 'got ' + pkg.version);
-check('sidebar footer shows 0.6.4', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.4 — Local'));
+check('package.json version is 0.7.0', pkg.version === '0.7.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.7.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -989,6 +989,147 @@ try {
   check('main.js still requires the helper modules the renderer needs',
     mainJs.includes('UNITY_ASSET_EXTS') && mainJs.includes('MCP_PRESETS'));
 }
+
+// 22. v0.7.0 — ComfyUI finds itself, and generation feels like
+// Midjourney: broader capability detection (Flux / SD3-style
+// split-model graphs), the full node list, "Scan for ComfyUI",
+// and the simple prompt-first generation form.
+const fluxObjectInfo = {
+  UNETLoader: { input: { required: {} } },
+  DualCLIPLoader: { input: { required: {} } },
+  VAELoader: { input: { required: {} } },
+  KSampler: { input: { required: {} } },
+  CLIPTextEncode: { input: { required: {} } },
+  EmptyLatentImage: { input: { required: {} } },
+  SaveImage: { input: { required: {} } },
+};
+check('capability detection recognises Flux-style graphs without a CheckpointLoader',
+  comfy.detectCapabilities(fluxObjectInfo).some(c => c.id === 'image'));
+const fluxGgufObjectInfo = {
+  UNETLoaderGGUF: { input: { required: {} } },
+  CLIPLoaderGGUF: { input: { required: {} } },
+  VAELoader: { input: { required: {} } },
+  SamplerCustomAdvanced: { input: { required: {} } },
+  BasicGuider: { input: { required: {} } },
+  SaveImage: { input: { required: {} } },
+};
+check('capability detection recognises GGUF split-model graphs (UNETLoaderGGUF + SamplerCustomAdvanced)',
+  comfy.detectCapabilities(fluxGgufObjectInfo).some(c => c.id === 'image'));
+check('capability detection lists nothing for custom-nodes-only installs',
+  comfy.detectCapabilities({ MyCustomNode: {}, AnotherThing: {} }).length === 0);
+check('capability detection lists nothing for an empty /object_info',
+  comfy.detectCapabilities({}).length === 0);
+check('nodeClassNames lists every node class, sorted',
+  JSON.stringify(comfy.nodeClassNames({ Zeta: {}, Alpha: {}, KSampler: {} })) === JSON.stringify(['Alpha', 'KSampler', 'Zeta'])
+  && comfy.nodeClassNames(null).length === 0 && comfy.nodeClassNames({}).length === 0);
+// Flux-style graph: conditioning runs through a BasicGuider, not
+// a KSampler — the prompt roles must still be detected from it.
+const fluxWorkflow = {
+  '1': { class_type: 'UNETLoader', inputs: { unet_name: 'flux.safetensors' } },
+  '2': { class_type: 'DualCLIPLoader', inputs: { clip_name1: 'clip_l.safetensors', clip_name2: 't5xxl.safetensors' } },
+  '3': { class_type: 'CLIPTextEncode', _meta: { title: 'Positive' }, inputs: { text: 'a cat' } },
+  '4': { class_type: 'CLIPTextEncode', _meta: { title: 'Negative' }, inputs: { text: 'blurry' } },
+  '5': { class_type: 'BasicGuider', inputs: { model: ['1', 0], conditioning: ['3', 0], positive: ['3', 0], negative: ['4', 0] } },
+  '6': { class_type: 'SamplerCustomAdvanced', inputs: { model: ['1', 0], positive: ['3', 0], negative: ['4', 0] } },
+  '7': { class_type: 'SaveImage', inputs: { filename_prefix: 'flux', images: ['6', 0] } },
+};
+const parsedFlux = comfy.parseWorkflowGraph(fluxWorkflow, fluxObjectInfo);
+check('workflow parser detects prompt roles through a BasicGuider (Flux-style)',
+  parsedFlux.inputs.some(i => i.role === 'positive' && i.value === 'a cat')
+  && parsedFlux.inputs.some(i => i.role === 'negative' && i.value === 'blurry'));
+const builtFlux = comfy.buildSubmitPrompt(fluxWorkflow, { positive: 'a dog' });
+check('submit-payload builder substitutes the positive prompt in a Flux-style graph',
+  builtFlux.prompt['3'].inputs.text === 'a dog' && builtFlux.applied.includes('positive'));
+// Two prompt nodes and no sampler wiring at all: roles stay
+// unknown, so the form must label them Prompt 1 / Prompt 2.
+const unroledWorkflow = {
+  '2': { class_type: 'CLIPTextEncode', inputs: { text: 'first' } },
+  '3': { class_type: 'CLIPTextEncode', inputs: { text: 'second' } },
+};
+const parsedUnroled = comfy.parseWorkflowGraph(unroledWorkflow, fluxObjectInfo);
+check('workflow parser leaves prompt roles unknown when no sampler wires them',
+  parsedUnroled.inputs.filter(i => i.role === 'positive').length === 0
+  && parsedUnroled.inputs.filter(i => i.role === 'negative').length === 0);
+// Simple-form descriptor: what the Midjourney-easy form shows.
+const simpleSd = comfy.describeSimpleForm(parsedWf.inputs);
+check('simple form shows prompt/negative, sampler, and size for an SD1.5 workflow',
+  simpleSd.hasPrompt === true
+  && simpleSd.prompts.some(p => p.role === 'positive' && p.key === 'positive')
+  && simpleSd.prompts.some(p => p.role === 'negative' && p.key === 'negative')
+  && simpleSd.samplers.length === 1 && simpleSd.samplers[0].nodeId === '4'
+  && simpleSd.samplers[0].fields.some(f => f.inputName === 'seed' && f.value === 42)
+  && simpleSd.samplers[0].fields.some(f => f.inputName === 'steps')
+  && simpleSd.samplers[0].fields.some(f => f.inputName === 'cfg')
+  && simpleSd.sizes.length === 1 && simpleSd.sizes[0].width === 512 && simpleSd.sizes[0].height === 512);
+const noPromptGraph = {
+  '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'sd_xl.safetensors' } },
+  '4': { class_type: 'KSampler', inputs: { seed: 1, steps: 10, cfg: 5, latent_image: ['5', 0], model: ['1', 0] } },
+  '5': { class_type: 'EmptyLatentImage', inputs: { width: 640, height: 640, batch_size: 1 } },
+  '7': { class_type: 'SaveImage', inputs: { filename_prefix: 'x', images: ['4', 0] } },
+};
+const simpleNoPrompt = comfy.describeSimpleForm(comfy.parseWorkflowGraph(noPromptGraph, fakeObjectInfo).inputs);
+check('simple form reports no prompt input — and no fake prompt boxes — for a promptless workflow',
+  simpleNoPrompt.hasPrompt === false && simpleNoPrompt.prompts.length === 0
+  && simpleNoPrompt.samplers.length === 1 && simpleNoPrompt.sizes.length === 1);
+const simpleUnroled = comfy.describeSimpleForm(parsedUnroled.inputs);
+check('simple form keeps unroled prompts as node-keyed Prompt 1 / Prompt 2 (never guesses)',
+  simpleUnroled.hasPrompt === true && simpleUnroled.prompts.length === 2
+  && simpleUnroled.prompts.every(p => p.role === null && p.key.endsWith('.text')));
+// Scan + recursive import against a mock ComfyUI layout in temp dirs.
+const tmpScan = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-comfyui-scan-'));
+try {
+  const appData = path.join(tmpScan, 'appdata');
+  const userDir = path.join(appData, 'ComfyUI');
+  const wfDir = path.join(userDir, 'user', 'default', 'workflows');
+  const subDir = path.join(wfDir, 'portraits');
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.join(wfDir, 'txt2img.json'), JSON.stringify(fakeWorkflow));
+  fs.writeFileSync(path.join(subDir, 'portrait.json'), JSON.stringify(fakeWorkflow));
+  for (const [cat, files] of [['checkpoints', ['a.safetensors', 'b.safetensors']], ['loras', ['l.safetensors']], ['vae', ['v.safetensors']]]) {
+    fs.mkdirSync(path.join(userDir, 'models', cat), { recursive: true });
+    for (const f of files) fs.writeFileSync(path.join(userDir, 'models', cat, f), 'x');
+  }
+  fs.mkdirSync(path.join(userDir, 'custom_nodes'), { recursive: true });
+  const scan = comfy.scanComfyui({ home: tmpScan, appData, localAppData: path.join(tmpScan, 'local'), drives: [] });
+  const desktopRoot = scan.roots.find(r => r.label === 'ComfyUI Desktop user data');
+  check('scan finds the Desktop user dir, its workflows, models, and custom_nodes',
+    scan.ok === true && desktopRoot && desktopRoot.found === true
+    && desktopRoot.workflows && desktopRoot.workflows.count === 2
+    && desktopRoot.models && desktopRoot.models.checkpoints === 2
+    && desktopRoot.models.loras === 1 && desktopRoot.models.vae === 1
+    && desktopRoot.customNodes === true
+    && scan.workflowsDir === wfDir);
+  check('scan reports missing locations honestly instead of inventing them',
+    scan.roots.some(r => r.label === 'Documents' && r.found === false)
+    && scan.roots.some(r => r.label === 'Home folder' && r.found === false));
+  const importedRecursive = comfy.importWorkflowsFromDir(wfDir, fakeObjectInfo, [], { recursive: true });
+  check('recursive import finds workflows in subfolders',
+    importedRecursive.ok === true && importedRecursive.workflows.length === 2);
+  check('import attaches the simple-form descriptor to each workflow',
+    importedRecursive.workflows.every(w => w.simpleForm && w.simpleForm.hasPrompt === true
+      && w.simpleForm.prompts.some(p => p.role === 'positive')));
+  const importedFlat = comfy.importWorkflowsFromDir(wfDir, fakeObjectInfo, [], {});
+  check('non-recursive import still reads only the top level',
+    importedFlat.ok === true && importedFlat.workflows.length === 1);
+  const emptyScan = comfy.scanComfyui({ home: path.join(tmpScan, 'nowhere'), appData: path.join(tmpScan, 'no-appdata'), localAppData: path.join(tmpScan, 'no-local'), drives: [] });
+  check('scan with nothing installed reports no workflows dir',
+    emptyScan.ok === true && emptyScan.workflowsDir === null && emptyScan.foundRoots === 0);
+} finally {
+  fs.rmSync(tmpScan, { recursive: true, force: true });
+}
+check('main.js has the comfyui:scan IPC',
+  mainJs.includes("ipcMain.handle('comfyui:scan'") && mainJs.includes('scanComfyui()'));
+check('preload.js exposes rb.comfyui.scan',
+  preloadJs.includes("ipcRenderer.invoke('comfyui:scan'"));
+check('ComfyUI view has Scan for ComfyUI, the full node list, and the simple form (no iframe)',
+  appJs.includes('Scan for ComfyUI') && appJs.includes('function scanComfyui')
+  && appJs.includes('All nodes in /object_info') && appJs.includes('came back empty')
+  && appJs.includes('function simpleComfyuiFormHtml') && appJs.includes('function setComfyuiSize')
+  && appJs.includes('function randomiseComfyuiSeedFor') && appJs.includes('Advanced — all inputs')
+  && appJs.includes('has no text-prompt input') && !appJs.includes('<iframe'));
+check('README documents the scan and the simple generation form',
+  readme.includes('Scan for ComfyUI') && readme.includes('simple form')
+  && readme.includes('Flux') && readme.includes('Prompt 1 / Prompt 2'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');

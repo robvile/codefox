@@ -189,12 +189,16 @@ function parseWorkflowGraph(graph, objectInfo) {
   const missing = [];
   const presentClasses = objectInfo ? new Set(Object.keys(objectInfo)) : null;
 
-  // Which CLIPTextEncode node feeds each KSampler positive/negative
+  // Which CLIPTextEncode node feeds each sampler's positive/negative
   // input — so the two prompt fields are labelled by role, not by
-  // guesswork from node titles alone.
+  // guesswork from node titles alone. The classic path is a
+  // KSampler; Flux / SD3-style graphs run the conditioning through
+  // a BasicGuider (or a SamplerCustom), which carries the same
+  // positive/negative inputs — those count too.
   const clipRoleByNodeId = {};
+  const samplerClasses = ['KSampler', 'KSamplerAdvanced', 'SamplerCustom', 'SamplerCustomAdvanced', 'BasicGuider'];
   for (const { id, node } of nodes) {
-    if (node.class_type === 'KSampler' || node.class_type === 'KSamplerAdvanced') {
+    if (samplerClasses.includes(node.class_type)) {
       for (const role of ['positive', 'negative']) {
         const link = node.inputs && node.inputs[role];
         if (Array.isArray(link) && link[0] != null) clipRoleByNodeId[String(link[0])] = role;
@@ -306,28 +310,97 @@ function buildSubmitPrompt(workflowGraph, overrides) {
   return { prompt, applied, unapplied };
 }
 
+// Every node class name ComfyUI reports, sorted — so the UI can
+// show exactly what an install has, instead of only the familiar
+// families. Returns [] when /object_info is missing or not an
+// object; never invents a node.
+function nodeClassNames(objectInfo) {
+  if (!objectInfo || typeof objectInfo !== 'object' || Array.isArray(objectInfo)) return [];
+  return Object.keys(objectInfo).sort();
+}
+
 // Capabilities actually present in this ComfyUI install, computed
 // from the node class names in /object_info — never hardcoded.
 // A capability is only listed when the install really has the nodes
-// for it.
+// for it. Image generation is recognised two ways: the classic
+// checkpoint path (KSampler + CheckpointLoader) and the newer
+// split-model path (a sampler + a UNet loader + a CLIP loader +
+// a VAE loader), which is how Flux / SD3-style graphs are built —
+// those never use CheckpointLoaderSimple, so the old check missed
+// them entirely. Matching is case-insensitive, so a custom node
+// named e.g. "MyKSampler" still counts as a sampler.
 function detectCapabilities(objectInfo) {
   if (!objectInfo || typeof objectInfo !== 'object') return [];
-  const classes = new Set(Object.keys(objectInfo));
-  const has = (...names) => names.some(n => classes.has(n));
+  const classes = Object.keys(objectInfo);
+  const has = (...names) => names.some(n => classes.includes(n));
+  const any = (re) => classes.some(c => re.test(c));
+  const hasSampler = has('KSampler', 'KSamplerAdvanced', 'SamplerCustom', 'SamplerCustomAdvanced') || any(/sampler/i);
+  const hasCheckpoint = has('CheckpointLoader', 'CheckpointLoaderSimple') || any(/checkpointloader/i);
+  const hasUnet = has('UNETLoader', 'UNETLoaderGGUF') || any(/unetloader/i);
+  const hasClipLoader = has('CLIPLoader', 'DualCLIPLoader', 'CLIPLoaderGGUF') || any(/cliploader/i);
+  const hasVaeLoader = has('VAELoader') || any(/vaeloader/i);
   const caps = [];
-  if (has('KSampler', 'KSamplerAdvanced') && has('CheckpointLoader', 'CheckpointLoaderSimple')) {
+  if (hasSampler && (hasCheckpoint || (hasUnet && hasClipLoader && hasVaeLoader))) {
     caps.push({ id: 'image', label: 'Image generation' });
   }
-  if (has('SaveVideo', 'SaveWEBM', 'SaveAnimatedWEBP', 'VHS_VideoCombine', 'CreateVideo')) {
+  if (has('SaveVideo', 'SaveWEBM', 'SaveAnimatedWEBP', 'VHS_VideoCombine', 'CreateVideo') || any(/video/i)) {
     caps.push({ id: 'video', label: 'Video generation' });
   }
-  if ([...classes].some(c => /upscale/i.test(c))) caps.push({ id: 'upscale', label: 'Upscaling' });
-  if ([...classes].some(c => /controlnet/i.test(c))) caps.push({ id: 'controlnet', label: 'ControlNet' });
-  if ([...classes].some(c => /inpaint/i.test(c))) caps.push({ id: 'inpaint', label: 'Inpainting' });
+  if (any(/upscale/i)) caps.push({ id: 'upscale', label: 'Upscaling' });
+  if (any(/controlnet/i)) caps.push({ id: 'controlnet', label: 'ControlNet' });
+  if (any(/inpaint/i)) caps.push({ id: 'inpaint', label: 'Inpainting' });
   if (has('LoadImage', 'LoadImageMask')) caps.push({ id: 'img2img', label: 'Image-to-image' });
-  if ([...classes].some(c => /lora/i.test(c))) caps.push({ id: 'lora', label: 'LoRA support' });
-  if ([...classes].some(c => /ipadapter/i.test(c))) caps.push({ id: 'ipadapter', label: 'IP-Adapter' });
+  if (any(/lora/i)) caps.push({ id: 'lora', label: 'LoRA support' });
+  if (any(/ipadapter/i)) caps.push({ id: 'ipadapter', label: 'IP-Adapter' });
   return caps;
+}
+
+// Describe the SIMPLE generation form for a workflow, from its
+// already-parsed inputs only — no guessing, no fake fields. The
+// renderer builds the form from this; the advanced panel still
+// shows every input, but this is the Midjourney-easy layer:
+//   prompts — CLIPTextEncode text inputs, labelled by role when
+//     the wiring says which is positive (KSampler / BasicGuider
+//     links, see parseWorkflowGraph); when the wiring cannot tell
+//     them apart, role is null and the renderer labels them
+//     "Prompt 1" / "Prompt 2" and says so.
+//   samplers — KSampler / KSamplerAdvanced nodes, with only the
+//     seed / steps / cfg / denoise inputs that node actually has.
+//   sizes — EmptyLatentImage nodes, with their width / height.
+//   hasPrompt — false when no text-prompt input exists at all, so
+//     the renderer can say so plainly instead of showing fake
+//     prompt boxes.
+function describeSimpleForm(parsedInputs) {
+  const inputs = Array.isArray(parsedInputs) ? parsedInputs : [];
+  const textInputs = inputs.filter(i => i.classType === 'CLIPTextEncode' && i.inputName === 'text');
+  const prompts = textInputs.map(i => ({
+    key: i.role === 'positive' ? 'positive' : i.role === 'negative' ? 'negative' : i.nodeId + '.text',
+    nodeId: i.nodeId,
+    role: i.role || null,
+    label: i.role === 'positive' ? 'Prompt' : i.role === 'negative' ? 'Negative prompt' : null,
+    value: i.value,
+  }));
+  const samplerFields = ['seed', 'steps', 'cfg', 'denoise'];
+  const samplerByNode = {};
+  for (const i of inputs) {
+    if ((i.classType === 'KSampler' || i.classType === 'KSamplerAdvanced') && samplerFields.includes(i.inputName)) {
+      (samplerByNode[i.nodeId] = samplerByNode[i.nodeId] || { nodeId: i.nodeId, classType: i.classType, fields: [] })
+        .fields.push({ key: i.nodeId + '.' + i.inputName, inputName: i.inputName, value: i.value });
+    }
+  }
+  const sizeByNode = {};
+  for (const i of inputs) {
+    if (i.classType === 'EmptyLatentImage' && (i.inputName === 'width' || i.inputName === 'height')) {
+      const s = (sizeByNode[i.nodeId] = sizeByNode[i.nodeId] || { nodeId: i.nodeId, width: null, height: null });
+      s[i.inputName] = typeof i.value === 'number' ? i.value : null;
+    }
+  }
+  return {
+    prompts,
+    samplers: Object.values(samplerByNode),
+    sizes: Object.values(sizeByNode),
+    hasPrompt: prompts.length > 0,
+  };
 }
 
 // Where ComfyUI Desktop keeps user workflows, when it can be found.
@@ -348,24 +421,179 @@ function defaultWorkflowsDir() {
   return '';
 }
 
+// Bounded recursive file lister: files with one of the given
+// extensions under dir, at most maxDepth deep and maxFiles files,
+// sorted. Returns [] when the folder does not exist. Never walks
+// a whole drive — the caller names the root.
+const MODEL_FILE_EXTS = ['.safetensors', '.ckpt', '.pt', '.pth', '.gguf', '.bin'];
+function listFilesRecursive(dir, exts, maxDepth, maxFiles) {
+  const out = [];
+  const wanted = (exts || []).map(e => String(e).toLowerCase());
+  const maxF = maxFiles || 500;
+  const maxD = maxDepth == null ? 5 : maxDepth;
+  function walk(d, depth) {
+    if (out.length >= maxF || depth > maxD) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (out.length >= maxF) return;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) { if (depth < maxD) walk(full, depth + 1); }
+      else if (e.isFile() && wanted.includes(path.extname(e.name).toLowerCase())) out.push(full);
+    }
+  }
+  try { if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) walk(dir, 0); } catch {}
+  return out;
+}
+
+// Count model files per category under a models/ folder.
+function countModels(modelsDir) {
+  const categories = ['checkpoints', 'loras', 'vae', 'clip', 'unet', 'controlnet', 'embeddings', 'upscale_models'];
+  const counts = {};
+  for (const cat of categories) {
+    counts[cat] = listFilesRecursive(path.join(modelsDir, cat), MODEL_FILE_EXTS, 4, 10000).length;
+  }
+  return counts;
+}
+
+// Candidate ComfyUI install roots on Windows, in check order.
+// `overrides` ({ home, appData, localAppData, drives }) exists so
+// tests can point the scan at temp folders; in the app it is
+// omitted and the real locations are used. The program-folder
+// entry is special: it lists subdirectories whose name contains
+// "comfyui" instead of being a root itself.
+function comfyuiCandidateRoots(overrides) {
+  const o = overrides || {};
+  const home = o.home || os.homedir();
+  const appData = o.appData || process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const localAppData = o.localAppData || process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const drives = o.drives !== undefined ? o.drives : ['C:', 'D:'];
+  const roots = [
+    { label: 'ComfyUI Desktop user data', path: path.join(appData, 'ComfyUI') },
+    { label: 'Documents', path: path.join(home, 'Documents', 'ComfyUI') },
+    { label: 'Home folder', path: path.join(home, 'ComfyUI') },
+  ];
+  for (const d of drives) roots.push({ label: 'Portable install (' + d + ')', path: path.join(d + path.sep, 'ComfyUI') });
+  roots.push({ label: 'Program folder', path: path.join(localAppData, 'Programs'), programFolder: true });
+  return roots;
+}
+
+const SCAN_WORKFLOW_RELS = ['user/default/workflows', 'workflows', 'ComfyUI/user/default/workflows'];
+const SCAN_MODEL_RELS = ['models', 'user/default/models', 'ComfyUI/models'];
+const SCAN_CUSTOM_NODES_RELS = ['custom_nodes', 'ComfyUI/custom_nodes'];
+
+// Scan the standard Windows locations for a ComfyUI install.
+// Filesystem only, synchronous, fast and bounded: only the listed
+// candidate roots are checked, no whole-drive walk. Returns
+// { ok, roots, workflowsDir } where each root reports exactly
+// what was found there (workflows folder + .json count, model
+// counts per category, custom_nodes presence) or found: false.
+// workflowsDir is the first workflows folder with files in it,
+// falling back to the first workflows folder that exists at all.
+function scanComfyui(overrides) {
+  const roots = comfyuiCandidateRoots(overrides);
+  const results = [];
+  let firstWithFiles = null;
+  let firstExisting = null;
+  for (const root of roots) {
+    let bases = [root.path];
+    if (root.programFolder) {
+      let programsExists = false;
+      try { programsExists = fs.existsSync(root.path) && fs.statSync(root.path).isDirectory(); } catch {}
+      if (!programsExists) {
+        results.push({ label: root.label, path: root.path, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] });
+        continue;
+      }
+      const found = [];
+      try {
+        for (const e of fs.readdirSync(root.path, { withFileTypes: true })) {
+          if (e.isDirectory() && /comfyui/i.test(e.name)) found.push(path.join(root.path, e.name));
+        }
+      } catch {}
+      if (!found.length) {
+        results.push({ label: root.label, path: root.path, found: true, note: 'No folder named *ComfyUI* inside', workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] });
+        continue;
+      }
+      bases = found;
+    }
+    for (const base of bases) {
+      const entry = { label: root.label, path: base, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] };
+      let baseExists = false;
+      try { baseExists = fs.existsSync(base) && fs.statSync(base).isDirectory(); } catch {}
+      if (!baseExists) { results.push(entry); continue; }
+      entry.found = true;
+      for (const rel of SCAN_WORKFLOW_RELS) {
+        const dir = path.join(base, rel);
+        entry.checked.push(rel);
+        let exists = false;
+        try { exists = fs.existsSync(dir) && fs.statSync(dir).isDirectory(); } catch {}
+        if (exists) {
+          const files = listFilesRecursive(dir, ['.json'], 5, 500);
+          entry.workflows = { dir, count: files.length };
+          if (files.length && !firstWithFiles) firstWithFiles = dir;
+          if (!firstExisting) firstExisting = dir;
+          break;
+        }
+      }
+      for (const rel of SCAN_MODEL_RELS) {
+        const dir = path.join(base, rel);
+        let exists = false;
+        try { exists = fs.existsSync(dir) && fs.statSync(dir).isDirectory(); } catch {}
+        if (exists) {
+          entry.modelsDir = dir;
+          entry.models = countModels(dir);
+          break;
+        }
+      }
+      for (const rel of SCAN_CUSTOM_NODES_RELS) {
+        const dir = path.join(base, rel);
+        try { if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) { entry.customNodes = true; break; } } catch {}
+      }
+      results.push(entry);
+    }
+  }
+  return {
+    ok: true,
+    roots: results,
+    workflowsDir: firstWithFiles || firstExisting || null,
+    checkedRoots: results.length,
+    foundRoots: results.filter(r => r.found).length,
+  };
+}
+
 // Read every *.json in a folder as a workflow graph and catalogue
 // them. `stored` is the previously saved catalogue (by id) so a
-// user's purpose label and approval survive a rescan. Returns
+// user's purpose label and approval survive a rescan. With
+// opts.recursive, subfolders are walked too (bounded); without it
+// only the top level is read, as before. Returns
 // { ok, workflows, errors }.
-function importWorkflowsFromDir(dir, objectInfo, stored) {
+function importWorkflowsFromDir(dir, objectInfo, stored, opts) {
   if (!dir || !fs.existsSync(dir)) return { ok: false, error: 'Workflows folder not found: ' + (dir || '(none set)'), workflows: [] };
   const byId = {};
   for (const s of (stored || [])) if (s && s.id) byId[s.id] = s;
   const workflows = [];
   const errors = [];
   let files = [];
-  try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).sort(); } catch (e) {
-    return { ok: false, error: 'Could not read workflows folder: ' + e.message, workflows: [] };
+  if (opts && opts.recursive) {
+    files = listFilesRecursive(dir, ['.json'], 5, 500);
+  } else {
+    try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).sort().map(f => path.join(dir, f)); } catch (e) {
+      return { ok: false, error: 'Could not read workflows folder: ' + e.message, workflows: [] };
+    }
   }
-  for (const file of files) {
-    const full = path.join(dir, file);
+  const seenIds = new Set();
+  for (const full of files) {
+    const file = path.basename(full);
     const name = file.replace(/\.json$/i, '');
-    const id = slugifyWorkflowId(name);
+    let id = slugifyWorkflowId(name);
+    if (seenIds.has(id)) {
+      // Two subfolders with the same filename: keep both, labelled
+      // by their parent folder. Stored labels keyed by the plain id
+      // do not carry over to the suffixed copy.
+      id = id + '-' + slugifyWorkflowId(path.basename(path.dirname(full)));
+    }
+    seenIds.add(id);
     let graph;
     try {
       graph = JSON.parse(fs.readFileSync(full, 'utf8'));
@@ -385,6 +613,10 @@ function importWorkflowsFromDir(dir, objectInfo, stored) {
       available: parsed.available,
       availableReason: parsed.availableReason,
       approved: !!(prev && prev.approved),
+      // The simple generation form for this workflow (prompt /
+      // sampler / size), computed once here so the renderer never
+      // has to guess at it. See describeSimpleForm().
+      simpleForm: describeSimpleForm(parsed.inputs),
     });
   }
   return { ok: true, workflows, errors };
@@ -406,6 +638,9 @@ module.exports = {
   parseWorkflowGraph,
   buildSubmitPrompt,
   detectCapabilities,
+  nodeClassNames,
+  describeSimpleForm,
+  scanComfyui,
   defaultWorkflowsDir,
   importWorkflowsFromDir,
 };

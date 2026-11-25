@@ -1334,13 +1334,14 @@ ipcMain.handle('comfyui:status', async (_, payload) => {
 ipcMain.handle('comfyui:objectInfo', async (_, payload) => {
   const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
   if (_comfyuiObjectInfoCache.data && Date.now() - _comfyuiObjectInfoCache.at < 5 * 60 * 1000) {
-    return { ok: true, data: _comfyuiObjectInfoCache.data, cached: true };
+    const data = _comfyuiObjectInfoCache.data;
+    return { ok: true, data, cached: true, capabilities: comfyui.detectCapabilities(data), nodeClasses: comfyui.nodeClassNames(data) };
   }
   try {
     const r = await comfyui.getObjectInfo(url);
     if (r.ok) {
       _comfyuiObjectInfoCache = { at: Date.now(), data: r.data };
-      return { ok: true, data: r.data, capabilities: comfyui.detectCapabilities(r.data), cached: false };
+      return { ok: true, data: r.data, capabilities: comfyui.detectCapabilities(r.data), nodeClasses: comfyui.nodeClassNames(r.data), cached: false };
     }
     return r;
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
@@ -1396,6 +1397,45 @@ ipcMain.handle('comfyui:uploadImage', async (_, payload) => {
   if (!p.filePath) return { ok: false, error: 'comfyui:uploadImage needs a filePath.' };
   try { return await comfyui.uploadImage(url, p.filePath, { subfolder: p.subfolder || '', overwrite: !!p.overwrite }); }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Scan the standard ComfyUI locations on this machine, probe the
+// server, and import whatever workflows the scan found. The scan
+// itself is filesystem-only (see comfyui.scanComfyui); the server
+// probe and the import happen here so the renderer gets one
+// complete answer. The workflows folder is only adopted when the
+// scan actually found one — nothing is invented.
+ipcMain.handle('comfyui:scan', async (_, payload) => {
+  const p = payload || {};
+  const url = p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  let scan;
+  try { scan = comfyui.scanComfyui(); }
+  catch (e) { return { ok: false, error: 'Scan failed: ' + String((e && e.message) || e) }; }
+  let server = { ok: false, url: comfyui.normalizeComfyuiUrl(url), error: 'Not probed' };
+  try { server = await comfyui.getComfyuiStatus(url); }
+  catch (e) { server = { ok: false, url: comfyui.normalizeComfyuiUrl(url), error: String((e && e.message) || e) }; }
+  let objectInfo = null;
+  let objectInfoError = null;
+  if (server.ok) {
+    try {
+      const r = await comfyui.getObjectInfo(url);
+      if (r.ok) objectInfo = r.data; else objectInfoError = r.error;
+    } catch (e) { objectInfoError = String((e && e.message) || e); }
+  }
+  const dir = (scan && scan.workflowsDir) || '';
+  let stored = [];
+  try { stored = JSON.parse(readSetting('comfyui_workflows', '[]') || '[]'); } catch { stored = []; }
+  let imported = { ok: false, workflows: [], errors: [] };
+  if (dir) {
+    imported = comfyui.importWorkflowsFromDir(dir, objectInfo, stored, { recursive: true });
+    if (!objectInfo) {
+      for (const w of imported.workflows || []) {
+        w.available = false;
+        w.availableReason = 'ComfyUI not running — dependencies not checked yet' + (objectInfoError ? ' (' + objectInfoError + ')' : '');
+        if (!w.missing.includes('ComfyUI not running')) w.missing = ['ComfyUI not running — could not check nodes/models'];
+      }
+    }
+  }
+  return { ok: true, scan, server, dir, workflows: imported.workflows || [], errors: imported.errors || [], objectInfoError };
 });
 ipcMain.handle('comfyui:defaultWorkflowsDir', async () => {
   try { return { ok: true, dir: comfyui.defaultWorkflowsDir() }; }
