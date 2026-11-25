@@ -22,9 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.5.1.
+// 2. package.json version is 0.5.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.5.1', pkg.version === '0.5.1', 'got ' + pkg.version);
+check('package.json version is 0.5.2', pkg.version === '0.5.2', 'got ' + pkg.version);
+check('sidebar footer shows 0.5.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.5.2 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -396,6 +397,147 @@ check('bridge .cs uses the 1-argument CreateAnimatorControllerAtPath call',
   bridgeCs.includes('AnimatorController.CreateAnimatorControllerAtPath(assetPath);'));
 check('embedded bridge contains the fixed 1-argument call',
   bridgeSrc.BRIDGE_SOURCE.includes('AnimatorController.CreateAnimatorControllerAtPath(assetPath);'));
+
+// 16. v0.5.2 bridge toggle-off fix, versioning, auto-update.
+// Root cause of the toggle bug: toggle-off removed the file, then
+// renderSettingsView() re-rendered Connections, whose auto-install
+// saw the file missing and re-installed it — so the toggle never
+// changed. The fix is a persisted per-project bridge_enabled flag
+// that every auto-install / auto-update path respects, plus bridge
+// versioning so an out-of-date installed bridge is overwritten
+// instead of skipped.
+check('bridge .cs has the 0.5.2 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.5.2') && bridgeCs.includes('BridgeVersion = "0.5.2"'));
+check('embedded bridge has the 0.5.2 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.5.2'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.5.2',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.5.2');
+check('unity-bridge.js has version helpers',
+  typeof bridge.getInstalledBridgeVersion === 'function'
+  && typeof bridge.isBridgeUpdateAvailable === 'function'
+  && typeof bridge.compareVersions === 'function');
+check('version compare works',
+  bridge.compareVersions('0.5.0', '0.5.2') < 0
+  && bridge.compareVersions('0.5.2', '0.5.2') === 0
+  && bridge.compareVersions('0.5.3', '0.5.2') > 0
+  && bridge.compareVersions('0.5.10', '0.5.2') > 0);
+check('main.js has the per-project bridge_enabled flag',
+  mainJs.includes('bridge_enabled_') && mainJs.includes('bridgeEnabledForProject')
+  && mainJs.includes('setBridgeEnabled'));
+check('main.js installBridge turns the flag on, removeBridge turns it off',
+  mainJs.includes('setBridgeEnabled(projectIdByPath(root), true)')
+  && mainJs.includes('setBridgeEnabled(projectIdByPath(root), false)'));
+check('main.js ensureBridge IPC respects the flag',
+  mainJs.includes("ipcMain.handle('unity:ensureBridge'")
+  && mainJs.includes('enabled: bridgeEnabledForProject(projectIdByPath(root))'));
+check('main.js has unity:bridgeStatus IPC', mainJs.includes("ipcMain.handle('unity:bridgeStatus'"));
+check('preload.js exposes rb.unity.bridgeStatus', preloadJs.includes('bridgeStatus'));
+check('app.js Update plugin disabled state is driven by updateAvailable',
+  appJs.includes("updateAvailable ? '' : 'disabled'") && appJs.includes('Bridge is up to date'));
+check('app.js Connections auto-install is gated on the bridge toggle',
+  appJs.includes('if (bridgeEnabled && state.projectPath)'));
+check('app.js re-reads bridge status after ensure',
+  appJs.includes('rb.unity.bridgeStatus(state.projectPath)'));
+
+const tmpV = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-bridge-v-'));
+const tmpVAppDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-appdir-v-'));
+try {
+  fs.mkdirSync(path.join(tmpV, 'Assets', 'Editor'), { recursive: true });
+  // An old bridge as v0.5.0 installed it: no version marker at all.
+  const oldBridge = '// CodeFoxBridge.cs\n// Place this file in: Assets/Editor/CodeFoxBridge.cs\npublic static class CodeFoxBridge {}\n';
+  const installedPath = path.join(tmpV, 'Assets', 'Editor', 'CodeFoxBridge.cs');
+  fs.writeFileSync(installedPath, oldBridge);
+  check('unmarked installed bridge reads as null version',
+    bridge.getInstalledBridgeVersion(tmpV) === null);
+  check('isBridgeUpdateAvailable true for an unmarked bridge',
+    bridge.isBridgeUpdateAvailable(tmpV) === true);
+  check('isBridgeUpdateAvailable true when bridge is missing',
+    bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
+  const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
+  check('ensureBridge overwrites an out-of-date bridge',
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.5.2' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.5.2 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.5.2');
+  check('isBridgeUpdateAvailable false when the bridge is current',
+    bridge.isBridgeUpdateAvailable(tmpV) === false);
+  check('ensureBridge no-ops when the bridge is already current',
+    bridge.ensureBridge(tmpV, tmpVAppDir).already === true);
+  check('ensureBridge with enabled:false does not install a missing bridge', (() => {
+    fs.rmSync(installedPath);
+    const r = bridge.ensureBridge(tmpV, tmpVAppDir, { enabled: false });
+    return r.ok === false && r.disabled === true && !fs.existsSync(installedPath);
+  })());
+  check('ensureBridge with enabled:false does not update an old bridge', (() => {
+    fs.writeFileSync(installedPath, oldBridge);
+    const r = bridge.ensureBridge(tmpV, tmpVAppDir, { enabled: false });
+    return r.ok === false && r.disabled === true && bridge.getInstalledBridgeVersion(tmpV) === null;
+  })());
+} finally {
+  fs.rmSync(tmpV, { recursive: true, force: true });
+  fs.rmSync(tmpVAppDir, { recursive: true, force: true });
+}
+
+// 17. v0.5.2 model-must-edit enforcement + refusal retry.
+// A local model told to fix the CS1501 error refused with "cannot
+// modify files" — a prompt failure, not a capability failure (the
+// apply pipeline already works: it created TestTMP.prefab). The
+// system prompt now ORDERS the model to output the file, and the
+// app enforces it with two triggers in the Agent loop.
+check('system prompt orders the model to edit files (MUST + FAILURE)',
+  appJs.includes('You MUST edit') && appJs.includes('FAILURE')
+  && appJs.includes('Do not output an explanation instead of the file'));
+check('system prompt has the capability statement',
+  appJs.includes('You CAN edit') && appJs.includes('Never say you cannot modify files')
+  && appJs.includes('CodeFox writes it to disk'));
+check('refusal-phrase list and one automatic correction turn exist',
+  appJs.includes('REFUSAL_PHRASES') && appJs.includes('cannot modify files')
+  && appJs.includes('REFUSAL_CORRECTION') && appJs.includes('refusalRetries')
+  && appJs.includes('You CAN modify files in this app'));
+check('no-actions enforcement trigger exists',
+  appJs.includes('enforcementRetried') && appJs.includes('ENFORCEMENT_FOLLOWUP')
+  && appJs.includes('You did not output any file changes')
+  && appJs.includes('asksForChange(userRequest)'));
+check('diagnose-error flow attaches the named file',
+  appJs.includes('diagnoseErrorContext') && appJs.includes('surrounding lines'));
+check('Agent-mode UI hint exists',
+  appJs.includes('agent-hint')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('Agent mode writes code to your project'));
+
+// extractFileChanges lives in app.js (browser code), so pull the
+// function out by brace-matching and run it in Node.
+function extractFunction(src, name) {
+  const start = src.indexOf('function ' + name + '(');
+  if (start === -1) return null;
+  let depth = 0;
+  const open = src.indexOf('{', start);
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  return null;
+}
+const codeExtsMatch = /const CODE_EXTS = '([^']+)'/.exec(appJs);
+const parserSrc = extractFunction(appJs, 'extractFileChanges');
+check('extractFileChanges can be extracted for testing', !!parserSrc && !!codeExtsMatch);
+if (parserSrc && codeExtsMatch) {
+  const extractFileChanges = new Function('CODE_EXTS', parserSrc + '\nreturn extractFileChanges;')(codeExtsMatch[1]);
+  const sampleDoc = '**File Path:** `Assets/Editor/CodeFoxBridge.cs`\n```csharp\npublic class X {}\n```\n';
+  const rDoc = extractFileChanges(sampleDoc);
+  check('parser accepts **File Path:** + fenced block',
+    rDoc.length === 1 && rDoc[0].path === 'Assets/Editor/CodeFoxBridge.cs' && rDoc[0].code.includes('public class X'));
+  const sampleFile = '```file:Assets/Editor/CodeFoxBridge.cs\npublic class X {}\n```\n';
+  const rFile = extractFileChanges(sampleFile);
+  check('parser accepts ```file:path blocks',
+    rFile.length === 1 && rFile[0].path === 'Assets/Editor/CodeFoxBridge.cs' && rFile[0].code.includes('public class X'));
+  const sampleBare = 'Assets/Editor/CodeFoxBridge.cs\n```csharp\npublic class X {}\n```\n';
+  const rBare = extractFileChanges(sampleBare);
+  check('parser accepts a bare path line before a csharp block',
+    rBare.length === 1 && rBare[0].path === 'Assets/Editor/CodeFoxBridge.cs');
+  check('parser skips powershell blocks as files',
+    extractFileChanges('```powershell\ngit status\n```\n').length === 0);
+  check('parser keeps path case from a file: fence',
+    extractFileChanges('```file:Assets/Editor/CodeFoxBridge.cs\nx\n```\n')[0].path === 'Assets/Editor/CodeFoxBridge.cs');
+}
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');

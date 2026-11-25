@@ -594,8 +594,9 @@ async function sendChat() {
   // which also owns the assistant message element.
 
   // Build system prompt — use override if set by executePlan
+  const usedExecPlanPrompt = !!(window._execPlanActive && window._execPlanSystemPrompt);
   let systemPrompt;
-  if (window._execPlanActive && window._execPlanSystemPrompt) {
+  if (usedExecPlanPrompt) {
     systemPrompt = window._execPlanSystemPrompt;
     window._execPlanActive = false;
     window._execPlanSystemPrompt = null;
@@ -603,6 +604,12 @@ async function sendChat() {
     const rulesets = await rb.db.getAll('rulesets');
     systemPrompt = buildSystemPrompt(rulesets);
   }
+
+  // Diagnose-error context (v0.5.2): if the user's message reports
+  // a Unity error naming a file, attach that file's surrounding
+  // lines to the system prompt so the model can fix it instead of
+  // guessing. (Not applied to an executePlan override prompt.)
+  if (!usedExecPlanPrompt) systemPrompt += await diagnoseErrorContext(text);
 
   // Capture thread ID now — state may change if user navigates away
   const currentThreadId = state.activeThreadId;
@@ -644,6 +651,43 @@ async function sendChat() {
 // result back to the model as a tool-result message, and calls the
 // model again — until a reply contains no actions, the user stops
 // it, or agent_max_rounds is reached. The max is a hard cap.
+
+// Refusal auto-retry (v0.5.2). A small local model sometimes refuses
+// with "I cannot modify files" even though CodeFox applies the files
+// it outputs — the capability statement in the system prompt is the
+// first defence; this is the safety net. One automatic correction
+// turn, counted as a loop round; a second refusal stops the loop
+// with a clear message instead of looping forever.
+const REFUSAL_PHRASES = [
+  'cannot modify files', "can't modify files", 'can not modify files',
+  'cannot edit', "can't edit", 'cannot write code', "can't write code",
+  'cannot actually edit the file', 'restricted from making actual changes',
+  'cannot modify the file', 'unable to modify files', 'unable to edit files',
+  'cannot make changes to your files', 'i cannot edit files',
+];
+function isRefusal(text) {
+  const t = String(text || '').toLowerCase();
+  return REFUSAL_PHRASES.some(p => t.includes(p));
+}
+const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block. Do not describe the fix instead of making it.';
+
+// No-actions enforcement (v0.5.2). The refusal retry above only
+// catches models that SAY they cannot edit. The common case is
+// worse: the model politely DESCRIBES the fix and stops, with no
+// refusal phrase at all. When the user asked for a change and the
+// reply produced no actions, that turn is INCOMPLETE, not an answer.
+const CHANGE_INTENT_WORDS = ['fix', 'change', 'edit', 'update', 'create', 'add', 'remove', 'refactor', 'correct', 'repair', 'make it', 'do it'];
+function asksForChange(text) {
+  const t = String(text || '').toLowerCase();
+  return CHANGE_INTENT_WORDS.some(k => t.includes(k));
+}
+function lastUserMessageText() {
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    if (state.messages[i] && state.messages[i].role === 'user') return state.messages[i].content || '';
+  }
+  return '';
+}
+const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format. An explanation without the file is not an answer.';
 
 function clampAgentMaxRounds(n) {
   const v = parseInt(n, 10);
@@ -914,10 +958,13 @@ async function handleSkillSaveFlags(content) {
 // it, the model cannot be reached, or agent_max_rounds is hit.
 async function runAgentTurn(systemPrompt, threadId) {
   const maxRounds = clampAgentMaxRounds(state.agentMaxRounds);
+  // The user's original request, captured before any tool results
+  // (which are also role "user") are appended to the history.
+  const userRequest = lastUserMessageText();
   loopState = {
     active: true, stopRequested: false, stopNoted: false,
     round: 0, maxRounds, threadId, systemPrompt,
-    waitingApproval: false, pendingResolve: null,
+    waitingApproval: false, pendingResolve: null, refusalRetries: 0, enforcementRetried: false,
   };
   showLoopUI();
   try {
@@ -929,8 +976,47 @@ async function runAgentTurn(systemPrompt, threadId) {
         systemPrompt, threadId);
       if (!loopState || loopState.stopRequested) break;
       if (content == null) break; // model unreachable — error already shown
+      // Refusal auto-retry (v0.5.2): a "cannot modify files" reply
+      // is a prompt failure, not a capability failure. Correct the
+      // model once (counts as a loop round); a second refusal stops
+      // with a clear message instead of looping forever.
+      if (isRefusal(content)) {
+        if (loopState.refusalRetries >= 1) {
+          addSystemMessage('The model refused to output the change twice. Try rephrasing, or use Ask mode for an explanation.');
+          break;
+        }
+        loopState.refusalRetries++;
+        loopState.round++;
+        setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — correcting the model…');
+        await appendToolResult(REFUSAL_CORRECTION);
+        if (loopState.round >= loopState.maxRounds) {
+          addSystemMessage('Stopped after ' + loopState.round + ' tool rounds — the task may need more steps. Ask me to continue if you want.');
+          break;
+        }
+        continue;
+      }
       const actions = parseAgentActions(content);
-      if (!actions.length) break; // final answer — no actions, loop ends
+      if (!actions.length) {
+        // No-actions enforcement (v0.5.2): the user asked for a
+        // change and the model only described it. One automatic
+        // enforcement retry, counted as a loop round; a second
+        // reply with no actions stops with a clear message.
+        if (asksForChange(userRequest) && !loopState.enforcementRetried) {
+          loopState.enforcementRetried = true;
+          loopState.round++;
+          setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — asking for the file, not the description…');
+          await appendToolResult(ENFORCEMENT_FOLLOWUP);
+          if (loopState.round >= loopState.maxRounds) {
+            addSystemMessage('Stopped after ' + loopState.round + ' tool rounds — the task may need more steps. Ask me to continue if you want.');
+            break;
+          }
+          continue;
+        }
+        if (asksForChange(userRequest) && loopState.enforcementRetried) {
+          addSystemMessage('The model described the fix but did not output the change. Try asking again, or paste the error with Diagnose error.');
+        }
+        break; // final answer — no actions, loop ends
+      }
       loopState.round++;
       const outcomes = await processAgentActions(actions);
       if (!loopState || loopState.stopRequested) break;
@@ -1172,6 +1258,13 @@ function pumpPackageQueue() {
 function buildSystemPrompt(rulesets) {
   const ctx = state.projectContext || 'a software project';
   let prompt = 'You are an expert software developer working on ' + ctx + '.\n';
+  // Capability statement (v0.5.2) — first, in every mode, in plain
+  // words a small local model cannot misread: this app WRITES the
+  // files the model outputs. Without this, a local model falls back
+  // on its generic "I'm just a chat window, I can't edit files"
+  // refusal — which is not true here. Kept short (~330 chars) so it
+  // does not eat the rules budget; it is separate from the rulesets.
+  prompt += 'You are CodeFox, a coding assistant running inside an app. You CAN edit the project\'s files. When you output a changed file, CodeFox writes it to disk for you (after taking a snapshot, so it can be reverted). Never say you cannot modify files, cannot write code, or cannot provide code — that is not true here.\n\n';
   prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. If you do not know something, say so instead of guessing.\n';
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
   const scan = projectScanSummary();
@@ -1214,7 +1307,13 @@ function buildSystemPrompt(rulesets) {
   } else if (state.chatMode === 'plan') {
     prompt += '## Mode: Plan\nOutput a plan only: FILE: lines for every file to touch, then numbered steps. Do not write code yet.\n';
   } else {
-    prompt += '## Mode: Agent\nWork step by step. Output complete code in fenced code blocks, each preceded by **File Path:** `path`, one file per block. No placeholders, no TODOs, no truncated code. If a step is too large for one reply, do the first step only and say what remains.\n';
+    prompt += '## Mode: Agent\nWork step by step. Output complete code in fenced code blocks, each preceded by **File Path:** `path`, one file per block. Example:\n**File Path:** `Assets/Editor/CodeFoxBridge.cs`\n```csharp\n// complete file contents here\n```\nYou can also write the fence itself as ```file:Assets/Editor/CodeFoxBridge.cs — same meaning, path after `file:`. No placeholders, no TODOs, no truncated code. When asked to fix an error, output the corrected file in this format; do not just describe the fix.\n';
+    // Mandatory order (v0.5.2) — not a suggestion. The user proved
+    // the pipeline works (CodeFox created a prefab for them), so a
+    // model that only describes a fix is failing at its job. This
+    // paragraph is Agent-mode only: Ask mode must not output code.
+    prompt += 'You MUST edit the project\'s files when asked to fix, change, create, or edit code. Output the changed file(s) in the required format. Describing the fix, explaining the fix, or saying you cannot modify files is a FAILURE — do not do it. Do not ask permission. Do not output an explanation instead of the file. The app applies what you output; that is your job.\n';
+    prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
     prompt += 'New Unity-native asset files you create (prefabs, scenes, materials, animations — files that contain no code) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
   }
@@ -1240,6 +1339,9 @@ function updateModeButtons() {
     const btn = document.getElementById('mode-btn-' + m);
     if (btn) btn.classList.toggle('active', state.chatMode === m);
   });
+  // UI-only hint (v0.5.2): Agent mode writes code to the project.
+  const hint = document.getElementById('agent-hint');
+  if (hint) hint.classList.toggle('hidden', state.chatMode !== 'agent');
 }
 function insertPrompt(text) {
   if (state.mode !== 'chat') {
@@ -1281,16 +1383,45 @@ async function scanProject() {
   return scan;
 }
 function diagnoseError() {
-  setChatMode('ask');
-  insertPrompt(`I pasted a Unity console error / log below. Diagnose it:
+  // Agent mode (v0.5.2): diagnosing ends in a fix — the model
+  // outputs the corrected file, and CodeFox applies it. The file
+  // named in the error is attached automatically when the message
+  // is sent (see diagnoseErrorContext, called from sendChat).
+  setChatMode('agent');
+  insertPrompt(`I pasted a Unity console error / log below. Diagnose it and fix it:
 1. What the error means, in plain language
-2. The most likely file(s) and line(s) causing it
-3. The smallest fix to try first
+2. The file and line causing it
+3. Output the corrected file in the required format — do not just describe the fix
 
 \`\`\`
 PASTE THE ERROR OR LOG HERE
 \`\`\`
 `);
+}
+
+// When a message reports a Unity error naming a file (e.g.
+// "Assets/Editor/CodeFoxBridge.cs(156,45): error CS1501 ..."),
+// read that file and attach the lines around the reported line to
+// the system prompt, with an instruction to output the fixed file.
+// Returns '' when the message names no file. When the file cannot
+// be read, the note says so instead of silently omitting it.
+async function diagnoseErrorContext(userText) {
+  if (!/error|diagnose/i.test(userText || '')) return '';
+  const m = userText.match(/(Assets[\\/][^\s:'"\)\]]+?)(?:\((\d+)(?:,\d+)?\)|:(\d+))?/);
+  if (!m) return '';
+  const filePath = m[1].replace(/\\/g, '/').replace(/[.,;]+$/, '');
+  const lineNo = parseInt(m[2] || m[3] || '0', 10) || 0;
+  let read = null;
+  try { read = await rb.fs.readFile(resolvePath(filePath)); } catch { read = null; }
+  if (!read || !read.ok) {
+    return '\n\n[CodeFox note: the error names ' + filePath + ' but that file could not be read from the project folder — say so and ask the user to check the path.]\n';
+  }
+  const lines = String(read.content || '').split('\n');
+  const centre = lineNo ? lineNo - 1 : 0;
+  const start = Math.max(0, centre - 20);
+  const end = Math.min(lines.length, centre + 21);
+  const excerpt = lines.slice(start, end).map((l, i) => (start + i + 1) + ': ' + l).join('\n');
+  return '\n\n[CodeFox note: the error names ' + filePath + (lineNo ? ' line ' + lineNo : '') + '. That file is in the project — here are the surrounding lines:\n```\n' + excerpt + '\n```\nOutput the corrected file in the required format (**File Path:** `' + filePath + '` then a fenced code block). Do not just describe the fix.]\n';
 }
 function generateTests() {
   const file = state.activeFilePath ? state.activeFilePath.split(/[\\/]/).pop() : null;
@@ -1919,22 +2050,41 @@ async function renderSettingsConnections() {
   const filter = window._connFilter || 'all';
   const proj = state.activeProject;
   const bridgePath = state.projectPath ? state.projectPath + '/Assets/Editor/CodeFoxBridge.cs' : '';
-  // Status is derived live from whether the bridge file exists — never faked.
+  // Bridge status comes from the main process (v0.5.2): whether the
+  // file exists on disk, whether the user has it toggled on for this
+  // project, and whether the installed copy is older than the bundled
+  // one. Status is always re-read after any operation — never from
+  // optimistic local state.
+  let status = null;
+  try { status = await rb.unity.bridgeStatus(state.projectPath); } catch { status = null; }
   let bridgeExists = bridgePath ? await rb.fs.exists(bridgePath) : false;
-  // Auto-install (v0.5.0): opening Connections on a Unity project
-  // without a bridge installs it now. A real failure (e.g. the folder
-  // is not writable) is shown as the status, not hidden.
+  let bridgeEnabled = true;
+  if (status) { bridgeExists = status.exists; bridgeEnabled = status.enabled; }
+  // Auto-install / auto-update (v0.5.0/0.5.2): opening Connections on
+  // a Unity project installs the bridge when it is missing and
+  // overwrites it when the installed copy is out of date. Gated on
+  // the toggle: when the user turned the bridge off, ensureBridge
+  // no-ops, so a toggle-off is never undone by this re-render.
+  // (That re-render was the v0.5.1 toggle bug: removing the bridge
+  // then re-rendering re-installed it immediately.)
   let bridgeError = null;
-  if (!bridgeExists && state.projectPath) {
+  if (bridgeEnabled && state.projectPath) {
     const hasAssets = await rb.fs.exists(state.projectPath + '/Assets');
     if (hasAssets) {
       try {
         const ensured = await rb.unity.ensureBridge(state.projectPath);
-        if (ensured && ensured.ok) bridgeExists = true;
-        else if (ensured) bridgeError = ensured.error || 'Bridge install failed';
+        if (ensured && ensured.ok) {
+          bridgeExists = true;
+          if (ensured.updated) showToast('✓ Bridge updated to v' + (ensured.toVersion || '') + ' — restart Unity if the old error is still showing');
+        } else if (ensured && !ensured.skipped) bridgeError = ensured.error || 'Bridge install failed';
       } catch (e) { bridgeError = e.message || 'Bridge install failed'; }
     }
   }
+  // Re-read status after any ensure, so the Update button and the
+  // version shown reflect what is actually on disk now.
+  try { const s2 = await rb.unity.bridgeStatus(state.projectPath); if (s2) status = s2; } catch {}
+  const updateAvailable = !!(state.projectPath && status && status.updateAvailable);
+  const installedVersion = status ? status.installedVersion : null;
   // Installed Unity packages, from Packages/manifest.json — read live
   // so the list (and the model, via the project scan) never goes stale.
   let pkgInfo = null;
@@ -1945,9 +2095,9 @@ async function renderSettingsConnections() {
     <div class="conn-row">
       <span class="conn-ico">⬢</span>
       <span class="conn-row-info"><span class="conn-name">Unity Project — ${escHtml(proj ? proj.name : 'No project')}</span><br>
-      <span class="conn-status ${bridgeExists ? 'connected' : ''}">${bridgeExists ? 'Connected — bridge installed' : (bridgeError ? 'Bridge install failed: ' + escHtml(bridgeError) : 'Not connected — bridge not installed')}</span><br>
+      <span class="conn-status ${bridgeExists ? 'connected' : ''}">${bridgeExists ? 'Connected — bridge installed' + (installedVersion ? ' (v' + escHtml(installedVersion) + ')' : '') + (updateAvailable ? ' — update available' : '') : (bridgeError ? 'Bridge install failed: ' + escHtml(bridgeError) : (bridgeEnabled ? 'Not connected — bridge not installed' : 'Bridge disabled'))}</span><br>
       <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(state.projectPath || 'No folder set')}</span></span>
-      <button class="btn btn-secondary" onclick="updateUnityBridge()" title="Re-install the bridge into Assets/Editor/">Update plugin</button>
+      <button class="btn btn-secondary" onclick="updateUnityBridge()" ${updateAvailable ? '' : 'disabled'} title="${!bridgeEnabled ? 'Bridge is disabled — turn it on to update it' : (updateAvailable ? 'Install the newer bundled bridge (v' + escHtml(status && status.bundledVersion ? status.bundledVersion : '') + ') into Assets/Editor/' : 'Bridge is up to date' + (installedVersion ? ' (v' + escHtml(installedVersion) + ')' : ''))}">Update plugin</button>
       <label class="switch" title="${bridgeExists ? 'Disable the bridge (removes it from the project)' : 'Enable the bridge (installs it into the project)'}"><input type="checkbox" ${bridgeExists ? 'checked' : ''} onchange="toggleUnityBridge(this.checked)"><span class="slider"></span></label>
       <button class="btn btn-secondary" onclick="toggleConnMenu()">⋯</button>
     </div>
@@ -2643,6 +2793,14 @@ function extractFileChanges(responseText) {
     const fenceMatch = line.match(/^```\s*(\S*)\s*$/);
     if (fenceMatch) {
       const fenceLang = (fenceMatch[1] || '').toLowerCase();
+      // ```file:<path> (v0.5.2): the path is the fence itself, e.g.
+      // ```file:Assets/Editor/CodeFoxBridge.cs — same meaning as a
+      // **File Path:** line above the block. Use the raw capture,
+      // not the lowercased one, so the path keeps its case.
+      if (fenceLang.startsWith('file:')) {
+        const fp = (fenceMatch[1] || '').slice(5).trim().replace(/^`|`$/g, '');
+        if (fp) pendingPath = fp;
+      }
       if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove') {
         let j = i + 1;
         while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;

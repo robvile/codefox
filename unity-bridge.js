@@ -15,6 +15,25 @@
 const fs = require('fs');
 const path = require('path');
 
+// Version of the bridge bundled with this build. This MUST move with
+// package.json's version whenever the bridge file changes — the app
+// compares it against the version marker inside the installed bridge
+// (see getInstalledBridgeVersion) to decide whether an installed
+// bridge is out of date. The .cs file carries the same version in
+// its "// CodeFoxBridge version: X.Y.Z" marker and BridgeVersion const.
+const BUNDLED_BRIDGE_VERSION = '0.5.2';
+
+// Compare "a.b.c" versions numerically. Returns <0, 0, or >0.
+function compareVersions(a, b) {
+  const pa = String(a || '0.0.0').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '0.0.0').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 function bridgeDiskPath(appDir) {
   return path.join(appDir, 'unity-companion', 'CodeFoxBridge.cs');
 }
@@ -26,6 +45,29 @@ function bridgeDestPath(projectPath) {
 function bridgeInstalled(projectPath) {
   if (!projectPath) return false;
   try { return fs.existsSync(bridgeDestPath(projectPath)); } catch { return false; }
+}
+
+// Version of the bridge installed in a project, read from the
+// "// CodeFoxBridge version: X.Y.Z" marker in the installed file.
+// Returns null when the file is missing or has no marker — an
+// unmarked bridge (e.g. installed by CodeFox <= 0.5.1, which had no
+// marker) is treated as version "0.0.0", i.e. out of date.
+function getInstalledBridgeVersion(projectPath) {
+  if (!bridgeInstalled(projectPath)) return null;
+  try {
+    const source = fs.readFileSync(bridgeDestPath(projectPath), 'utf8');
+    const m = /CodeFoxBridge version:\s*([0-9]+\.[0-9]+\.[0-9]+)/.exec(source);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+// True when the installed bridge is missing, unmarked, or older than
+// the bundled one. False when it is current.
+function isBridgeUpdateAvailable(projectPath) {
+  if (!bridgeInstalled(projectPath)) return true;
+  const installed = getInstalledBridgeVersion(projectPath);
+  if (!installed) return true;
+  return compareVersions(installed, BUNDLED_BRIDGE_VERSION) < 0;
 }
 
 // The embedded copy, or null when it cannot be read.
@@ -75,22 +117,44 @@ function installBridgeFile(projectPath, appDir) {
   }
 }
 
-// Install the bridge for a project that does not have it yet.
+// Install the bridge for a project, or update it when the installed
+// copy is older than the bundled one (v0.5.2: v0.5.1 and earlier only
+// installed when the file was missing, so a broken bridge installed
+// by an older CodeFox would never be replaced).
+//   opts.enabled === false — the user toggled the bridge off for this
+//     project. Never install or update; returns { ok:false, skipped,
+//     disabled:true }. This is what stops the toggle-off bug: the
+//     Connections view re-renders right after a removal, and without
+//     this flag its auto-install would put the bridge straight back.
 // Skips (ok:false, skipped:true) when the folder has no Assets
 // folder — it is not a Unity project — and no-ops (ok:true,
-// already:true) when the bridge is already there.
-function ensureBridge(projectPath, appDir) {
+// already:true) when the installed bridge is already current.
+// An update returns { ok:true, updated:true, fromVersion, toVersion }.
+function ensureBridge(projectPath, appDir, opts) {
   if (!projectPath || !fs.existsSync(projectPath)) {
     return { ok: false, error: 'No project folder set.' };
+  }
+  if (opts && opts.enabled === false) {
+    return { ok: false, skipped: true, disabled: true, error: 'Bridge is disabled for this project — turn it on in Settings → Connections.' };
   }
   if (!fs.existsSync(path.join(projectPath, 'Assets'))) {
     return { ok: false, skipped: true, error: 'No Assets folder in this project — not a Unity project, so the bridge was not installed.' };
   }
-  if (bridgeInstalled(projectPath)) return { ok: true, already: true };
-  return installBridgeFile(projectPath, appDir);
+  if (!bridgeInstalled(projectPath)) return installBridgeFile(projectPath, appDir);
+  if (!isBridgeUpdateAvailable(projectPath)) {
+    return { ok: true, already: true, version: getInstalledBridgeVersion(projectPath) };
+  }
+  const fromVersion = getInstalledBridgeVersion(projectPath) || '0.0.0';
+  const installed = installBridgeFile(projectPath, appDir);
+  if (!installed.ok) return installed;
+  return { ...installed, updated: true, fromVersion, toVersion: BUNDLED_BRIDGE_VERSION };
 }
 
 module.exports = {
+  BUNDLED_BRIDGE_VERSION,
+  compareVersions,
+  getInstalledBridgeVersion,
+  isBridgeUpdateAvailable,
   bridgeDiskPath,
   bridgeDestPath,
   bridgeInstalled,

@@ -1,4 +1,5 @@
 // CodeFoxBridge.cs
+// CodeFoxBridge version: 0.5.2
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 // Watches for file changes from the CodeFox app and auto-refreshes Unity's AssetDatabase.
 // Also watches Assets/.codefox-command.json: when CodeFox writes a command there,
@@ -26,6 +27,10 @@ using System.IO;
 [InitializeOnLoad]
 public static class CodeFoxBridge
 {
+    // Version of this bridge file. CodeFox reads this marker to tell
+    // whether the bridge installed in a project is older than the one
+    // bundled with the app, so it can update it automatically.
+    public const string BridgeVersion = "0.5.2";
     private const string TriggerFileName = ".codefox-refresh-trigger";
     private const string CommandFileName = ".codefox-command.json";
     private const string ResultFileName = ".codefox-result.json";

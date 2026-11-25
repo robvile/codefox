@@ -364,11 +364,16 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initDB();
-  // Auto-install the bridge for the already-connected active project
-  // (v0.5.0): the project was connected in an earlier session, so no
-  // create / switch / update call will trigger it. Silent when the
-  // bridge is already there or the folder is not a Unity project.
-  try { unityBridge.ensureBridge(readSetting('project_path', ''), __dirname); } catch {}
+  // Auto-install (or auto-update, v0.5.2) the bridge for the
+  // already-connected active project: the project was connected in
+  // an earlier session, so no create / switch / update call will
+  // trigger it. Silent when the bridge is already current, when the
+  // folder is not a Unity project, or when the user toggled the
+  // bridge off for this project.
+  try {
+    unityBridge.ensureBridge(readSetting('project_path', ''), __dirname,
+      { enabled: bridgeEnabledForProject(readSetting('active_project_id', null)) });
+  } catch {}
   createWindow();
 });
 
@@ -462,6 +467,30 @@ function setActiveProject(project) {
   saveDB();
 }
 
+// ── Unity bridge on/off per project (v0.5.2) ───────────────────────
+// The toggle in Settings → Connections persists here, keyed by
+// project id ('bridge_enabled_<id>', '1' = on, '0' = off; no key
+// means on). Every auto-install / auto-update path must consult it:
+// without it, the Connections view re-rendered right after a
+// toggle-off and its auto-install put the bridge straight back, so
+// the toggle appeared to never change.
+function projectIdByPath(projectPath) {
+  try {
+    const result = db.exec(`SELECT id FROM projects WHERE path = '${String(projectPath || '').replace(/'/g, "''")}'`);
+    if (result.length && result[0].values.length) return result[0].values[0][0];
+  } catch {}
+  return null;
+}
+function bridgeEnabledForProject(projectId) {
+  if (projectId == null) return true;
+  return readSetting('bridge_enabled_' + projectId, '1') !== '0';
+}
+function setBridgeEnabled(projectId, enabled) {
+  if (projectId == null) return;
+  db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['bridge_enabled_' + projectId, enabled ? '1' : '0']);
+  saveDB();
+}
+
 ipcMain.handle('project:list', () => projectRows());
 
 ipcMain.handle('project:create', (_, name, projectPath) => {
@@ -470,7 +499,8 @@ ipcMain.handle('project:create', (_, name, projectPath) => {
   const project = projectById(db.exec('SELECT CAST(last_insert_rowid() AS TEXT) as id')[0].values[0][0]);
   setActiveProject(project);
   // Connecting a project installs its bridge automatically (v0.5.0).
-  const bridge = unityBridge.ensureBridge(project.path || '', __dirname);
+  // A new project has the bridge on by default.
+  const bridge = unityBridge.ensureBridge(project.path || '', __dirname, { enabled: bridgeEnabledForProject(project.id) });
   return { ...project, bridge };
 });
 
@@ -478,8 +508,9 @@ ipcMain.handle('project:switch', (_, id) => {
   const project = projectById(id);
   if (!project) return null;
   setActiveProject(project);
-  // Switching to a project installs its bridge automatically (v0.5.0).
-  const bridge = unityBridge.ensureBridge(project.path || '', __dirname);
+  // Switching to a project installs its bridge automatically (v0.5.0)
+  // — unless the user toggled it off for that project (v0.5.2).
+  const bridge = unityBridge.ensureBridge(project.path || '', __dirname, { enabled: bridgeEnabledForProject(project.id) });
   return { ...project, bridge };
 });
 
@@ -495,8 +526,9 @@ ipcMain.handle('project:update', (_, id, data) => {
   }
   saveDB();
   // Changing a project's folder connects it — install its bridge
-  // automatically when the new folder is a Unity project (v0.5.0).
-  if (data && data.path != null) unityBridge.ensureBridge(projectPath, __dirname);
+  // automatically when the new folder is a Unity project (v0.5.0),
+  // unless the bridge is toggled off for this project (v0.5.2).
+  if (data && data.path != null) unityBridge.ensureBridge(projectPath, __dirname, { enabled: bridgeEnabledForProject(id) });
   return true;
 });
 
@@ -979,23 +1011,49 @@ ipcMain.handle('unity:refresh', async (_, projectPath) => {
 // file. A failure that is reported is the real filesystem error.
 ipcMain.handle('unity:installBridge', async (_, projectPath) => {
   const root = projectPath || readSetting('project_path', '');
-  return unityBridge.installBridgeFile(root, __dirname);
+  const res = unityBridge.installBridgeFile(root, __dirname);
+  // An explicit install (toggle on / Update plugin) turns the bridge
+  // back on for this project.
+  if (res.ok) setBridgeEnabled(projectIdByPath(root), true);
+  return res;
 });
 
-// Install the bridge for a project that does not have it yet.
-// No-ops when it is already there; skips when the folder has no
-// Assets folder. Used by the Connections view and by the project
-// connect / startup paths, which call ensureBridge directly.
+// Install the bridge for a project that does not have it yet, or
+// update it when the installed copy is older than the bundled one
+// (v0.5.2). No-ops when it is already current; skips when the folder
+// has no Assets folder, and when the bridge is toggled off for this
+// project. Used by the Connections view and by the project connect /
+// startup paths, which call ensureBridge directly.
 ipcMain.handle('unity:ensureBridge', async (_, projectPath) => {
   const root = projectPath || readSetting('project_path', '');
-  return unityBridge.ensureBridge(root, __dirname);
+  return unityBridge.ensureBridge(root, __dirname, { enabled: bridgeEnabledForProject(projectIdByPath(root)) });
+});
+
+// Bridge status for the Settings → Connections row: whether the file
+// exists on disk, whether the user has it toggled on for this
+// project, the installed vs bundled versions, and whether an update
+// is available. The Update plugin button's disabled state is driven
+// by updateAvailable (v0.5.2).
+ipcMain.handle('unity:bridgeStatus', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  const enabled = bridgeEnabledForProject(projectIdByPath(root));
+  return {
+    exists: unityBridge.bridgeInstalled(root),
+    enabled,
+    installedVersion: unityBridge.getInstalledBridgeVersion(root),
+    bundledVersion: unityBridge.BUNDLED_BRIDGE_VERSION,
+    updateAvailable: enabled && unityBridge.isBridgeUpdateAvailable(root),
+  };
 });
 
 // Removes the companion script from the project's Assets/Editor folder
 // (and the refresh sentinel if one is present). Returns whether the
-// bridge file was actually there.
+// bridge file was actually there. Turning it off persists (v0.5.2):
+// the flag is what stops every auto-install path from putting the
+// bridge straight back after a toggle-off.
 ipcMain.handle('unity:removeBridge', async (_, projectPath) => {
   const root = projectPath || readSetting('project_path', '');
+  setBridgeEnabled(projectIdByPath(root), false);
   if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
   const dest = path.join(root, 'Assets', 'Editor', 'CodeFoxBridge.cs');
   const sentinel = path.join(root, 'Assets', '.codefox-refresh-trigger');

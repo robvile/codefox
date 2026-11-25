@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('rb', {
     installBridge: (projectPath) => ipcRenderer.invoke('unity:installBridge', projectPath),
     removeBridge: (projectPath) => ipcRenderer.invoke('unity:removeBridge', projectPath),
     ensureBridge: (projectPath) => ipcRenderer.invoke('unity:ensureBridge', projectPath),
+    bridgeStatus: (projectPath) => ipcRenderer.invoke('unity:bridgeStatus', projectPath),
     listPackages: (projectPath) => ipcRenderer.invoke('unity:listPackages', projectPath),
     addPackage: (payload) => ipcRenderer.invoke('unity:addPackage', payload || {}),
     removePackage: (payload) => ipcRenderer.invoke('unity:removePackage', payload || {}),

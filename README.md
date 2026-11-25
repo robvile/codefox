@@ -173,6 +173,8 @@ In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each
 
 The model can only trigger actions by writing the fenced blocks — if it answers in plain prose with no blocks, the loop ends and that answer is shown as-is.
 
+**The model MUST output the file, not just describe the fix.** The apply pipeline already works end-to-end — it created TestTMP.prefab from a plain request — so this change is about making the model USE it every time it is told to fix something, not about building a new pipeline. In Agent mode the system prompt orders the model, in plain words: it MUST edit the project's files when asked to fix, change, create, or edit code, and describing the fix, explaining it, or saying it cannot modify files is a FAILURE. And the app enforces it, it does not just ask: if a reply contains a refusal ("cannot modify files" and similar), CodeFox automatically sends one correction turn telling the model it CAN modify files here; and if the user asked for a change but the reply produced no file actions at all — the model just described the fix and stopped — that turn is treated as incomplete and CodeFox automatically sends one follow-up demanding the file. One retry each at most; if the model still does not output the change, the loop stops and says so plainly instead of pretending the description was an answer. A local model can still fail to comply — this is prompt engineering plus enforcement, not a guarantee — but a description without a file is no longer accepted as a finished answer.
+
 ### Unity Package Manager
 
 CodeFox manages Unity packages by editing the project's `Packages/manifest.json` — it does not talk to Unity's Package Manager API directly. Unity itself resolves the packages when it refreshes (CodeFox writes the same refresh trigger the bridge watches). Every edit is backed up first to `Packages/manifest.json.codefox-bak`.
@@ -239,6 +241,8 @@ If no Unity Editor path is set, Run tests tells you exactly that and how to set 
 
 CodeFox installs the companion script automatically whenever a Unity project is connected (creating it, switching to it, changing its folder, opening Settings → Connections, or starting the app with a project already set). The bridge file lives at `Assets/Editor/CodeFoxBridge.cs` in your project, and the Connections view shows "Connected" once it is there. If the install fails for a real reason (for example the folder is not writable), Settings → Connections shows that error instead of hiding it.
 
+The bridge is versioned: the file carries a `// CodeFoxBridge version: X.Y.Z` marker, and CodeFox compares the installed version with the bundled one. When a newer CodeFox is installed, the bridge in your project is overwritten automatically on the next launch (or when you open Settings → Connections) — so a fixed bridge reaches a project that already has an older one, with no clicks. The toggle turns the bridge off per project (off removes the file and stays off — no auto-install will put it back until you turn it on again). **Update plugin** is greyed out while the installed bridge is up to date, and becomes clickable only when a newer bundled bridge is available; clicking it overwrites the bridge and it disables itself again.
+
 You can also install or remove the bridge from Settings → Connections (Update plugin re-installs it, the toggle removes it). The bridge source also ships in the repo at `unity-companion/CodeFoxBridge.cs` for reference.
 
 The installed app always carries the bridge two ways: the `unity-companion/` folder is packaged with the app, and the bridge source is also embedded in the app (regenerated from the `.cs` file before every build by `scripts/embed-bridge.js`), so installing it never fails for a missing source file.
@@ -276,7 +280,7 @@ The titlebar status dot shows the active provider and selected model (e.g. "LM S
 
 ### Connections
 
-**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** re-installs `CodeFoxBridge.cs` into `Assets/Editor/`, the toggle enables/disables it (off removes the file), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists. A **Packages** list under the Unity row shows the installed packages from `Packages/manifest.json`, each with a Remove button (confirm click). A **Manage MCP connections →** button jumps to the MCPs section.
+**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** is disabled (greyed out, "Bridge is up to date") while the installed bridge is current and becomes clickable only when a newer bundled bridge is available, the toggle enables/disables it (off removes the file and stays off — auto-install respects it), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists, and the installed bridge version is shown next to it. A **Packages** list under the Unity row shows the installed packages from `Packages/manifest.json`, each with a Remove button (confirm click). A **Manage MCP connections →** button jumps to the MCPs section.
 
 ### MCPs
 
