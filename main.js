@@ -1177,6 +1177,27 @@ ipcMain.handle('shell:openExternal', async (_, url) => {
   catch (e) { return { ok: false, error: e.message }; }
 });
 
+// ── Open a file with its default app (v0.7.1) ────────────────────
+// Launches a file the scan actually found on disk (the ComfyUI
+// Desktop exe) with the operating system's default handler —
+// Electron shell.openPath, never the PowerShell shell tool, which
+// is off by default. The path must exist and be an .exe; anything
+// else is refused, and a path that was never found on disk is
+// never launched.
+ipcMain.handle('shell:openPath', async (_, filePath) => {
+  const p = String(filePath || '').trim();
+  if (!p) return { ok: false, error: 'No file to open.' };
+  try {
+    if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return { ok: false, error: 'File not found: ' + p };
+  } catch { return { ok: false, error: 'File not found: ' + p }; }
+  if (process.platform === 'win32' && !/\.exe$/i.test(p)) return { ok: false, error: 'Only an executable can be launched this way.' };
+  try {
+    const err = await shell.openPath(p);
+    if (err) return { ok: false, error: err };
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 // ── Diagnostics: open DevTools (v0.6.2) ─────────────────────────
 // Settings → Advanced has a "Developer tools" button for this.
 // It is the same panel as Ctrl+Shift+I, for users whose keyboard
@@ -1367,7 +1388,25 @@ ipcMain.handle('comfyui:submit', async (_, payload) => {
     try {
       if (!fs.existsSync(payload.file)) return { ok: false, error: 'Workflow file not found: ' + payload.file };
       const stored = JSON.parse(fs.readFileSync(payload.file, 'utf8'));
-      const built = comfyui.buildSubmitPrompt(stored, (payload.inputs && typeof payload.inputs === 'object') ? payload.inputs : {});
+      let apiGraph = stored;
+      if (comfyui.isUiWorkflowGraph(stored)) {
+        // UI-format (Desktop-saved or template): convert with the
+        // live node definitions before submitting. The stored
+        // file is never mutated, and the conversion is the same
+        // one the catalogue used at import time.
+        let objectInfo = _comfyuiObjectInfoCache.data || null;
+        if (!objectInfo) {
+          try {
+            const r = await comfyui.getObjectInfo(url);
+            if (r.ok) { objectInfo = r.data; _comfyuiObjectInfoCache = { at: Date.now(), data: r.data }; }
+            else return { ok: false, error: 'Could not read /object_info to convert this workflow: ' + (r.error || 'ComfyUI not running') };
+          } catch (e) { return { ok: false, error: 'Could not read /object_info to convert this workflow: ' + String((e && e.message) || e) }; }
+        }
+        const converted = comfyui.convertUiGraphToApi(stored, objectInfo);
+        if (!converted.ok) return { ok: false, error: 'Could not convert this workflow: ' + converted.error };
+        apiGraph = converted.graph;
+      }
+      const built = comfyui.buildSubmitPrompt(apiGraph, (payload.inputs && typeof payload.inputs === 'object') ? payload.inputs : {});
       graph = built.prompt;
       unapplied = built.unapplied;
     } catch (e) { return { ok: false, error: 'Could not read workflow file: ' + e.message }; }
@@ -1398,10 +1437,85 @@ ipcMain.handle('comfyui:uploadImage', async (_, payload) => {
   try { return await comfyui.uploadImage(url, p.filePath, { subfolder: p.subfolder || '', overwrite: !!p.overwrite }); }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
+// Collect the full ComfyUI workflow catalogue: the user's own
+// workflows from their workflows folder, plus ComfyUI Desktop's
+// built-in templates found on disk by the filesystem scan. The
+// server's /api/workflow_templates catalogue supplies titles and
+// descriptions for the built-ins when it answers; when it does
+// not, the template filenames are used instead. `scan` may be a
+// precomputed scanComfyui() result (the scan handler passes its
+// own); otherwise the scan runs here. When ComfyUI is not running,
+// /object_info cannot be fetched, so UI-format workflows cannot be
+// converted and every workflow is marked unavailable with the
+// honest reason — never "checked" when it was not. Returns
+// { workflows, errors, objectInfoError, desktopExe, templateDirs,
+//   templatesMetaOk, scan }.
+async function collectComfyuiWorkflows(url, userDir, stored, scan) {
+  const root = comfyui.normalizeComfyuiUrl(url);
+  let objectInfo = null;
+  let objectInfoError = null;
+  try {
+    const r = await comfyui.getObjectInfo(root);
+    if (r.ok) objectInfo = r.data; else objectInfoError = r.error;
+  } catch (e) { objectInfoError = String((e && e.message) || e); }
+  let templatesMeta = { ok: false, byName: {} };
+  if (objectInfo) {
+    try { templatesMeta = await comfyui.getWorkflowTemplates(root); }
+    catch (e) { templatesMeta = { ok: false, error: String((e && e.message) || e), byName: {} }; }
+  }
+  const fsScan = scan || (() => { try { return comfyui.scanComfyui(); } catch { return null; } })();
+  const errors = [];
+  let workflows = [];
+  if (userDir) {
+    const imported = comfyui.importWorkflowsFromDir(userDir, objectInfo, stored, { recursive: true, source: 'user' });
+    if (!imported.ok) {
+      errors.push(imported.error);
+      // The folder could not be read (a sync hiccup, a moved
+      // folder): keep the last-known user workflows — labels and
+      // approvals intact — marked unavailable with the reason,
+      // instead of wiping the catalogue.
+      for (const s of (stored || [])) {
+        if (!s || !s.id || s.source === 'builtin') continue;
+        workflows.push({ ...s, source: 'user', available: false, availableReason: imported.error });
+      }
+    } else { workflows = imported.workflows; errors.push(...imported.errors); }
+  }
+  const templateFiles = [];
+  for (const t of ((fsScan && fsScan.templateDirs) || [])) {
+    try {
+      const files = fs.readdirSync(t.dir).filter(f => f.toLowerCase().endsWith('.json')).sort().map(f => path.join(t.dir, f));
+      templateFiles.push(...files);
+    } catch {}
+  }
+  if (templateFiles.length) {
+    const builtins = comfyui.importWorkflowsFromFiles(templateFiles, objectInfo, stored, {
+      source: 'builtin',
+      defaultPurpose: 'Built-in template — from ComfyUI Desktop',
+      titleByName: templatesMeta.byName || {},
+    });
+    workflows = workflows.concat(builtins.workflows);
+    errors.push(...builtins.errors);
+  }
+  if (!objectInfo) {
+    for (const w of workflows) {
+      w.available = false;
+      w.availableReason = 'ComfyUI not running — dependencies not checked yet' + (objectInfoError ? ' (' + objectInfoError + ')' : '');
+      if (!w.missing.includes('ComfyUI not running')) w.missing = ['ComfyUI not running — could not check nodes/models'];
+    }
+  }
+  return {
+    workflows, errors, objectInfoError,
+    desktopExe: (fsScan && fsScan.desktopExe) || null,
+    templateDirs: (fsScan && fsScan.templateDirs) || [],
+    templatesMetaOk: !!templatesMeta.ok,
+    scan: fsScan,
+  };
+}
 // Scan the standard ComfyUI locations on this machine, probe the
-// server, and import whatever workflows the scan found. The scan
-// itself is filesystem-only (see comfyui.scanComfyui); the server
-// probe and the import happen here so the renderer gets one
+// server, and import whatever workflows the scan found — the user's
+// own workflows plus ComfyUI Desktop's built-in templates. The
+// scan itself is filesystem-only (see comfyui.scanComfyui); the
+// server probe and the import happen here so the renderer gets one
 // complete answer. The workflows folder is only adopted when the
 // scan actually found one — nothing is invented.
 ipcMain.handle('comfyui:scan', async (_, payload) => {
@@ -1413,61 +1527,42 @@ ipcMain.handle('comfyui:scan', async (_, payload) => {
   let server = { ok: false, url: comfyui.normalizeComfyuiUrl(url), error: 'Not probed' };
   try { server = await comfyui.getComfyuiStatus(url); }
   catch (e) { server = { ok: false, url: comfyui.normalizeComfyuiUrl(url), error: String((e && e.message) || e) }; }
-  let objectInfo = null;
-  let objectInfoError = null;
-  if (server.ok) {
-    try {
-      const r = await comfyui.getObjectInfo(url);
-      if (r.ok) objectInfo = r.data; else objectInfoError = r.error;
-    } catch (e) { objectInfoError = String((e && e.message) || e); }
-  }
   const dir = (scan && scan.workflowsDir) || '';
   let stored = [];
   try { stored = JSON.parse(readSetting('comfyui_workflows', '[]') || '[]'); } catch { stored = []; }
-  let imported = { ok: false, workflows: [], errors: [] };
-  if (dir) {
-    imported = comfyui.importWorkflowsFromDir(dir, objectInfo, stored, { recursive: true });
-    if (!objectInfo) {
-      for (const w of imported.workflows || []) {
-        w.available = false;
-        w.availableReason = 'ComfyUI not running — dependencies not checked yet' + (objectInfoError ? ' (' + objectInfoError + ')' : '');
-        if (!w.missing.includes('ComfyUI not running')) w.missing = ['ComfyUI not running — could not check nodes/models'];
-      }
-    }
-  }
-  return { ok: true, scan, server, dir, workflows: imported.workflows || [], errors: imported.errors || [], objectInfoError };
+  const collected = await collectComfyuiWorkflows(url, dir, stored, scan);
+  return {
+    ok: true, scan, server, dir,
+    workflows: collected.workflows, errors: collected.errors,
+    objectInfoError: collected.objectInfoError,
+    desktopExe: collected.desktopExe,
+    templateDirs: collected.templateDirs,
+    templatesMetaOk: collected.templatesMetaOk,
+  };
 });
 ipcMain.handle('comfyui:defaultWorkflowsDir', async () => {
   try { return { ok: true, dir: comfyui.defaultWorkflowsDir() }; }
   catch (e) { return { ok: false, error: String((e && e.message) || e), dir: '' }; }
 });
-// Read the user's workflow folder and catalogue every *.json in it.
+// Read the user's workflow folder and catalogue every *.json in
+// it, plus ComfyUI Desktop's built-in templates found on disk.
 // The stored catalogue (purpose labels + approvals) is merged back
-// in by id, so a rescan never wipes the user's labels. When ComfyUI
-// is not running, object_info cannot be fetched, so every workflow
-// is marked unavailable with the honest reason — never "checked"
+// in by id, so a rescan never wipes the user's labels. When
+// ComfyUI is not running, object_info cannot be fetched, so
+// UI-format workflows cannot be converted and every workflow is
+// marked unavailable with the honest reason — never "checked"
 // when it was not.
 ipcMain.handle('comfyui:listWorkflows', async (_, payload) => {
   const p = payload || {};
   const dir = p.dir || readSetting('comfyui_workflows_dir', '') || comfyui.defaultWorkflowsDir();
   let stored = [];
   try { stored = JSON.parse(readSetting('comfyui_workflows', '[]') || '[]'); } catch { stored = []; }
-  let objectInfo = null;
-  let objectInfoError = null;
-  try {
-    const r = await comfyui.getObjectInfo(p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL));
-    if (r.ok) objectInfo = r.data; else objectInfoError = r.error;
-  } catch (e) { objectInfoError = String((e && e.message) || e); }
-  const imported = comfyui.importWorkflowsFromDir(dir, objectInfo, stored);
-  if (!imported.ok) return { ...imported, dir, objectInfoError };
-  if (!objectInfo) {
-    for (const w of imported.workflows) {
-      w.available = false;
-      w.availableReason = 'ComfyUI not running — dependencies not checked yet' + (objectInfoError ? ' (' + objectInfoError + ')' : '');
-      if (!w.missing.includes('ComfyUI not running')) w.missing = ['ComfyUI not running — could not check nodes/models'];
-    }
-  }
-  return { ok: true, dir, workflows: imported.workflows, errors: imported.errors, objectInfoError };
+  const collected = await collectComfyuiWorkflows(p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL), dir, stored, null);
+  return {
+    ok: true, dir, workflows: collected.workflows, errors: collected.errors,
+    objectInfoError: collected.objectInfoError, desktopExe: collected.desktopExe,
+    templateDirs: collected.templateDirs, templatesMetaOk: collected.templatesMetaOk,
+  };
 });
 // Read one stored workflow graph back from its file, for submit.
 ipcMain.handle('comfyui:readWorkflow', async (_, payload) => {

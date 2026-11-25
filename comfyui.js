@@ -13,10 +13,14 @@
 // WebSocket client here, by design.
 //
 // No workflow is hardcoded into CodeFox. Workflows are the user's
-// own JSON files (API-format graphs), imported from a folder the
-// user picks. The catalogue stores the parsed definition
-// (name, purpose, inputs, outputs, missing dependencies, approval)
-// — never a sample workflow shipped as if it were the user's.
+// own JSON files (API-format graphs, or the UI-format graphs
+// ComfyUI Desktop saves — converted to API format at import and
+// submit time, see convertUiGraphToApi), imported from a folder the
+// user picks, plus ComfyUI Desktop's built-in templates, which the
+// scan finds on disk and imports labelled as built-ins. The
+// catalogue stores the parsed definition (name, purpose, inputs,
+// outputs, missing dependencies, approval) — never a sample
+// workflow shipped as if it were the user's.
 
 const fs = require('fs');
 const os = require('os');
@@ -91,6 +95,41 @@ async function getHistory(baseUrl, promptId) {
   return comfyuiGet(baseUrl, promptId ? '/history/' + encodeURIComponent(promptId) : '/history', 10000);
 }
 
+// GET /api/workflow_templates — the server's own catalogue of its
+// built-in templates (name → title / description / category).
+// Documented at docs.comfy.org/custom-nodes/workflow_templates.
+// Defensive: the shape has changed before, so anything unexpected
+// returns ok:false and the disk import proceeds with filename
+// names instead of titles. Never throws.
+async function getWorkflowTemplates(baseUrl) {
+  const r = await comfyuiGet(baseUrl, '/api/workflow_templates', 10000);
+  if (!r.ok) return { ok: false, error: r.error, byName: {} };
+  const byName = {};
+  const add = (t) => {
+    if (!t || typeof t !== 'object') return;
+    const name = t.name || t.id;
+    if (!name) return;
+    byName[String(name)] = {
+      title: t.title || String(name),
+      description: t.description || '',
+      category: t.category || '',
+      type: t.type || '',
+    };
+  };
+  const data = r.data;
+  if (Array.isArray(data)) {
+    for (const cat of data) {
+      if (cat && Array.isArray(cat.templates)) {
+        for (const t of cat.templates) add({ ...t, category: t.category || cat.category || cat.title || '' });
+      } else add(cat);
+    }
+  } else if (data && typeof data === 'object') {
+    if (Array.isArray(data.templates)) for (const t of data.templates) add(t);
+    else for (const t of Object.values(data)) add(t);
+  }
+  return { ok: true, byName, count: Object.keys(byName).length };
+}
+
 // Submit a workflow graph for execution. Returns the prompt_id the
 // caller polls /queue + /history for. The graph passed in is the
 // caller's to own — buildSubmitPrompt() clones before substituting.
@@ -156,6 +195,12 @@ async function uploadImage(baseUrl, filePath, opts) {
 // ── Workflow parsing ──────────────────────────────────────────────
 // A ComfyUI API-format workflow is a JSON object keyed by node id:
 //   { "3": { "class_type": "KSampler", "inputs": { "seed": 1, ... } }, ... }
+// UI-format workflows (a LiteGraph { nodes, links } object — what
+// ComfyUI Desktop saves and ships as templates) are converted to
+// API format first, when /object_info is available to read the
+// node definitions from; without it they fail with the reason
+// instead of importing as empty shells. See
+// convertUiGraphToApi.
 // parseWorkflowGraph(graph, objectInfo) catalogues it without
 // running anything:
 //   inputs  — every string/number input, with the well-known ones
@@ -180,6 +225,19 @@ function modelListFromObjectInfo(objectInfo, classType, inputName) {
 }
 
 function parseWorkflowGraph(graph, objectInfo) {
+  // UI-format graphs (what ComfyUI Desktop saves, and what its
+  // built-in templates are) convert first — see
+  // convertUiGraphToApi. Without /object_info the conversion
+  // cannot be done honestly, so the workflow fails with the
+  // reason instead of importing as an empty shell.
+  if (isUiWorkflowGraph(graph)) {
+    if (!objectInfo) {
+      return { ok: false, error: 'UI-format workflow — ComfyUI must be running so the node definitions can be read', inputs: [], outputs: [], missing: ['UI-format workflow'] };
+    }
+    const converted = convertUiGraphToApi(graph, objectInfo);
+    if (!converted.ok) return { ok: false, error: converted.error, inputs: [], outputs: [], missing: [converted.error] };
+    return parseWorkflowGraph(converted.graph, objectInfo);
+  }
   if (!graph || typeof graph !== 'object' || Array.isArray(graph)) {
     return { ok: false, error: 'Not a ComfyUI API-format workflow (expected an object keyed by node id)', inputs: [], outputs: [], missing: ['Not a workflow graph'] };
   }
@@ -193,10 +251,10 @@ function parseWorkflowGraph(graph, objectInfo) {
   // input — so the two prompt fields are labelled by role, not by
   // guesswork from node titles alone. The classic path is a
   // KSampler; Flux / SD3-style graphs run the conditioning through
-  // a BasicGuider (or a SamplerCustom), which carries the same
-  // positive/negative inputs — those count too.
+  // a BasicGuider, a CFGGuider (or a SamplerCustom), which carries
+  // the same positive/negative inputs — those count too.
   const clipRoleByNodeId = {};
-  const samplerClasses = ['KSampler', 'KSamplerAdvanced', 'SamplerCustom', 'SamplerCustomAdvanced', 'BasicGuider'];
+  const samplerClasses = ['KSampler', 'KSamplerAdvanced', 'SamplerCustom', 'SamplerCustomAdvanced', 'BasicGuider', 'CFGGuider'];
   for (const { id, node } of nodes) {
     if (samplerClasses.includes(node.class_type)) {
       for (const role of ['positive', 'negative']) {
@@ -261,6 +319,360 @@ function parseWorkflowGraph(graph, objectInfo) {
       ? (missing.length ? 'Missing: ' + [...new Set(missing)].join('; ') : 'All nodes and models present')
       : 'ComfyUI not running — dependencies not checked yet',
   };
+}
+
+// ── UI-format (LiteGraph) → API-format conversion ─────────────
+// ComfyUI Desktop saves workflows — and ships its built-in
+// templates — as UI-format JSON: { nodes: [...], links: [...],
+// definitions: { subgraphs: [...] } }. The /prompt endpoint only
+// accepts API-format graphs (an object keyed by node id), and the
+// old parser silently turned a UI graph into an empty workflow
+// (0 inputs, 0 outputs, "available"), which is why a library full
+// of real Desktop workflows showed up empty. This converter turns
+// a UI graph into the equivalent API graph so templates and saved
+// workflows generate exactly like API-format ones.
+//
+// It needs /object_info: a node's widget values are stored in
+// `widgets_values` positionally — one entry per widget-typed input
+// in the node's definition order — and only the definition knows
+// which inputs are widgets (text, seed, model name) and which are
+// links (MODEL, CLIP, LATENT). Without it the mapping cannot be
+// done honestly, so conversion fails with a clear error instead of
+// guessing. Node types absent from /object_info fail the same way,
+// except the annotation nodes (Note / MarkdownNote), which are
+// skipped — they are never executed.
+//
+// Subgraphs (the "blueprint" nodes the newer templates are built
+// from, e.g. the Flux and Qwen text-to-image templates) are
+// expanded first: the subgraph's internal nodes are spliced into
+// the flat graph with fresh ids, links from the subgraph's inputs
+// are rewired to whatever feeds the instance (an outer link, the
+// instance's own widget value, or — when neither exists — dropped,
+// so the internal node's own default widget value applies), and
+// links to the subgraph's outputs are rewired to the internal node
+// that produces them. Expansion is deterministic (fresh ids are
+// handed out in traversal order from one counter), so the same file
+// always converts to the same API graph and the catalogue's node
+// ids stay valid. Nested subgraphs expand too, to a depth of 3;
+// deeper than that fails honestly.
+const UI_NOTE_TYPES = ['Note', 'MarkdownNote'];
+const UI_SUBGRAPH_MAX_DEPTH = 3;
+const UI_SUBGRAPH_INPUT_NODE = -10;
+const UI_SUBGRAPH_OUTPUT_NODE = -20;
+
+function isUiWorkflowGraph(graph) {
+  return !!(graph && typeof graph === 'object' && !Array.isArray(graph) && Array.isArray(graph.nodes));
+}
+
+// Normalise a LiteGraph link to { id, originId, originSlot,
+// targetId, targetSlot, type }. Links come in two shapes: arrays
+// [id, originId, originSlot, targetId, targetSlot, type] in the
+// outer graph, and objects { id, origin_id, origin_slot,
+// target_id, target_slot, type } inside subgraph definitions.
+function normalizeUiLink(link) {
+  if (Array.isArray(link)) {
+    return { id: link[0], originId: link[1], originSlot: link[2], targetId: link[3], targetSlot: link[4], type: link[5] };
+  }
+  if (link && typeof link === 'object') {
+    return { id: link.id, originId: link.origin_id, originSlot: link.origin_slot, targetId: link.target_id, targetSlot: link.target_slot, type: link.type };
+  }
+  return null;
+}
+
+// A definition input spec is a widget (a value the user types)
+// when its type is a plain scalar or a combo list; anything else
+// (MODEL, CLIP, LATENT, CONDITIONING, IMAGE, VAE, …) is a link
+// from another node's output.
+function uiDefInputIsWidget(spec) {
+  if (!spec) return false;
+  const kind = spec[0];
+  if (Array.isArray(kind)) return true; // a combo list — a widget
+  return kind === 'STRING' || kind === 'INT' || kind === 'FLOAT' || kind === 'BOOLEAN';
+}
+
+// Widget-typed def inputs, in definition order. widgets_values[i]
+// is the value of the i-th entry of this list.
+function uiWidgetInputs(def) {
+  const out = [];
+  const groups = (def && def.input) || {};
+  for (const group of [groups.required, groups.optional]) {
+    if (!group) continue;
+    for (const [name, spec] of Object.entries(group)) {
+      if (uiDefInputIsWidget(spec)) out.push({ name, spec });
+    }
+  }
+  return out;
+}
+
+// Def inputs in definition order (required, then optional).
+function uiDefInputs(def) {
+  const out = [];
+  const groups = (def && def.input) || {};
+  for (const group of [groups.required, groups.optional]) {
+    if (!group) continue;
+    for (const [name, spec] of Object.entries(group)) out.push({ name, spec });
+  }
+  return out;
+}
+
+// Expand every subgraph instance in a UI graph into flat nodes +
+// links. Returns { ok, nodes, links, error }. `nodes` are cloned
+// UI nodes; links are normalised link objects. An input entry that
+// gets a literal value from the instance's own widget carries
+// __literal on the entry — the converter below prefers it over the
+// node's own widget value.
+function expandUiSubgraphs(uiGraph) {
+  const subgraphs = {};
+  const defs = (uiGraph && uiGraph.definitions && uiGraph.definitions.subgraphs) || [];
+  for (const s of defs) if (s && s.id != null) subgraphs[String(s.id)] = s;
+  const plainNodes = (uiGraph.nodes || []).map(n => ({ ...n }));
+  const plainLinks = (uiGraph.links || []).map(normalizeUiLink).filter(Boolean);
+  if (!Object.keys(subgraphs).length) return { ok: true, nodes: plainNodes, links: plainLinks };
+  let nodes = plainNodes.map(n => ({ ...n, __depth: 0 }));
+  let links = plainLinks;
+  let maxId = 0;
+  for (const n of nodes) if (typeof n.id === 'number' && n.id > maxId) maxId = n.id;
+  // Fresh link ids must not collide with ANY link id in the file —
+  // subgraph definitions have their own link ids (e.g. up to 153
+  // while the outer graph only reaches 131), so count those too.
+  let maxLinkId = 0;
+  for (const l of links) if (typeof l.id === 'number' && l.id > maxLinkId) maxLinkId = l.id;
+  for (const s of Object.values(subgraphs)) {
+    for (const l of (s.links || [])) {
+      const nl = normalizeUiLink(l);
+      if (nl && typeof nl.id === 'number' && nl.id > maxLinkId) maxLinkId = nl.id;
+    }
+  }
+  const linkById = new Map();
+  const rebuildLinkIndex = () => { linkById.clear(); for (const l of links) linkById.set(l.id, l); };
+  rebuildLinkIndex();
+
+  for (;;) {
+    const idx = nodes.findIndex(n => subgraphs[String(n.type)] && (n.__depth || 0) < UI_SUBGRAPH_MAX_DEPTH);
+    if (idx < 0) break;
+    const inst = nodes[idx];
+    const sub = subgraphs[String(inst.type)];
+    const depth = inst.__depth || 0;
+    const idMap = new Map();
+    const newNodes = [];
+    for (const sn of (sub.nodes || [])) {
+      const fresh = ++maxId;
+      idMap.set(sn.id, fresh);
+      const clone = { ...sn, id: fresh, __depth: depth + 1 };
+      if (Array.isArray(sn.inputs)) clone.inputs = sn.inputs.map(i => ({ ...i }));
+      newNodes.push(clone);
+    }
+    const subLinks = (sub.links || []).map(normalizeUiLink).filter(Boolean);
+    const subInputs = sub.inputs || [];
+    // The instance node's widget inputs, in order, so a widget
+    // value set on the instance maps to the right subgraph input.
+    const instWidgetEntries = (inst.inputs || []).filter(i => i && i.widget);
+    const instWidgetValue = (entry) => {
+      const j = instWidgetEntries.indexOf(entry);
+      if (j < 0) return undefined;
+      const vals = Array.isArray(inst.widgets_values) ? inst.widgets_values : [];
+      return j < vals.length ? vals[j] : undefined;
+    };
+    const findInstInput = (subInput, slotIdx) => {
+      const byName = (inst.inputs || []).find(i => i && i.name === subInput.name);
+      if (byName) return byName;
+      return (inst.inputs || [])[slotIdx] || null;
+    };
+    // A link created by expansion gets a fresh id — the target
+    // node's input entry must point at that id, or the converter
+    // below cannot resolve the link. (The original entries still
+    // hold the subgraph's own link ids, which no longer exist.)
+    const setTargetLink = (targetId, targetSlot, linkId) => {
+      const target = newNodes.find(n => n.id === targetId);
+      const tEntry = target && Array.isArray(target.inputs) ? target.inputs[targetSlot] : null;
+      if (tEntry) tEntry.link = linkId;
+    };
+    const newLinks = [];
+    for (const L of subLinks) {
+      const isFromInput = L.originId === UI_SUBGRAPH_INPUT_NODE;
+      const isToOutput = L.targetId === UI_SUBGRAPH_OUTPUT_NODE;
+      if (isFromInput && isToOutput) {
+        // Passthrough: a subgraph input wired straight to an
+        // output. Resolve it at the instance's boundary.
+        const subInput = subInputs[L.originSlot] || {};
+        const entry = findInstInput(subInput, L.originSlot);
+        const outSlot = L.targetSlot;
+        if (entry && entry.link != null && linkById.has(entry.link)) {
+          const ol = linkById.get(entry.link);
+          for (const outer of links) {
+            if (outer.originId === inst.id && outer.originSlot === outSlot) {
+              outer.originId = ol.originId; outer.originSlot = ol.originSlot;
+            }
+          }
+        } else if (entry && instWidgetValue(entry) !== undefined) {
+          const lit = instWidgetValue(entry);
+          for (let k = links.length - 1; k >= 0; k--) {
+            const outer = links[k];
+            if (outer.originId === inst.id && outer.originSlot === outSlot) {
+              const target = nodes.find(n => n.id === outer.targetId);
+              const tEntry = target && Array.isArray(target.inputs) ? target.inputs[outer.targetSlot] : null;
+              if (target && tEntry) tEntry.__literal = lit;
+              links.splice(k, 1);
+            }
+          }
+        } else {
+          for (let k = links.length - 1; k >= 0; k--) {
+            const outer = links[k];
+            if (outer.originId === inst.id && outer.originSlot === outSlot) {
+              const target = nodes.find(n => n.id === outer.targetId);
+              const tEntry = target && Array.isArray(target.inputs) ? target.inputs[outer.targetSlot] : null;
+              if (tEntry) tEntry.link = null;
+              links.splice(k, 1);
+            }
+          }
+        }
+        continue;
+      }
+      if (isFromInput) {
+        const subInput = subInputs[L.originSlot] || {};
+        const entry = findInstInput(subInput, L.originSlot);
+        if (entry && entry.link != null && linkById.has(entry.link)) {
+          const ol = linkById.get(entry.link);
+          const linkId = ++maxLinkId;
+          newLinks.push({ id: linkId, originId: ol.originId, originSlot: ol.originSlot, targetId: idMap.get(L.targetId), targetSlot: L.targetSlot, type: L.type });
+          setTargetLink(idMap.get(L.targetId), L.targetSlot, linkId);
+        } else if (entry && instWidgetValue(entry) !== undefined) {
+          const target = newNodes.find(n => n.id === idMap.get(L.targetId));
+          const tEntry = target && Array.isArray(target.inputs) ? target.inputs[L.targetSlot] : null;
+          if (tEntry) tEntry.__literal = instWidgetValue(entry);
+        } else {
+          // No outer value: drop the link — the target keeps its
+          // own default widget value. Clear the entry's link so
+          // the converter does not chase a link id that no
+          // longer exists.
+          const target = newNodes.find(n => n.id === idMap.get(L.targetId));
+          const tEntry = target && Array.isArray(target.inputs) ? target.inputs[L.targetSlot] : null;
+          if (tEntry) tEntry.link = null;
+        }
+        // No outer value: drop the link — the target keeps its
+        // own default widget value.
+        continue;
+      }
+      if (isToOutput) {
+        const outSlot = L.targetSlot;
+        const srcId = idMap.get(L.originId);
+        if (srcId === undefined) continue;
+        for (const outer of links) {
+          if (outer.originId === inst.id && outer.originSlot === outSlot) {
+            outer.originId = srcId; outer.originSlot = L.originSlot;
+          }
+        }
+        continue;
+      }
+      if (!idMap.has(L.originId) || !idMap.has(L.targetId)) continue;
+      const linkId = ++maxLinkId;
+      newLinks.push({ id: linkId, originId: idMap.get(L.originId), originSlot: L.originSlot, targetId: idMap.get(L.targetId), targetSlot: L.targetSlot, type: L.type });
+      setTargetLink(idMap.get(L.targetId), L.targetSlot, linkId);
+    }
+    // The instance's own input links are consumed by the rewiring
+    // above; any outer link still pointing at the instance is
+    // dangling (an output no internal node feeds) and goes too.
+    links = links.filter(l => l.targetId !== inst.id && l.originId !== inst.id);
+    nodes.splice(idx, 1, ...newNodes);
+    links.push(...newLinks);
+    rebuildLinkIndex();
+  }
+  const stuck = nodes.find(n => subgraphs[String(n.type)]);
+  if (stuck) {
+    return { ok: false, error: 'Subgraph nesting deeper than ' + UI_SUBGRAPH_MAX_DEPTH + ' levels is not supported (' + stuck.type + ')' };
+  }
+  for (const n of nodes) delete n.__depth;
+  return { ok: true, nodes, links };
+}
+
+// Convert one flat UI node to its API-format inputs.
+function convertUiNode(node, objectInfo, resolveOrigin) {
+  const def = objectInfo[node.type];
+  if (!def) {
+    if (UI_NOTE_TYPES.includes(node.type)) return { ok: true, skip: true };
+    return { ok: false, error: 'Node type not installed: ' + node.type + ' (node ' + node.id + ')' };
+  }
+  const inputs = {};
+  const widgets = uiWidgetInputs(def);
+  const values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+  const widgetValueByName = {};
+  widgets.forEach((w, j) => { if (j < values.length) widgetValueByName[w.name] = values[j]; });
+  const nodeInputs = Array.isArray(node.inputs) ? node.inputs : [];
+  const entryByName = {};
+  for (const e of nodeInputs) if (e && e.name) entryByName[e.name] = e;
+  for (const { name, spec } of uiDefInputs(def)) {
+    const entry = entryByName[name];
+    if (entry && entry.__literal !== undefined) { inputs[name] = entry.__literal; continue; }
+    if (entry && entry.link != null) {
+      const resolved = resolveOrigin(entry.link);
+      if (resolved) { inputs[name] = [String(resolved.nodeId), resolved.slot]; continue; }
+      // The link dangled (a dropped subgraph link, or a reroute
+      // to nowhere): fall through to the widget / default.
+    }
+    if (uiDefInputIsWidget(spec)) {
+      if (name in widgetValueByName) inputs[name] = widgetValueByName[name];
+      else if (spec[1] && spec[1].default !== undefined) inputs[name] = spec[1].default;
+      continue;
+    }
+    // A link-typed input with no link: leave it out — the server
+    // reports the missing input if it matters.
+  }
+  return { ok: true, inputs };
+}
+
+// Convert a UI-format workflow graph to its API-format equivalent.
+// Returns { ok, graph, error }.
+function convertUiGraphToApi(uiGraph, objectInfo) {
+  if (!isUiWorkflowGraph(uiGraph)) return { ok: false, error: 'Not a UI-format workflow (expected a nodes array)' };
+  if (!objectInfo || typeof objectInfo !== 'object') {
+    return { ok: false, error: 'UI-format workflow — ComfyUI must be running so the node definitions can be read' };
+  }
+  const expanded = expandUiSubgraphs(uiGraph);
+  if (!expanded.ok) return expanded;
+  const nodes = expanded.nodes;
+  const links = expanded.links;
+  const byId = new Map();
+  for (const n of nodes) byId.set(n.id, n);
+  const linkMap = new Map();
+  for (const l of links) linkMap.set(l.id, l);
+  // Bypassed / muted nodes (mode 2 or 4) have no honest API
+  // equivalent — the graph would silently do something else.
+  // Fail with the reason instead of guessing.
+  for (const n of nodes) {
+    if (n && (n.mode === 2 || n.mode === 4)) {
+      return { ok: false, error: 'Bypassed node "' + (n.type || '?') + '" (id ' + n.id + ') is not supported — un-bypass it in ComfyUI Desktop and save again' };
+    }
+  }
+  const resolveOrigin = (linkId) => {
+    let cur = linkMap.get(linkId);
+    let guard = 0;
+    while (cur) {
+      if (guard++ > 20) return null;
+      const origin = byId.get(cur.originId);
+      if (!origin) return null;
+      if (origin.type === 'Reroute') {
+        const inp = Array.isArray(origin.inputs) ? origin.inputs[0] : null;
+        if (!inp || inp.link == null) return null;
+        cur = linkMap.get(inp.link);
+        continue;
+      }
+      return { nodeId: cur.originId, slot: cur.originSlot };
+    }
+    return null;
+  };
+  const api = {};
+  for (const n of nodes) {
+    if (!n || !n.type) continue;
+    if (n.type === 'Reroute') continue;
+    if (UI_NOTE_TYPES.includes(n.type)) continue;
+    const converted = convertUiNode(n, objectInfo, resolveOrigin);
+    if (!converted.ok) return { ok: false, error: converted.error };
+    if (converted.skip) continue;
+    api[String(n.id)] = { class_type: n.type, inputs: converted.inputs };
+    if (n._meta && n._meta.title) api[String(n.id)]._meta = { title: n._meta.title };
+  }
+  if (!Object.keys(api).length) return { ok: false, error: 'No executable nodes found in this workflow' };
+  return { ok: true, graph: api };
 }
 
 // Build the prompt graph to submit: deep-clone the stored workflow
@@ -447,9 +859,15 @@ function listFilesRecursive(dir, exts, maxDepth, maxFiles) {
   return out;
 }
 
-// Count model files per category under a models/ folder.
+// Count model files per category under a models/ folder. The
+// categories are the ones ComfyUI actually uses: modern models
+// (Flux, Qwen, LTX) live in diffusion_models / text_encoders, not
+// checkpoints — an earlier list that only counted checkpoints,
+// loras, vae, clip, unet, controlnet, embeddings and
+// upscale_models reported "vae 1" for an install running those
+// models, which looked wrong because it was.
 function countModels(modelsDir) {
-  const categories = ['checkpoints', 'loras', 'vae', 'clip', 'unet', 'controlnet', 'embeddings', 'upscale_models'];
+  const categories = ['checkpoints', 'diffusion_models', 'text_encoders', 'clip', 'clip_vision', 'vae', 'loras', 'unet', 'controlnet', 'embeddings', 'upscale_models'];
   const counts = {};
   for (const cat of categories) {
     counts[cat] = listFilesRecursive(path.join(modelsDir, cat), MODEL_FILE_EXTS, 4, 10000).length;
@@ -483,42 +901,205 @@ const SCAN_WORKFLOW_RELS = ['user/default/workflows', 'workflows', 'ComfyUI/user
 const SCAN_MODEL_RELS = ['models', 'user/default/models', 'ComfyUI/models'];
 const SCAN_CUSTOM_NODES_RELS = ['custom_nodes', 'ComfyUI/custom_nodes'];
 
+// ComfyUI Desktop's own config: %APPDATA%\ComfyUI\config.json
+// carries the user-chosen base directory as `basePath`, and
+// extra_models_config.yaml carries `base_path:` for legacy installs
+// (Desktop 1.x also writes per-install model paths under
+// %APPDATA%\Comfy Desktop\instance-model-paths\, which is not a
+// single path — not read here). Best-effort: a missing or
+// unreadable config just means no extra root. The YAML read is
+// deliberately minimal — one top-level `base_path:` line —
+// because CodeFox has no YAML dependency.
+function readDesktopConfig(overrides) {
+  const o = overrides || {};
+  const home = o.home || os.homedir();
+  const appData = o.appData || process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const out = { basePath: null, modelPaths: null, configFile: null, extraModelsFile: null };
+  const cfgFile = path.join(appData, 'ComfyUI', 'config.json');
+  try {
+    if (fs.existsSync(cfgFile)) {
+      out.configFile = cfgFile;
+      const data = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+      if (data && typeof data.basePath === 'string' && data.basePath.trim()) out.basePath = data.basePath.trim();
+    }
+  } catch {}
+  const yamlFile = path.join(appData, 'ComfyUI', 'extra_models_config.yaml');
+  try {
+    if (fs.existsSync(yamlFile)) {
+      out.extraModelsFile = yamlFile;
+      const text = fs.readFileSync(yamlFile, 'utf8');
+      const m = text.match(/^\s*base_path\s*:\s*["']?([^"'\r\n#]+?)["']?\s*$/m);
+      if (m && m[1].trim()) out.modelPaths = m[1].trim();
+    }
+  } catch {}
+  return out;
+}
+
+// The ComfyUI Desktop executable: *.exe files at the top level of
+// a program-folder install. Never guessed — only a file that
+// actually exists is returned, preferring one whose name contains
+// "ComfyUI".
+function findDesktopExe(dir) {
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.exe')).sort(); } catch { return null; }
+  if (!files.length) return null;
+  const preferred = files.find(f => /comfyui/i.test(f)) || files[0];
+  return path.join(dir, preferred);
+}
+
+// Count *.json files in a folder (top level only). 0 when the
+// folder does not exist.
+function countJsonFiles(dir) {
+  try { return fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).length; } catch { return 0; }
+}
+
+// Where ComfyUI Desktop's built-in/template workflows live on disk
+// (verified against the Desktop layout, see README):
+//   - <install>/web_custom_versions/<frontend-pkg>/<ver>/templates/*.json
+//     (the workflow-templates package, served by the frontend)
+//   - %LOCALAPPDATA%\uv\cache\archive-v0\<hash>\comfyui_workflow_templates_json\templates/*.json
+//     (the same package in uv's cache — the installer's copy)
+//   - <install>/custom_nodes/<pack>/example_workflows/*.json
+//     (also `workflows`, `workflow`, `example`, `examples` — a
+//     single directory level only, per ComfyUI's own rule)
+// Each finder returns [{ dir, count, kind }]. Only files that
+// exist are listed; a missing location is simply absent, never
+// invented.
+function findFrontendTemplateDirs(base) {
+  const out = [];
+  const wcv = path.join(base, 'web_custom_versions');
+  let pkgs = [];
+  try { pkgs = fs.readdirSync(wcv, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { return out; }
+  for (const pkg of pkgs) {
+    let vers = [];
+    try { vers = fs.readdirSync(path.join(wcv, pkg), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { continue; }
+    for (const v of vers) {
+      const dir = path.join(wcv, pkg, v, 'templates');
+      const count = countJsonFiles(dir);
+      if (count) out.push({ dir, count, kind: 'frontend' });
+    }
+  }
+  return out;
+}
+
+function findCustomNodeExampleDirs(base) {
+  const out = [];
+  const cn = path.join(base, 'custom_nodes');
+  let packs = [];
+  try { packs = fs.readdirSync(cn, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { return out; }
+  for (const pack of packs) {
+    for (const rel of ['example_workflows', 'workflows', 'workflow', 'example', 'examples']) {
+      const dir = path.join(cn, pack, rel);
+      const count = countJsonFiles(dir);
+      if (count) out.push({ dir, count, kind: 'custom-node' });
+    }
+  }
+  return out;
+}
+
+function findUvCacheTemplateDirs(localAppData) {
+  const out = [];
+  const cacheRoot = path.join(localAppData, 'uv', 'cache');
+  // The package is an extracted archive/wheel: check the cache
+  // subtrees that hold extracted packages directly (one level of
+  // hash folders), then a bounded generic walk as a fallback.
+  for (const sub of ['archive-v0', 'wheels-v5']) {
+    let hashes = [];
+    try { hashes = fs.readdirSync(path.join(cacheRoot, sub), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { continue; }
+    for (const h of hashes) {
+      const dir = path.join(cacheRoot, sub, h, 'comfyui_workflow_templates_json', 'templates');
+      const count = countJsonFiles(dir);
+      if (count) out.push({ dir, count, kind: 'uv-cache' });
+      if (out.length >= 5) return out;
+    }
+  }
+  if (out.length) return out;
+  let visited = 0;
+  const walk = (d, depth) => {
+    if (out.length >= 5 || visited > 500 || depth > 6) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      visited++;
+      const full = path.join(d, e.name);
+      if (e.name === 'comfyui_workflow_templates_json') {
+        const dir = path.join(full, 'templates');
+        const count = countJsonFiles(dir);
+        if (count) out.push({ dir, count, kind: 'uv-cache' });
+        continue;
+      }
+      if (depth < 6) walk(full, depth + 1);
+      if (out.length >= 5 || visited > 500) return;
+    }
+  };
+  try { if (fs.existsSync(cacheRoot) && fs.statSync(cacheRoot).isDirectory()) walk(cacheRoot, 0); } catch {}
+  return out;
+}
+
 // Scan the standard Windows locations for a ComfyUI install.
 // Filesystem only, synchronous, fast and bounded: only the listed
 // candidate roots are checked, no whole-drive walk. Returns
-// { ok, roots, workflowsDir } where each root reports exactly
-// what was found there (workflows folder + .json count, model
-// counts per category, custom_nodes presence) or found: false.
+// { ok, roots, workflowsDir, desktopExe, templateDirs,
+//   desktopConfig } where each root reports exactly what was found
+// there (workflows folder + .json count, model counts per
+// category + which models folder was checked, custom_nodes
+// presence, the Desktop exe when the root is a program folder,
+// and any built-in template folders) or found: false.
 // workflowsDir is the first workflows folder with files in it,
 // falling back to the first workflows folder that exists at all.
+// desktopExe is the first ComfyUI Desktop executable actually
+// found on disk, or null. templateDirs lists every built-in
+// template folder found (frontend package, uv cache, custom-node
+// examples), each with its .json count — only folders that exist.
+// desktopConfig is what Desktop's own config said (basePath /
+// base_path), or nulls when there is no config to read.
 function scanComfyui(overrides) {
+  const o = overrides || {};
+  const home = o.home || os.homedir();
+  const localAppData = o.localAppData || process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
   const roots = comfyuiCandidateRoots(overrides);
+  roots.push({ label: 'ComfyUI Desktop shared models', path: path.join(localAppData, 'Comfy-Desktop', 'ComfyUI-Shared') });
+  roots.push({ label: 'ComfyUI Desktop installs', path: path.join(localAppData, 'Comfy-Desktop', 'ComfyUI-Installs'), programFolder: 'all' });
+  const desktopConfig = readDesktopConfig(overrides);
+  if (desktopConfig.basePath) roots.unshift({ label: 'ComfyUI Desktop user data (from config.json)', path: desktopConfig.basePath });
+  if (desktopConfig.modelPaths) roots.push({ label: 'ComfyUI models (from extra_models_config.yaml)', path: desktopConfig.modelPaths });
   const results = [];
+  const seenBases = new Set();
   let firstWithFiles = null;
   let firstExisting = null;
+  let desktopExe = null;
+  const templateDirs = [];
+  const noteTemplateDir = (t) => {
+    if (!templateDirs.some(x => x.dir === t.dir)) templateDirs.push(t);
+  };
   for (const root of roots) {
     let bases = [root.path];
     if (root.programFolder) {
       let programsExists = false;
       try { programsExists = fs.existsSync(root.path) && fs.statSync(root.path).isDirectory(); } catch {}
       if (!programsExists) {
-        results.push({ label: root.label, path: root.path, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] });
+        results.push({ label: root.label, path: root.path, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [], exe: null, templates: null });
         continue;
       }
       const found = [];
       try {
         for (const e of fs.readdirSync(root.path, { withFileTypes: true })) {
-          if (e.isDirectory() && /comfyui/i.test(e.name)) found.push(path.join(root.path, e.name));
+          if (!e.isDirectory()) continue;
+          if (root.programFolder === 'all' || /comfyui/i.test(e.name)) found.push(path.join(root.path, e.name));
         }
       } catch {}
       if (!found.length) {
-        results.push({ label: root.label, path: root.path, found: true, note: 'No folder named *ComfyUI* inside', workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] });
+        results.push({ label: root.label, path: root.path, found: true, note: root.programFolder === 'all' ? 'No installs inside' : 'No folder named *ComfyUI* inside', workflows: null, models: null, modelsDir: null, customNodes: false, checked: [], exe: null, templates: null });
         continue;
       }
       bases = found;
     }
     for (const base of bases) {
-      const entry = { label: root.label, path: base, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [] };
+      const baseKey = base.toLowerCase();
+      if (seenBases.has(baseKey)) continue; // same folder via two roots (e.g. config.json == Documents) — report once
+      seenBases.add(baseKey);
+      const entry = { label: root.label, path: base, found: false, workflows: null, models: null, modelsDir: null, customNodes: false, checked: [], exe: null, templates: null };
       let baseExists = false;
       try { baseExists = fs.existsSync(base) && fs.statSync(base).isDirectory(); } catch {}
       if (!baseExists) { results.push(entry); continue; }
@@ -550,45 +1131,60 @@ function scanComfyui(overrides) {
         const dir = path.join(base, rel);
         try { if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) { entry.customNodes = true; break; } } catch {}
       }
+      if (root.programFolder) {
+        const exe = findDesktopExe(base);
+        if (exe) { entry.exe = exe; if (!desktopExe) desktopExe = exe; }
+      }
+      const tpl = [...findFrontendTemplateDirs(base), ...findCustomNodeExampleDirs(base)];
+      if (tpl.length) {
+        entry.templates = { count: tpl.reduce((a, t) => a + t.count, 0), dirs: tpl.map(t => t.dir) };
+        for (const t of tpl) noteTemplateDir(t);
+      }
       results.push(entry);
     }
   }
+  for (const t of findUvCacheTemplateDirs(localAppData)) noteTemplateDir(t);
   return {
     ok: true,
     roots: results,
     workflowsDir: firstWithFiles || firstExisting || null,
     checkedRoots: results.length,
     foundRoots: results.filter(r => r.found).length,
+    desktopExe,
+    templateDirs,
+    desktopConfig,
   };
 }
 
-// Read every *.json in a folder as a workflow graph and catalogue
+// Read the given *.json files as workflow graphs and catalogue
 // them. `stored` is the previously saved catalogue (by id) so a
-// user's purpose label and approval survive a rescan. With
-// opts.recursive, subfolders are walked too (bounded); without it
-// only the top level is read, as before. Returns
-// { ok, workflows, errors }.
-function importWorkflowsFromDir(dir, objectInfo, stored, opts) {
-  if (!dir || !fs.existsSync(dir)) return { ok: false, error: 'Workflows folder not found: ' + (dir || '(none set)'), workflows: [] };
+// user's purpose label and approval survive a rescan.
+// opts.source is 'user' (workflows the user saved) or 'builtin'
+// (ComfyUI Desktop's built-in templates); opts.titleByName maps a
+// filename stem to { title, description } from the server's
+// /api/workflow_templates catalogue, and opts.defaultPurpose is
+// the purpose label for entries with no stored label. Returns
+// { ok, workflows, errors }. A file that is not valid JSON, is
+// not a workflow graph, or (for UI-format graphs) cannot be
+// converted without /object_info is reported in `errors` with its
+// filename and reason — never a silent zero.
+function importWorkflowsFromFiles(files, objectInfo, stored, opts) {
   const byId = {};
   for (const s of (stored || [])) if (s && s.id) byId[s.id] = s;
+  const source = (opts && opts.source) || 'user';
+  const defaultPurpose = (opts && opts.defaultPurpose) || 'Unlabelled — set a purpose';
+  const titleByName = (opts && opts.titleByName) || {};
   const workflows = [];
   const errors = [];
-  let files = [];
-  if (opts && opts.recursive) {
-    files = listFilesRecursive(dir, ['.json'], 5, 500);
-  } else {
-    try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).sort().map(f => path.join(dir, f)); } catch (e) {
-      return { ok: false, error: 'Could not read workflows folder: ' + e.message, workflows: [] };
-    }
-  }
   const seenIds = new Set();
-  for (const full of files) {
+  for (const full of (files || [])) {
     const file = path.basename(full);
-    const name = file.replace(/\.json$/i, '');
-    let id = slugifyWorkflowId(name);
+    const stem = file.replace(/\.json$/i, '');
+    const meta = titleByName[stem] || titleByName[file] || null;
+    const name = (source === 'builtin' && meta && meta.title) ? meta.title : stem;
+    let id = (source === 'builtin' ? 'tpl-' : '') + slugifyWorkflowId(name);
     if (seenIds.has(id)) {
-      // Two subfolders with the same filename: keep both, labelled
+      // Two folders with the same filename: keep both, labelled
       // by their parent folder. Stored labels keyed by the plain id
       // do not carry over to the suffixed copy.
       id = id + '-' + slugifyWorkflowId(path.basename(path.dirname(full)));
@@ -605,8 +1201,9 @@ function importWorkflowsFromDir(dir, objectInfo, stored, opts) {
     if (!parsed.ok) { errors.push(file + ': ' + parsed.error); continue; }
     const prev = byId[id];
     workflows.push({
-      id, name, file: full,
-      purpose: (prev && prev.purpose) || 'Unlabelled — set a purpose',
+      id, name, file: full, source,
+      description: (source === 'builtin' && meta && meta.description) ? meta.description : '',
+      purpose: (prev && prev.purpose) || defaultPurpose,
       inputs: parsed.inputs,
       outputs: parsed.outputs,
       missing: parsed.missing,
@@ -622,6 +1219,25 @@ function importWorkflowsFromDir(dir, objectInfo, stored, opts) {
   return { ok: true, workflows, errors };
 }
 
+// Read every *.json in a folder as a workflow graph and catalogue
+// them. `stored` is the previously saved catalogue (by id) so a
+// user's purpose label and approval survive a rescan. With
+// opts.recursive, subfolders are walked too (bounded); without it
+// only the top level is read, as before. Returns
+// { ok, workflows, errors }.
+function importWorkflowsFromDir(dir, objectInfo, stored, opts) {
+  if (!dir || !fs.existsSync(dir)) return { ok: false, error: 'Workflows folder not found: ' + (dir || '(none set)'), workflows: [] };
+  let files = [];
+  if (opts && opts.recursive) {
+    files = listFilesRecursive(dir, ['.json'], 5, 500);
+  } else {
+    try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).sort().map(f => path.join(dir, f)); } catch (e) {
+      return { ok: false, error: 'Could not read workflows folder: ' + e.message, workflows: [] };
+    }
+  }
+  return importWorkflowsFromFiles(files, objectInfo, stored, opts);
+}
+
 module.exports = {
   DEFAULT_COMFYUI_URL,
   normalizeComfyuiUrl,
@@ -629,6 +1245,7 @@ module.exports = {
   fetchWithTimeout,
   getComfyuiStatus,
   getObjectInfo,
+  getWorkflowTemplates,
   getQueue,
   getHistory,
   submitPrompt,
@@ -643,4 +1260,12 @@ module.exports = {
   scanComfyui,
   defaultWorkflowsDir,
   importWorkflowsFromDir,
+  importWorkflowsFromFiles,
+  isUiWorkflowGraph,
+  convertUiGraphToApi,
+  readDesktopConfig,
+  findDesktopExe,
+  findFrontendTemplateDirs,
+  findCustomNodeExampleDirs,
+  findUvCacheTemplateDirs,
 };

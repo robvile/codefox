@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.7.0.
+// 2. package.json version is 0.7.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.7.0', pkg.version === '0.7.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.7.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.0 — Local'));
+check('package.json version is 0.7.1', pkg.version === '0.7.1', 'got ' + pkg.version);
+check('sidebar footer shows 0.7.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.1 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1131,6 +1131,281 @@ check('README documents the scan and the simple generation form',
   readme.includes('Scan for ComfyUI') && readme.includes('simple form')
   && readme.includes('Flux') && readme.includes('Prompt 1 / Prompt 2'));
 
+// 23. v0.7.1 — "the workflows you actually have": built-in
+// templates found on disk, UI-format (LiteGraph) workflows
+// converted to API format (including subgraph expansion), import
+// failures surfaced instead of silent zeros, the Desktop exe
+// recorded for the native Open button, and model counts that
+// include diffusion_models / text_encoders.
+const uiStr = (d) => ['STRING', { multiline: true, default: d || '' }];
+const uiCombo = (list, d) => [list, { default: d }];
+const uiInt = (d) => ['INT', { default: d, min: 0, max: 100000 }];
+const uiFloat = (d) => ['FLOAT', { default: d }];
+const uiObjectInfo = {
+  UNETLoader: { input: { required: { unet_name: uiCombo(['flux.safetensors'], 'flux.safetensors'), weight_dtype: uiCombo(['default', 'fp8_e4m3fn'], 'default') } } },
+  DualCLIPLoader: { input: { required: { clip_name1: uiCombo(['clip_l.safetensors']), clip_name2: uiCombo(['t5xxl.safetensors']), type: uiCombo(['flux', 'sd3'], 'flux'), device: uiCombo(['default', 'cpu'], 'default') } } },
+  CLIPLoader: { input: { required: { clip_name: uiCombo(['t5.safetensors']), type: uiCombo(['chroma'], 'chroma'), device: uiCombo(['default', 'cpu'], 'default') } } },
+  CLIPTextEncode: { input: { required: { text: uiStr(), clip: ['CLIP', {}] } } },
+  EmptySD3LatentImage: { input: { required: { width: uiInt(1024), height: uiInt(1024), batch_size: uiInt(1) } } },
+  EmptyLatentImage: { input: { required: { width: uiInt(512), height: uiInt(512), batch_size: uiInt(1) } } },
+  KSampler: { input: { required: { model: ['MODEL', {}], positive: ['CONDITIONING', {}], negative: ['CONDITIONING', {}], latent_image: ['LATENT', {}], seed: uiInt(0), control_after_generate: uiCombo(['fixed', 'randomize'], 'randomize'), steps: uiInt(20), cfg: uiFloat(1), sampler_name: uiCombo(['euler'], 'euler'), scheduler: uiCombo(['simple'], 'simple'), denoise: uiFloat(1) } } },
+  VAELoader: { input: { required: { vae_name: uiCombo(['ae.safetensors'], 'ae.safetensors') } } },
+  VAEDecode: { input: { required: { samples: ['LATENT', {}], vae: ['VAE', {}] } } },
+  SaveImage: { input: { required: { images: ['IMAGE', {}], filename_prefix: uiStr('ComfyUI') } } },
+  CheckpointLoaderSimple: { input: { required: { ckpt_name: uiCombo(['sd_xl.safetensors', 'sd15.safetensors'], 'sd_xl.safetensors') } } },
+  CFGGuider: { input: { required: { model: ['MODEL', {}], positive: ['CONDITIONING', {}], negative: ['CONDITIONING', {}], cfg: uiFloat(1) } } },
+};
+// A plain UI-format (LiteGraph) workflow: widget values in
+// widgets_values, links in the links array, plus an annotation
+// node that must be skipped, not executed.
+const uiPlainWorkflow = {
+  id: 'test-plain',
+  nodes: [
+    { id: 1, type: 'UNETLoader', inputs: [], widgets_values: ['flux.safetensors', 'default'] },
+    { id: 2, type: 'DualCLIPLoader', inputs: [], widgets_values: ['clip_l.safetensors', 't5xxl.safetensors', 'flux', 'default'] },
+    { id: 3, type: 'CLIPTextEncode', inputs: [{ name: 'clip', type: 'CLIP', link: 1 }], widgets_values: ['a cat'] },
+    { id: 4, type: 'CLIPTextEncode', inputs: [{ name: 'clip', type: 'CLIP', link: 2 }], widgets_values: ['blurry'] },
+    { id: 5, type: 'EmptySD3LatentImage', inputs: [], widgets_values: [1024, 1024, 1] },
+    { id: 6, type: 'KSampler', inputs: [
+      { name: 'model', type: 'MODEL', link: 3 },
+      { name: 'positive', type: 'CONDITIONING', link: 4 },
+      { name: 'negative', type: 'CONDITIONING', link: 5 },
+      { name: 'latent_image', type: 'LATENT', link: 6 },
+    ], widgets_values: [42, 'randomize', 20, 1, 'euler', 'simple', 1] },
+    { id: 7, type: 'VAELoader', inputs: [], widgets_values: ['ae.safetensors'] },
+    { id: 8, type: 'VAEDecode', inputs: [
+      { name: 'samples', type: 'LATENT', link: 7 },
+      { name: 'vae', type: 'VAE', link: 8 },
+    ], widgets_values: [] },
+    { id: 9, type: 'SaveImage', inputs: [{ name: 'images', type: 'IMAGE', link: 9 }], widgets_values: ['test'] },
+    { id: 10, type: 'MarkdownNote', inputs: [], widgets_values: ['a note, not a node'] },
+  ],
+  links: [
+    [1, 2, 0, 3, 0, 'CLIP'], [2, 2, 0, 4, 0, 'CLIP'],
+    [3, 1, 0, 6, 0, 'MODEL'], [4, 3, 0, 6, 1, 'CONDITIONING'],
+    [5, 4, 0, 6, 2, 'CONDITIONING'], [6, 5, 0, 6, 3, 'LATENT'],
+    [7, 6, 0, 8, 0, 'LATENT'], [8, 7, 0, 8, 1, 'VAE'],
+    [9, 8, 0, 9, 0, 'IMAGE'],
+  ],
+};
+const convPlain = comfy.convertUiGraphToApi(uiPlainWorkflow, uiObjectInfo);
+check('UI-format workflow converts to API format (links + widgets)',
+  convPlain.ok === true && convPlain.graph['6'].inputs.model[0] === '1'
+  && convPlain.graph['6'].inputs.positive[0] === '3' && convPlain.graph['6'].inputs.negative[0] === '4'
+  && convPlain.graph['6'].inputs.seed === 42 && convPlain.graph['3'].inputs.text === 'a cat'
+  && convPlain.graph['1'].inputs.unet_name === 'flux.safetensors'
+  && !Object.values(convPlain.graph).some(n => n.class_type === 'MarkdownNote'));
+const parsedPlain = comfy.parseWorkflowGraph(uiPlainWorkflow, uiObjectInfo);
+check('UI-format workflow parses with prompt roles (no empty shell)',
+  parsedPlain.ok === true && parsedPlain.inputs.some(i => i.role === 'positive' && i.value === 'a cat')
+  && parsedPlain.inputs.some(i => i.role === 'negative' && i.value === 'blurry')
+  && parsedPlain.outputs.length === 1 && parsedPlain.available === true);
+const builtPlain = comfy.buildSubmitPrompt(convPlain.graph, { positive: 'a dog' });
+check('submit-payload builder substitutes the prompt in a converted UI workflow',
+  builtPlain.prompt['3'].inputs.text === 'a dog' && builtPlain.applied.includes('positive'));
+check('UI conversion is deterministic (same file, same API graph)',
+  JSON.stringify(comfy.convertUiGraphToApi(uiPlainWorkflow, uiObjectInfo).graph) === JSON.stringify(convPlain.graph));
+// A subgraph ("blueprint") workflow, like the Flux / Qwen
+// templates: one instance node whose internals live in
+// definitions.subgraphs, with the prompt/width fed through the
+// subgraph's inputs and the image out through its output.
+const UI_SUB_ID = 'aaaaaaaa-1111-2222-3333-444444444444';
+const uiSubgraphWorkflow = {
+  id: 'test-sub',
+  nodes: [
+    { id: 10, type: UI_SUB_ID, inputs: [
+      { name: 'text', type: 'STRING', widget: { name: 'text' }, link: null },
+      { name: 'width', type: 'INT', widget: { name: 'width' }, link: null },
+    ], widgets_values: [] },
+    { id: 11, type: 'SaveImage', inputs: [{ name: 'images', type: 'IMAGE', link: 20 }], widgets_values: ['sub'] },
+  ],
+  links: [[20, 10, 0, 11, 0, 'IMAGE']],
+  definitions: { subgraphs: [{
+    id: UI_SUB_ID, name: 'Mini T2I',
+    nodes: [
+      { id: 1, type: 'CheckpointLoaderSimple', inputs: [], widgets_values: ['sd15.safetensors'] },
+      { id: 2, type: 'CLIPTextEncode', inputs: [
+        { name: 'clip', type: 'CLIP', link: 1 },
+        { name: 'text', type: 'STRING', widget: { name: 'text' }, link: 2 },
+      ], widgets_values: ['default prompt'] },
+      { id: 3, type: 'EmptyLatentImage', inputs: [
+        { name: 'width', type: 'INT', widget: { name: 'width' }, link: 3 },
+        { name: 'height', type: 'INT', widget: { name: 'height' }, link: null },
+      ], widgets_values: [512, 512, 1] },
+      { id: 4, type: 'KSampler', inputs: [
+        { name: 'model', type: 'MODEL', link: 4 },
+        { name: 'positive', type: 'CONDITIONING', link: 5 },
+        { name: 'negative', type: 'CONDITIONING', link: 7 },
+        { name: 'latent_image', type: 'LATENT', link: 8 },
+      ], widgets_values: [7, 'randomize', 5, 1, 'euler', 'simple', 1] },
+      { id: 5, type: 'CLIPTextEncode', inputs: [
+        { name: 'clip', type: 'CLIP', link: 10 },
+      ], widgets_values: [''] },
+    ],
+    links: [
+      { id: 1, origin_id: 1, origin_slot: 0, target_id: 2, target_slot: 0, type: 'CLIP' },
+      { id: 2, origin_id: -10, origin_slot: 0, target_id: 2, target_slot: 1, type: 'STRING' },
+      { id: 3, origin_id: -10, origin_slot: 1, target_id: 3, target_slot: 0, type: 'INT' },
+      { id: 4, origin_id: 1, origin_slot: 0, target_id: 4, target_slot: 0, type: 'MODEL' },
+      { id: 5, origin_id: 2, origin_slot: 0, target_id: 4, target_slot: 1, type: 'CONDITIONING' },
+      { id: 7, origin_id: 5, origin_slot: 0, target_id: 4, target_slot: 2, type: 'CONDITIONING' },
+      { id: 8, origin_id: 3, origin_slot: 0, target_id: 4, target_slot: 3, type: 'LATENT' },
+      { id: 9, origin_id: 4, origin_slot: 0, target_id: -20, target_slot: 0, type: 'IMAGE' },
+      { id: 10, origin_id: 1, origin_slot: 0, target_id: 5, target_slot: 0, type: 'CLIP' },
+    ],
+    inputs: [
+      { id: 'in-text', name: 'text', type: 'STRING', linkIds: [2] },
+      { id: 'in-width', name: 'width', type: 'INT', linkIds: [3] },
+    ],
+    outputs: [{ id: 'out-img', name: 'IMAGE', type: 'IMAGE', linkIds: [9] }],
+  }] },
+};
+const convSub = comfy.convertUiGraphToApi(uiSubgraphWorkflow, uiObjectInfo);
+const subNodes = convSub.ok ? Object.values(convSub.graph) : [];
+check('subgraph workflow expands to a flat API graph with prompt roles',
+  convSub.ok === true && subNodes.length === 6
+  && subNodes.filter(n => n.class_type === 'CLIPTextEncode').length === 2
+  && comfy.parseWorkflowGraph(convSub.graph, uiObjectInfo).inputs.some(i => i.role === 'positive' && i.value === 'default prompt')
+  && comfy.buildSubmitPrompt(convSub.graph, { positive: 'a dog' }).applied.includes('positive'));
+// A widget value set on the instance itself overrides the
+// internal node's default.
+const uiSubWithValues = JSON.parse(JSON.stringify(uiSubgraphWorkflow));
+uiSubWithValues.nodes[0].widgets_values = ['my prompt', 768];
+const convSubLit = comfy.convertUiGraphToApi(uiSubWithValues, uiObjectInfo);
+check('subgraph instance widget values override internal defaults',
+  convSubLit.ok === true
+  && Object.values(convSubLit.graph).some(n => n.class_type === 'CLIPTextEncode' && n.inputs.text === 'my prompt')
+  && Object.values(convSubLit.graph).some(n => n.class_type === 'EmptyLatentImage' && n.inputs.width === 768));
+// Reroute nodes pass through to the real origin.
+const uiRerouteWorkflow = {
+  nodes: [
+    { id: 1, type: 'CheckpointLoaderSimple', inputs: [], widgets_values: ['sd15.safetensors'] },
+    { id: 2, type: 'Reroute', inputs: [{ name: '', type: '*', link: 1 }], outputs: [{ name: '', type: '*', links: [2] }], widgets_values: [] },
+    { id: 3, type: 'KSampler', inputs: [{ name: 'model', type: 'MODEL', link: 2 }], widgets_values: [1, 'randomize', 5, 1, 'euler', 'simple', 1] },
+  ],
+  links: [[1, 1, 0, 2, 0, '*'], [2, 2, 0, 3, 0, 'MODEL']],
+};
+const convReroute = comfy.convertUiGraphToApi(uiRerouteWorkflow, uiObjectInfo);
+check('Reroute nodes resolve through to the real origin',
+  convReroute.ok === true && convReroute.graph['3'].inputs.model[0] === '1'
+  && !Object.values(convReroute.graph).some(n => n.class_type === 'Reroute'));
+// Honest failures, never silent empty workflows.
+check('UI-format workflow without /object_info fails with the reason (not an empty shell)',
+  (() => { const p = comfy.parseWorkflowGraph(uiPlainWorkflow, null); return p.ok === false && /UI-format/.test(p.error); })());
+check('UI-format workflow with a node type the install lacks names the type',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[0].type = 'NoSuchNode'; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo); return c.ok === false && /NoSuchNode/.test(c.error); })());
+check('bypassed (muted) node in a UI workflow fails with the reason',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[2].mode = 2; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo); return c.ok === false && /Bypassed/.test(c.error); })());
+// CFGGuider carries positive/negative like BasicGuider (the
+// Chroma-style path the old role detection missed).
+const guiderWorkflow = {
+  '1': { class_type: 'CLIPLoader', inputs: { clip_name: 't5.safetensors' } },
+  '2': { class_type: 'CLIPTextEncode', inputs: { text: 'pos', clip: ['1', 0] } },
+  '3': { class_type: 'CLIPTextEncode', inputs: { text: 'neg', clip: ['1', 0] } },
+  '4': { class_type: 'CFGGuider', inputs: { model: ['5', 0], positive: ['2', 0], negative: ['3', 0], cfg: 3.5 } },
+  '5': { class_type: 'UNETLoader', inputs: { unet_name: 'u.safetensors' } },
+};
+const parsedGuider = comfy.parseWorkflowGraph(guiderWorkflow, uiObjectInfo);
+check('workflow parser detects prompt roles through a CFGGuider',
+  parsedGuider.inputs.some(i => i.role === 'positive' && i.value === 'pos')
+  && parsedGuider.inputs.some(i => i.role === 'negative' && i.value === 'neg'));
+// Scan + import against a mock ComfyUI Desktop layout in temp dirs:
+// a program folder with an exe + frontend templates + custom-node
+// examples, a uv-cache copy of the template package, a user dir
+// with an empty workflows folder + a real user workflow + a
+// malformed file, and models in diffusion_models / text_encoders.
+const tmpScan2 = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-comfyui-scan2-'));
+try {
+  const appData2 = path.join(tmpScan2, 'appdata');
+  const local2 = path.join(tmpScan2, 'local');
+  const home2 = path.join(tmpScan2, 'home');
+  const customBase = path.join(tmpScan2, 'custom-base');
+  fs.mkdirSync(path.join(appData2, 'ComfyUI'), { recursive: true });
+  fs.writeFileSync(path.join(appData2, 'ComfyUI', 'config.json'), JSON.stringify({ basePath: customBase }));
+  fs.mkdirSync(path.join(customBase, 'user', 'default', 'workflows'), { recursive: true });
+  const progComfy = path.join(local2, 'Programs', 'ComfyUI');
+  fs.mkdirSync(progComfy, { recursive: true });
+  fs.writeFileSync(path.join(progComfy, 'ComfyUI.exe'), 'x');
+  const frontendTpl = path.join(progComfy, 'web_custom_versions', 'Comfy-Org_ComfyUI_frontend', '1.0.0', 'templates');
+  fs.mkdirSync(frontendTpl, { recursive: true });
+  fs.writeFileSync(path.join(frontendTpl, 'image_flux_t2i.json'), JSON.stringify(uiPlainWorkflow));
+  const cnEx = path.join(progComfy, 'custom_nodes', 'some-pack', 'example_workflows');
+  fs.mkdirSync(cnEx, { recursive: true });
+  fs.writeFileSync(path.join(cnEx, 'pack_wf.json'), JSON.stringify(uiPlainWorkflow));
+  const uvTpl = path.join(local2, 'uv', 'cache', 'archive-v0', 'abc123', 'comfyui_workflow_templates_json', 'templates');
+  fs.mkdirSync(uvTpl, { recursive: true });
+  fs.writeFileSync(path.join(uvTpl, 'image_qwen_image.json'), JSON.stringify(uiSubgraphWorkflow));
+  const userDir2 = path.join(home2, 'Documents', 'ComfyUI');
+  const wfDir2 = path.join(userDir2, 'user', 'default', 'workflows');
+  fs.mkdirSync(wfDir2, { recursive: true });
+  fs.writeFileSync(path.join(wfDir2, 'txt2img.json'), JSON.stringify(fakeWorkflow));
+  fs.writeFileSync(path.join(wfDir2, 'broken.json'), '{not json');
+  for (const [cat, files] of [['diffusion_models', ['flux.safetensors']], ['vae', ['v.safetensors']], ['text_encoders', ['clip.safetensors']]]) {
+    fs.mkdirSync(path.join(userDir2, 'models', cat), { recursive: true });
+    for (const f of files) fs.writeFileSync(path.join(userDir2, 'models', cat, f), 'x');
+  }
+  const scan2 = comfy.scanComfyui({ home: home2, appData: appData2, localAppData: local2, drives: [] });
+  check('scan records the Desktop exe only when the exe exists on disk',
+    scan2.ok === true && scan2.desktopExe === path.join(progComfy, 'ComfyUI.exe'));
+  check('scan finds built-in templates in the frontend package, custom-node examples, and the uv cache',
+    scan2.templateDirs.length === 3 && scan2.templateDirs.every(t => t.count === 1)
+    && scan2.templateDirs.some(t => t.kind === 'frontend')
+    && scan2.templateDirs.some(t => t.kind === 'custom-node')
+    && scan2.templateDirs.some(t => t.kind === 'uv-cache'));
+  check('scan reads Desktop config.json basePath',
+    scan2.desktopConfig && scan2.desktopConfig.basePath === customBase);
+  const docsRoot = scan2.roots.find(r => r.path === userDir2);
+  check('models walk counts diffusion_models / text_encoders and reports the models folder checked',
+    docsRoot && docsRoot.models && docsRoot.models.diffusion_models === 1
+    && docsRoot.models.text_encoders === 1 && docsRoot.models.vae === 1
+    && docsRoot.modelsDir === path.join(userDir2, 'models'));
+  check('scan adopts the workflows folder with files in it',
+    scan2.workflowsDir === wfDir2);
+  const importedUser = comfy.importWorkflowsFromDir(wfDir2, uiObjectInfo, [], { recursive: true });
+  check('user workflows import labelled user, malformed files surface as errors (not silent zeros)',
+    importedUser.ok === true && importedUser.workflows.length === 1
+    && importedUser.workflows[0].source === 'user'
+    && importedUser.errors.length === 1 && /broken\.json/.test(importedUser.errors[0]));
+  const templateFiles = [];
+  for (const t of scan2.templateDirs) {
+    for (const f of fs.readdirSync(t.dir).filter(f => f.toLowerCase().endsWith('.json'))) templateFiles.push(path.join(t.dir, f));
+  }
+  const importedTpl = comfy.importWorkflowsFromFiles(templateFiles, uiObjectInfo, [], {
+    source: 'builtin',
+    defaultPurpose: 'Built-in template — from ComfyUI Desktop',
+    titleByName: { image_qwen_image: { title: 'Qwen Image Text to Image', description: 'Text to image with Qwen' } },
+  });
+  check('templates import labelled builtin with server titles',
+    importedTpl.ok === true && importedTpl.workflows.length === 3
+    && importedTpl.workflows.every(w => w.source === 'builtin' && w.id.startsWith('tpl-'))
+    && importedTpl.workflows.some(w => w.name === 'Qwen Image Text to Image' && w.description === 'Text to image with Qwen')
+    && importedTpl.workflows.every(w => w.purpose === 'Built-in template — from ComfyUI Desktop'));
+  const importedNoInfo = comfy.importWorkflowsFromFiles([path.join(frontendTpl, 'image_flux_t2i.json')], null, [], { source: 'builtin' });
+  check('UI-format template without ComfyUI running fails with the reason (not a silent zero)',
+    importedNoInfo.workflows.length === 0 && importedNoInfo.errors.length === 1 && /UI-format/.test(importedNoInfo.errors[0]));
+  const noExeLocal = path.join(tmpScan2, 'noexe-local');
+  fs.mkdirSync(path.join(noExeLocal, 'Programs', 'ComfyUI'), { recursive: true });
+  const scanNoExe = comfy.scanComfyui({ home: path.join(tmpScan2, 'nowhere'), appData: path.join(tmpScan2, 'no-appdata'), localAppData: noExeLocal, drives: [] });
+  check('scan records no exe when the program folder has none',
+    scanNoExe.ok === true && scanNoExe.desktopExe === null);
+} finally {
+  fs.rmSync(tmpScan2, { recursive: true, force: true });
+}
+check('main.js has shell:openPath and the shared workflow collector, and converts UI graphs at submit',
+  mainJs.includes("ipcMain.handle('shell:openPath'") && mainJs.includes('collectComfyuiWorkflows')
+  && mainJs.includes('convertUiGraphToApi') && mainJs.includes('isUiWorkflowGraph'));
+check('preload.js exposes rb.shell.openPath',
+  preloadJs.includes("openPath: (filePath) => ipcRenderer.invoke('shell:openPath'"));
+check('ComfyUI view launches the native app, labels built-ins, and teaches the empty library (no iframe)',
+  appJs.includes('function openComfyui') && appJs.includes('Built-in template')
+  && appJs.includes('Rescan for workflows') && appJs.includes('comfyuiDesktopExe')
+  && appJs.includes('Built-in templates') && !appJs.includes('<iframe'));
+check('README documents built-in templates, UI-format conversion, and the native Open button',
+  readme.includes('Built-in template') && readme.includes('UI-format')
+  && readme.includes('comfyui-workflow-templates') && readme.includes('Desktop app'));
+check('CHANGELOG has the 0.7.1 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.7.1 — 2026-11-24'));
+
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');
 const mockServer = http.createServer((req, res) => {
@@ -1140,6 +1415,9 @@ const mockServer = http.createServer((req, res) => {
   } else if (req.url === '/object_info') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ KSampler: { input: { required: {} } } }));
+  } else if (req.url === '/api/workflow_templates') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([{ moduleName: 'comfyui', category: 'image', title: 'Image', type: 'category', templates: [{ name: 'image_qwen_image', title: 'Qwen Image Text to Image', description: 'Text to image with Qwen', mediaType: 'image' }] }]));
   } else if (req.url === '/prompt' && req.method === 'POST') {
     let body = '';
     req.on('data', c => { body += c; });
@@ -1163,6 +1441,9 @@ const mockServer = http.createServer((req, res) => {
     const st = await comfy.getComfyuiStatus(base);
     check('mock server: status reports ok with the real version',
       st.ok === true && st.version === '0.3.60');
+    const tpl = await comfy.getWorkflowTemplates(base);
+    check('mock server: /api/workflow_templates yields titles by name',
+      tpl.ok === true && tpl.byName['image_qwen_image'] && tpl.byName['image_qwen_image'].title === 'Qwen Image Text to Image');
     const sub = await comfy.submitPrompt(base, fakeWorkflow, 'test-client');
     check('mock server: submit returns a prompt_id',
       sub.ok === true && sub.prompt_id === 'mock-prompt-1');

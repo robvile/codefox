@@ -189,6 +189,7 @@ contextBridge.exposeInMainWorld('rb', {
   shell: {
     run: (payload) => ipcRenderer.invoke('shell:run', payload || {}),
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+    openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
   },
   mcp: {
     checkToken: (payload) => ipcRenderer.invoke('mcp:checkToken', payload || {}),

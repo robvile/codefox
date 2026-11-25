@@ -67,6 +67,13 @@ let state = {
   comfyuiOutputs: [],
   comfyuiHistory: [],
   comfyuiGenerating: null,
+  // v0.7.1: the ComfyUI Desktop exe the scan actually found on
+  // disk (null when none was found — the Open button then opens
+  // the web UI instead), and the latest workflow import errors,
+  // so the library can tell "no files" apart from "files that
+  // failed to import".
+  comfyuiDesktopExe: '',
+  comfyuiWorkflowErrors: [],
 };
 
 // ── Agent loop state (v0.5.0) ──────────────────────────────────────
@@ -308,6 +315,7 @@ async function init() {
   state.condensedRules = await rb.db.getSetting('condensed_rules') || '';
   state.comfyuiUrl = await rb.db.getSetting('comfyui_url') || 'http://127.0.0.1:8188';
   state.comfyuiWorkflowsDir = await rb.db.getSetting('comfyui_workflows_dir') || '';
+  state.comfyuiDesktopExe = await rb.db.getSetting('comfyui_desktop_exe') || '';
   try { state.comfyuiWorkflows = JSON.parse(await rb.db.getSetting('comfyui_workflows') || '[]'); }
   catch { state.comfyuiWorkflows = []; }
   if (!Array.isArray(state.comfyuiWorkflows)) state.comfyuiWorkflows = [];
@@ -2826,6 +2834,7 @@ async function persistComfyuiWorkflows() {
   await rb.db.setSetting('comfyui_workflows', JSON.stringify(state.comfyuiWorkflows));
   await rb.db.setSetting('comfyui_workflows_dir', state.comfyuiWorkflowsDir || '');
   await rb.db.setSetting('comfyui_url', state.comfyuiUrl || 'http://127.0.0.1:8188');
+  await rb.db.setSetting('comfyui_desktop_exe', state.comfyuiDesktopExe || '');
 }
 
 async function verifyComfyui() {
@@ -2862,6 +2871,8 @@ async function refreshComfyuiWorkflows() {
   if (!r.ok) return r;
   state.comfyuiWorkflows = r.workflows || [];
   state.comfyuiWorkflowsDir = r.dir || state.comfyuiWorkflowsDir;
+  state.comfyuiWorkflowErrors = r.errors || [];
+  if (r.desktopExe) state.comfyuiDesktopExe = r.desktopExe;
   if (!state.comfyuiSelectedId && state.comfyuiWorkflows.length) {
     state.comfyuiSelectedId = state.comfyuiWorkflows[0].id;
   }
@@ -2937,6 +2948,8 @@ async function scanComfyui() {
         }
       } catch {}
     }
+    if (r.desktopExe) state.comfyuiDesktopExe = r.desktopExe;
+    state.comfyuiWorkflowErrors = r.errors || [];
     if (r.dir) {
       state.comfyuiWorkflowsDir = r.dir;
       state.comfyuiWorkflows = r.workflows || [];
@@ -2949,12 +2962,30 @@ async function scanComfyui() {
   state.comfyuiScan = r;
   renderComfyUIView();
   if (r && r.ok) {
+    const n = (r.workflows || []).length;
+    const tpl = (r.workflows || []).filter(w => w.source === 'builtin').length;
     showToast(r.dir
-      ? '✓ Scan found ' + (r.workflows || []).length + ' workflow(s) in ' + r.dir
-      : 'Scan finished — no workflows folder found in the usual locations');
+      ? '✓ Scan found ' + n + ' workflow(s)' + (tpl ? ' (' + tpl + ' built-in template' + (tpl !== 1 ? 's' : '') + ')' : '') + ' in ' + r.dir
+      : (n ? '✓ Scan found ' + n + ' built-in template(s) — no workflows folder found in the usual locations' : 'Scan finished — no workflows folder found in the usual locations'));
   } else {
     showToast('⚠ Scan failed: ' + ((r && r.error) || 'unknown error'));
   }
+}
+
+// Open ComfyUI (v0.7.1): when the scan found the ComfyUI Desktop
+// app on disk, launch the native app; otherwise open the web UI in
+// the browser, as before. Launching goes through Electron's
+// shell.openPath directly — never through the PowerShell shell
+// tool, which is off by default.
+async function openComfyui() {
+  if (state.comfyuiDesktopExe) {
+    let r;
+    try { r = await rb.shell.openPath(state.comfyuiDesktopExe); }
+    catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
+    if (r && r.ok) { showToast('✓ Opening ComfyUI Desktop…'); return; }
+    showToast('⚠ Could not launch the Desktop app (' + ((r && r.error) || 'unknown error') + ') — opening the web UI instead');
+  }
+  rb.shell.openExternal(state.comfyuiUrl);
 }
 
 // Randomise one sampler's seed in the simple form (per-node key,
@@ -3384,13 +3415,32 @@ async function renderComfyUIView() {
         bits.push(parts.length ? 'models: ' + parts.join(', ') : 'models folder, no model files counted');
       }
       bits.push(r.customNodes ? 'custom_nodes present' : 'no custom_nodes');
+      if (r.exe) bits.push('Desktop app: ' + escHtml(String(r.exe).split(/[\\/]/).pop()));
+      if (r.templates) bits.push(r.templates.count + ' built-in template(s)');
       if (r.note) bits.push(escHtml(r.note));
-      return `<div style="font-size:12px;color:var(--text2);">✓ ${escHtml(r.label)} — <span style="font-family:var(--mono);font-size:11px;">${escHtml(r.path)}</span><br><span style="color:var(--text3);">${bits.join(' · ')}</span></div>`;
+      return `<div style="font-size:12px;color:var(--text2);">✓ ${escHtml(r.label)} — <span style="font-family:var(--mono);font-size:11px;">${escHtml(r.path)}</span><br><span style="color:var(--text3);">${bits.join(' · ')}</span>${r.modelsDir ? `<br><span style="color:var(--text3);font-size:11px;">models checked in <span style="font-family:var(--mono);">${escHtml(r.modelsDir)}</span></span>` : ''}</div>`;
     }).join('');
+    // Workflows folder: how many .json files were found vs how
+    // many actually imported — "0 imported" must not hide files
+    // that failed to parse (the errors are listed below).
+    const wfRoot = ((s.scan && s.scan.roots) || []).find(r => r.workflows && s.dir && r.workflows.dir === s.dir);
+    const filesFound = wfRoot ? wfRoot.workflows.count : null;
+    const userCount = (s.workflows || []).filter(w => (w.source || 'user') === 'user').length;
+    const builtinCount = (s.workflows || []).filter(w => w.source === 'builtin').length;
+    const tplDirs = s.templateDirs || (s.scan && s.scan.templateDirs) || [];
+    const tplTotal = tplDirs.reduce((a, t) => a + (t.count || 0), 0);
+    const exeLine = s.desktopExe
+      ? `<p style="font-size:12px;color:var(--teal);">ComfyUI Desktop app found: <span style="font-family:var(--mono);font-size:11px;">${escHtml(s.desktopExe)}</span> — "Open ComfyUI" launches it.</p>`
+      : '<p style="font-size:12px;color:var(--text3);">No ComfyUI Desktop app found on disk — "Open ComfyUI" opens the web UI in your browser instead.</p>';
+    const tplLine = tplTotal > 0
+      ? `<p style="font-size:12px;color:var(--teal);">Built-in templates: ${tplTotal} file(s) found in ${tplDirs.length} folder(s) — ${builtinCount} imported into the library below.</p>`
+      : '<p style="font-size:12px;color:var(--amber);">No built-in templates found on disk — Desktop bundles them inside the app. Open one in ComfyUI Desktop and save it (Ctrl+S) and it lands in your workflows folder, then Rescan.</p>';
     return `<p style="font-size:12px;color:var(--text2);">${serverLine}</p>
-      ${s.dir ? `<p style="font-size:12px;color:var(--teal);">Workflows folder found: <span style="font-family:var(--mono);font-size:11px;">${escHtml(s.dir)}</span> — ${(s.workflows || []).length} workflow(s) imported.</p>` : '<p style="font-size:12px;color:var(--amber);">No workflows folder found in the usual locations — pick one with Browse below.</p>'}
+      ${s.dir ? `<p style="font-size:12px;color:var(--teal);">Workflows folder found: <span style="font-family:var(--mono);font-size:11px;">${escHtml(s.dir)}</span> — ${filesFound == null ? '' : filesFound + ' .json file(s) found, '}${userCount} workflow(s) imported.</p>` : '<p style="font-size:12px;color:var(--amber);">No workflows folder found in the usual locations — pick one with Browse below.</p>'}
+      ${exeLine}
+      ${tplLine}
       <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rootRows}</div>
-      ${(s.errors || []).length ? `<p style="font-size:11px;color:var(--amber);">${escHtml(s.errors.join('; '))}</p>` : ''}`;
+      ${(s.errors || []).length ? `<p style="font-size:11px;color:var(--amber);">Import problems:<br>${s.errors.map(e => '• ' + escHtml(e)).join('<br>')}</p>` : ''}`;
   })();
 
   const inputFieldHtml = (inp) => {
@@ -3417,28 +3467,59 @@ async function renderComfyUIView() {
     </label>`;
   };
 
+  const workflowRowHtml = (w) => {
+    const isSel = selected && selected.id === w.id;
+    const isBuiltin = w.source === 'builtin';
+    return `<div class="conn-row" style="align-items:flex-start;${isSel ? 'border-color:var(--accent);' : ''}">
+      <span class="conn-ico">◈</span>
+      <span class="conn-row-info" style="flex:1;">
+        <span class="conn-name">${escHtml(w.name)}</span>
+        ${isBuiltin ? ' <span style="font-size:10px;color:var(--teal);border:1px solid var(--teal);border-radius:4px;padding:1px 5px;vertical-align:middle;">Built-in template</span>' : ''}
+        <span style="font-size:11px;color:${w.available ? 'var(--teal)' : 'var(--amber)'};"> ${w.available ? 'Available' : 'Unavailable — ' + escHtml(w.availableReason || (w.missing || []).join('; '))}</span><br>
+        ${isBuiltin && w.description ? `<span style="font-size:12px;color:var(--text2);">${escHtml(w.description)}</span><br>` : ''}
+        <span style="font-size:12px;color:var(--text2);">Purpose: </span>
+        <input value="${escHtml(w.purpose || '')}" onchange="setComfyuiPurpose('${w.id}', this)" style="width:260px;padding:3px 8px;font-size:12px;" />
+        <br><span style="font-size:11px;color:var(--text3);">${escHtml((w.inputs || []).length)} configurable input(s) · ${escHtml((w.outputs || []).length)} output node(s)${(w.missing || []).length ? ' · Missing: ' + escHtml(w.missing.join('; ')) : ''}</span>
+        <br><span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(w.file)}</span>
+      </span>
+      <span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+        <label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:12px;cursor:pointer;" title="Only approved workflows run from the Agent loop without asking">
+          <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
+        </label>
+        <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
+      </span>
+    </div>`;
+  };
+  // The library is capped in height and scrolls, so the Generate
+  // form for the selected workflow stays just below it instead of
+  // buried under a long list.
+  const libraryErrorsHtml = (state.comfyuiWorkflowErrors || []).length
+    ? `<p style="font-size:11px;color:var(--amber);margin-top:8px;">Import problems:<br>${state.comfyuiWorkflowErrors.map(e => '• ' + escHtml(e)).join('<br>')}</p>` : '';
+  const emptyLibraryHtml = (() => {
+    const scan = state.comfyuiScan;
+    const tplDirs = (scan && (scan.templateDirs || (scan.scan && scan.scan.templateDirs))) || [];
+    const tplCount = tplDirs.reduce((a, t) => a + (t.count || 0), 0);
+    const builtinLine = tplCount > 0
+      ? 'The scan found ' + tplCount + ' built-in template file(s), but none imported — see the import problems below.'
+      : (scan && scan.ok
+        ? 'The scan looked for them in the Desktop program folder, the uv cache, and custom-node example folders and found none on disk — they are bundled inside the Desktop app, so save one from inside Desktop (below) and it appears here.'
+        : 'Press Rescan below and CodeFox looks for them in the Desktop program folder, the uv cache, and custom-node example folders.');
+    return `<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;line-height:1.7;">
+      <strong style="color:var(--text2);">No workflows yet — here's how they get in:</strong><br>
+      1. <strong style="color:var(--text2);">Built-in templates</strong> — ComfyUI Desktop ships templates (text-to-image, video, audio…). ${builtinLine}<br>
+      2. <strong style="color:var(--text2);">Your own workflows</strong> — in ComfyUI Desktop, open a workflow and save it (Ctrl+S) or export it as JSON — it lands in your workflows folder${state.comfyuiWorkflowsDir ? ` (<span style="font-family:var(--mono);font-size:11px;">${escHtml(state.comfyuiWorkflowsDir)}</span>)` : ''} and appears here after Rescan.<br>
+      <button class="btn btn-teal" onclick="scanComfyui()" style="margin-top:8px;">Rescan for workflows</button>
+    </div>`;
+  })();
+  const userWfs = state.comfyuiWorkflows.filter(w => (w.source || 'user') === 'user');
+  const builtinWfs = state.comfyuiWorkflows.filter(w => w.source === 'builtin');
   const libraryHtml = state.comfyuiWorkflows.length
-    ? state.comfyuiWorkflows.map(w => {
-        const isSel = selected && selected.id === w.id;
-        return `<div class="conn-row" style="align-items:flex-start;${isSel ? 'border-color:var(--accent);' : ''}">
-          <span class="conn-ico">◈</span>
-          <span class="conn-row-info" style="flex:1;">
-            <span class="conn-name">${escHtml(w.name)}</span>
-            <span style="font-size:11px;color:${w.available ? 'var(--teal)' : 'var(--amber)'};"> ${w.available ? 'Available' : 'Unavailable — ' + escHtml(w.availableReason || (w.missing || []).join('; '))}</span><br>
-            <span style="font-size:12px;color:var(--text2);">Purpose: </span>
-            <input value="${escHtml(w.purpose || '')}" onchange="setComfyuiPurpose('${w.id}', this)" style="width:260px;padding:3px 8px;font-size:12px;" />
-            <br><span style="font-size:11px;color:var(--text3);">${escHtml((w.inputs || []).length)} configurable input(s) · ${escHtml((w.outputs || []).length)} output node(s)${(w.missing || []).length ? ' · Missing: ' + escHtml(w.missing.join('; ')) : ''}</span>
-            <br><span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(w.file)}</span>
-          </span>
-          <span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
-            <label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:12px;cursor:pointer;" title="Only approved workflows run from the Agent loop without asking">
-              <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
-            </label>
-            <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
-          </span>
-        </div>`;
-      }).join('')
-    : '<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No workflows imported yet — pick the folder where your ComfyUI workflow JSON files live, then Rescan. Workflows are your own files; CodeFox never ships a sample workflow.</div>';
+    ? `<div style="max-height:340px;overflow:auto;padding-right:4px;">
+        ${userWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:4px 0 6px;">Your workflows (${userWfs.length})</div>` + userWfs.map(workflowRowHtml).join('') : ''}
+        ${builtinWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:10px 0 6px;">Built-in templates (${builtinWfs.length}) — from ComfyUI Desktop, read-only files (CodeFox never writes into them)</div>` + builtinWfs.map(workflowRowHtml).join('') : ''}
+      </div>
+      ${libraryErrorsHtml}`
+    : emptyLibraryHtml + libraryErrorsHtml;
 
   const generateHtml = selected
     ? `<h3 class="settings-subhead">Generate — ${escHtml(selected.name)}</h3>
@@ -3493,7 +3574,7 @@ async function renderComfyUIView() {
         </span>
         <span class="conn-status ${st && st.ok ? 'connected' : ''}" style="display:block;margin-top:6px;">${escHtml(statusText)}</span>
       </span>
-      <button class="btn btn-secondary" onclick="rb.shell.openExternal('${escHtml(state.comfyuiUrl)}')">Open ComfyUI ↗</button>
+      <button class="btn btn-secondary" onclick="openComfyui()" title="${state.comfyuiDesktopExe ? 'Opens the ComfyUI Desktop app' : 'No Desktop app found by the scan — opens the ComfyUI web UI in your browser'}">Open ComfyUI ↗</button>
     </div>
     <h3 class="settings-subhead">Find ComfyUI</h3>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
