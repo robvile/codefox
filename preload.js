@@ -112,4 +112,10 @@ contextBridge.exposeInMainWorld('rb', {
     readWorkflow: (payload) => ipcRenderer.invoke('comfyui:readWorkflow', payload || {}),
     defaultWorkflowsDir: () => ipcRenderer.invoke('comfyui:defaultWorkflowsDir'),
   },
+  // Diagnostics (v0.6.2) — Settings → Advanced has a "Developer
+  // tools" button for this; the same panel as Ctrl+Shift+I, for
+  // users whose keyboard shortcut is intercepted by other software.
+  app: {
+    openDevTools: () => ipcRenderer.invoke('app:openDevTools'),
+  },
 });

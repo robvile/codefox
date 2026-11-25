@@ -1172,6 +1172,16 @@ ipcMain.handle('shell:openExternal', async (_, url) => {
   catch (e) { return { ok: false, error: e.message }; }
 });
 
+// ── Diagnostics: open DevTools (v0.6.2) ─────────────────────────
+// Settings → Advanced has a "Developer tools" button for this.
+// It is the same panel as Ctrl+Shift+I, for users whose keyboard
+// shortcut is intercepted by other software. No keyboard shortcut
+// is needed. Deliberately tiny: it only opens the panel.
+ipcMain.handle('app:openDevTools', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.openDevTools();
+  return true;
+});
+
 // ── MCP guided-setup checks (v0.6.0) ────────────────────────────
 // These are CodeFox's own checks, not user commands: they run even
 // when the shell tool is off, via child_process directly, never via

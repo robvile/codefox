@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.6.1.
+// 2. package.json version is 0.6.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.6.1', pkg.version === '0.6.1', 'got ' + pkg.version);
-check('sidebar footer shows 0.6.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.1 — Local'));
+check('package.json version is 0.6.2', pkg.version === '0.6.2', 'got ' + pkg.version);
+check('sidebar footer shows 0.6.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.2 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -808,6 +808,46 @@ check('README documents ComfyUI, approval, and the agent block',
   && readme.includes('Miro') && readme.includes('no Miro preset'));
 check('README documents the guided setup prompt',
   readme.includes('guided setup prompt') && readme.includes('Add server'));
+
+// 20. v0.6.2 — "Developer tools" button (Settings → Advanced) so
+// the console can be opened without a keyboard shortcut, and a
+// packaging regression check from the v0.6.0 investigation.
+// The reported v0.6.0 bug (project dropdown, creating a
+// conversation, LM Studio verify / refresh models all silently
+// dead) has no definite cause in the code: the audit traced init(),
+// the preload bridge, the main-process load order, the database
+// layer, and the v0.5.1–v0.6.0 diff, and ruled out a startup throw
+// in app.js (no top-level use of the bridge, no top-level DOM
+// statement that can throw), a broken preload require, and
+// unregistered IPC handlers. The one failure mode that would
+// produce exactly these symptoms and is only visible in the
+// packaged app is a preload/main require that is NOT in
+// package.json build.files — the file would be missing from the
+// installer, preload would throw, window.rb would never exist, and
+// every bridge call would fail silently. These checks pin that
+// down: every relative require in preload.js and main.js must
+// resolve to a file the packager ships.
+check('main.js has app:openDevTools IPC opening the DevTools panel',
+  mainJs.includes("ipcMain.handle('app:openDevTools'") && mainJs.includes('openDevTools()'));
+check('preload.js exposes rb.app.openDevTools',
+  preloadJs.includes('openDevTools') && preloadJs.includes("ipcRenderer.invoke('app:openDevTools'"));
+check('Settings → Advanced has a Developer tools diagnostics button',
+  appJs.includes('Developer tools') && appJs.includes('onclick="openDevTools()"')
+  && appJs.includes('Diagnostics') && appJs.includes('function openDevTools'));
+check('dead-feature handlers still await the bridge (no silent removal)',
+  appJs.includes('toggleProjectDropdown') && appJs.includes('await rb.project.list()')
+  && appJs.includes('await rb.llm.verify') && appJs.includes('await rb.llm.listModels')
+  && appJs.includes("await rb.db.insert('threads'"));
+for (const [label, src] of [['preload.js', preloadJs], ['main.js', mainJs]]) {
+  const missing = [];
+  for (const m of src.matchAll(/require\('\.\/([A-Za-z0-9_./-]+)'\)/g)) {
+    const file = m[1].endsWith('.js') ? m[1] : m[1] + '.js';
+    const shipped = Array.isArray(pkg.build.files) && pkg.build.files.some(f =>
+      f === file || (f.endsWith('/**/*') && file.startsWith(f.slice(0, -5))));
+    if (!shipped) missing.push(file);
+  }
+  check(label + ' relative requires are all in package.json build.files', missing.length === 0, missing.join(', '));
+}
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');

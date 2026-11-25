@@ -3415,6 +3415,9 @@ function renderAdvancedPane(body) {
       <pre id="shell-manual-output" class="settings-output">No command run yet.</pre>
       <p class="settings-note">Dangerous commands are never run automatically: rm, del, Remove-Item, format, rm -rf, Remove-Item -Recurse, Remove-Item -Force -Recurse, rmdir /s, and rd /s always ask first, even if they match an auto-approved prefix.</p>
     </div>
+    <h3 class="settings-subhead">Diagnostics</h3>
+    <p class="settings-note">If buttons stop responding or a connection check does nothing, the developer console usually says why — the red errors there are the first thing to check. This button opens it without needing a keyboard shortcut.</p>
+    <button class="btn btn-secondary" onclick="openDevTools()">Developer tools</button>
     <h3 class="settings-subhead">Agent loop</h3>
     <p class="settings-note">In Agent mode, CodeFox runs a loop: after each reply it runs the model's safe commands, applies its file changes, and installs the packages it asked for, then sends the results back to the model so it can fix errors and try again — without you prompting again. Ask and Plan modes never loop.</p>
     <label class="field-label">Max tool rounds per reply (1–10)
@@ -3492,6 +3495,16 @@ async function restoreExcludedDefaults() {
   await rb.db.setSetting('excluded_file_types', JSON.stringify(state.excludedFileTypes));
   renderSettingsView();
   showToast('✓ Excluded file types restored to the default list');
+}
+
+// Diagnostics (v0.6.2) — opens the developer console, the same
+// panel as Ctrl+Shift+I, for users whose keyboard shortcut is
+// intercepted by other software. If this call itself fails (the
+// bridge to the main process is down), there is nothing visible
+// left to report it with, so the error goes to the console.
+async function openDevTools() {
+  try { await rb.app.openDevTools(); }
+  catch (e) { console.error('Could not open Developer tools:', e); }
 }
 
 async function runManualCommand() {

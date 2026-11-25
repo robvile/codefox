@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.6.1-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.6.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -76,6 +76,8 @@ npm run build:win
 Use `npm ci` instead of `npm install` when dependencies change: `npm ci` installs exactly what the lockfile says and never rewrites it, while `npm install` can. If a pull ever still complains about a local change, `git restore <file>` remains the escape hatch, and it is safe for generated files.
 
 One-time note: if you ran the old `npm install-scripts approve electron` step, it wrote an `allowScripts` entry into your local `package.json` — a local change that will show up once. Restoring `package.json` once removes it. Whether the approval is even needed is uncertain: Node 26 ships npm 11, which warns about install scripts but still runs them — only npm 12 blocks them by default — so the approval may have been a red herring all along.
+
+If buttons stop responding or a connection check does nothing, open **Settings → Advanced → Developer tools** and look at the red errors in the Console tab — that is the fastest way to find out what broke.
 
 ### 1. Start LM Studio
 
