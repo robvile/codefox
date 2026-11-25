@@ -224,6 +224,56 @@ function modelListFromObjectInfo(objectInfo, classType, inputName) {
   } catch { return []; }
 }
 
+// Where a missing node type comes from, when that is actually
+// known — so the error can tell the user what to pull into
+// ComfyUI instead of just naming the type. Only entries a source
+// really attributes are listed; anything else reports no pack
+// (the message stays the plain "Node type not installed").
+//   * ImageRemoveAlpha+ is in ComfyUI Essentials
+//     (ComfyUI_essentials) — ComfyUI Registry node list and the
+//     runcomfy install page both list it there.
+//   * LumaImageModifyNode / LumaReferenceNode /
+//     LumaImageToVideoNode / LumaVideoNode are NOT a custom-node
+//     pack: they are ComfyUI's own built-in Luma Partner Nodes
+//     (comfy_api_nodes, category "api node/..."), documented on
+//     docs.comfy.org as natively integrated nodes that ship with
+//     ComfyUI and can be switched off with --disable-partner-nodes
+//     or offline mode — so there is nothing to install via
+//     Manager, and the message says that instead of sending the
+//     user to install something that does not exist.
+const MISSING_NODE_PACKS = {
+  'ImageRemoveAlpha+': {
+    pack: 'ComfyUI Essentials (ComfyUI_essentials)',
+    action: 'install it in ComfyUI Desktop (ComfyUI Manager) and Rescan',
+  },
+  'LumaImageModifyNode': {
+    pack: "ComfyUI's built-in Luma Partner Nodes",
+    action: 'they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+  },
+  'LumaReferenceNode': {
+    pack: "ComfyUI's built-in Luma Partner Nodes",
+    action: 'they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+  },
+  'LumaImageToVideoNode': {
+    pack: "ComfyUI's built-in Luma Partner Nodes",
+    action: 'they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+  },
+  'LumaVideoNode': {
+    pack: "ComfyUI's built-in Luma Partner Nodes",
+    action: 'they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+  },
+};
+
+// The "Node type not installed" message, with the pack attached
+// when it is known. The pack rides after an em-dash so the
+// import-problems grouping can still group by node type.
+function missingNodeTypeMessage(classType, id) {
+  const base = 'Node type not installed: ' + classType + ' (node ' + id + ')';
+  const known = MISSING_NODE_PACKS[classType];
+  if (!known) return base;
+  return base + ' — ' + known.pack + '; ' + known.action;
+}
+
 function parseWorkflowGraph(graph, objectInfo) {
   // UI-format graphs (what ComfyUI Desktop saves, and what its
   // built-in templates are) convert first — see
@@ -268,7 +318,7 @@ function parseWorkflowGraph(graph, objectInfo) {
     const classType = node.class_type || '';
     if (!classType) continue;
     if (presentClasses && !presentClasses.has(classType)) {
-      missing.push('Node type not installed: ' + classType + ' (node ' + id + ')');
+      missing.push(missingNodeTypeMessage(classType, id));
     }
     const title = String((node._meta && node._meta.title) || '');
     const ins = (node.inputs && typeof node.inputs === 'object') ? node.inputs : {};
@@ -653,7 +703,7 @@ function convertUiNode(node, objectInfo, resolveOrigin) {
   const def = objectInfo[node.type];
   if (!def) {
     if (UI_NOTE_TYPES.includes(node.type)) return { ok: true, skip: true };
-    return { ok: false, error: 'Node type not installed: ' + node.type + ' (node ' + node.id + ')' };
+    return { ok: false, error: missingNodeTypeMessage(node.type, node.id) };
   }
   const inputs = {};
   const widgets = uiWidgetInputs(def);
@@ -704,12 +754,21 @@ function convertUiNode(node, objectInfo, resolveOrigin) {
 //     straight into each downstream widget-backed input —
 //     exactly what its applyToGraph does in the editor.
 // A downstream REQUIRED link-typed input left with nothing to
-// feed it is a genuine problem — the graph could not run in
-// ComfyUI Desktop either, so conversion fails naming the
-// downstream node instead of producing a broken graph.
+// feed it is a genuine problem — but only when the downstream
+// node SURVIVES into the final graph. A consumer that is itself
+// bypassed / muted (a dead either/or branch — a bypassed
+// CLIPLoader feeding a bypassed CLIPTextEncode) is removed by
+// the same pass, so its unfed input is irrelevant and the
+// conversion succeeds. The graph could not run in ComfyUI
+// Desktop either when a surviving node is left unfed, so that
+// case still fails naming the downstream node instead of
+// producing a broken graph.
 // Returns { ok, nodes, links, error }. The caller's arrays are
 // not mutated (nodes/links are fresh copies); node objects are
 // the expanded clones, so input entries may be edited in place.
+// The required-input check only fires for a consumer that
+// survives this pass: a skipped consumer is a dead branch, and
+// links between two skipped nodes are dropped silently.
 function resolveSkippedUiNodes(nodes, links, objectInfo) {
   let outNodes = nodes.slice();
   let outLinks = links.slice();
@@ -759,11 +818,13 @@ function resolveSkippedUiNodes(nodes, links, objectInfo) {
     linkById.delete(linkId);
     outLinks = outLinks.filter(x => x.id !== linkId);
   };
-  // A dropped link that fed a required input is a real problem —
-  // name the downstream node so the user knows what is broken.
+  // A dropped link that fed a required input of a SURVIVING
+  // node is a real problem — name the downstream node so the user
+  // knows what is broken. A consumer that is itself skipped is
+  // gone from the final graph, so its unfed input is not one.
   const droppedLinkError = (kind, node, linkId) => {
     const consumers = ultimateConsumers(linkId);
-    const bad = consumers.find(c => c.entry && c.entry.name && isRequiredLinkInput(c.node, c.entry.name));
+    const bad = consumers.find(c => c.entry && c.entry.name && !skippedIds.has(c.node.id) && isRequiredLinkInput(c.node, c.entry.name));
     if (!bad) return null;
     const head = (kind === 'bypassed' ? 'Bypassed' : 'Muted') + ' node "' + (node.type || '?') + '" (id ' + node.id + ')';
     const tail = 'required input "' + bad.entry.name + '" of "' + (bad.node.type || '?') + '" (id ' + bad.node.id + ')';
@@ -772,6 +833,16 @@ function resolveSkippedUiNodes(nodes, links, objectInfo) {
       : head + ' leaves ' + tail + ' with nothing to feed it';
   };
   const skipped = outNodes.filter(n => n && (n.mode === 2 || n.mode === 4 || n.type === 'PrimitiveNode'));
+  // A dead branch needs no feeding: a consumer that is itself
+  // skipped is removed from the graph later in this same pass,
+  // so an input it can no longer be fed is irrelevant. Only a
+  // consumer that SURVIVES into the final graph can be left
+  // genuinely unfed. (Desktop's templates are full of either/or
+  // branches — a bypassed CLIPLoader feeding a bypassed
+  // CLIPTextEncode, a bypassed UNETLoader feeding a bypassed
+  // LoraLoader — where the whole branch is off by design; the
+  // old check fired on those and wrongly failed the import.)
+  const skippedIds = new Set(skipped.map(n => n.id));
   for (const node of skipped) {
     if (!byId.has(node.id)) continue;
     const outgoing = outLinks.filter(x => x.originId === node.id);
@@ -1485,6 +1556,7 @@ module.exports = {
   isWorkflowJsonFile,
   resolveSkippedUiNodes,
   convertUiGraphToApi,
+  missingNodeTypeMessage,
   readDesktopConfig,
   findDesktopExe,
   findFrontendTemplateDirs,

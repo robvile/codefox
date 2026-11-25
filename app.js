@@ -75,16 +75,19 @@ let state = {
   comfyuiDesktopExe: '',
   comfyuiWorkflowErrors: [],
   // v0.8.0: the Workflow Library's own view state. The query,
-  // type/source filters, sort and the available/pinned toggles
-  // are session-only (they reset when the app restarts); hideApi
-  // and the collapsed sections are persisted (see
+  // type/source filters, sort and the pinned toggle are
+  // session-only (they reset when the app restarts); hideApi, the
+  // collapsed sections, and Available only are persisted (see
   // persistComfyuiLib) because they are the user's durable
-  // choices about what the library shows.
+  // choices about what the library shows. Available only
+  // defaults ON (v0.8.1): CodeFox only offers workflows that are
+  // actually runnable on this machine — unavailable ones stay
+  // hidden until the user toggles it off to see everything.
   comfyuiLib: {
     query: '',
     type: 'all',
     source: 'all',
-    availableOnly: false,
+    availableOnly: true,
     pinnedOnly: false,
     hideApi: false,
     showHidden: false,
@@ -340,6 +343,8 @@ async function init() {
   // v0.8.0: the library's durable choices — hide the api_ cloud
   // templates, and which sections start collapsed. First run:
   // built-ins start collapsed (there can be hundreds of them).
+  // v0.8.1: Available only is durable too, and defaults ON.
+  state.comfyuiLib.availableOnly = (await rb.db.getSetting('comfyui_lib_available_only') || '1') === '1';
   state.comfyuiLib.hideApi = (await rb.db.getSetting('comfyui_lib_hide_api') || '0') === '1';
   try {
     const collapsed = JSON.parse(await rb.db.getSetting('comfyui_lib_collapsed') || 'null');
@@ -3090,8 +3095,13 @@ function groupComfyuiErrors(errors) {
     const m = line.match(/^(.+\.json): (.*)$/);
     let reason = m ? m[2] : line;
     reason = reason.replace(/\(node \d+\)/g, '(node N)').replace(/\(id \d+\)/g, '(id N)');
-    let g = byKey[reason];
-    if (!g) { g = { reason: reason, count: 0, files: [] }; byKey[reason] = g; groups.push(g); }
+    // A missing-node reason carries a pack suffix (" — ...");
+    // the group is the node type, the pack rides along in the
+    // displayed reason (taken from the first file in the group).
+    let key = reason;
+    if (reason.indexOf('Node type not installed: ') === 0) key = reason.split(' — ')[0];
+    let g = byKey[key];
+    if (!g) { g = { reason: reason, count: 0, files: [] }; byKey[key] = g; groups.push(g); }
     g.count++;
     g.files.push(line);
   }
@@ -3451,6 +3461,7 @@ async function approveAllComfyuiWorkflows(source) {
 // and filter chips live outside that container; renderComfyUI-
 // Library rebuilds the rows and the counts inside it.
 async function persistComfyuiLib() {
+  await rb.db.setSetting('comfyui_lib_available_only', state.comfyuiLib.availableOnly ? '1' : '0');
   await rb.db.setSetting('comfyui_lib_hide_api', state.comfyuiLib.hideApi ? '1' : '0');
   await rb.db.setSetting('comfyui_lib_collapsed', JSON.stringify({ user: state.comfyuiLib.collapsedUser, builtin: state.comfyuiLib.collapsedBuiltin }));
 }
@@ -3483,6 +3494,12 @@ async function toggleComfyuiHideApi(checked) {
   renderComfyuiLibrary();
 }
 
+async function toggleComfyuiAvailableOnly(checked) {
+  state.comfyuiLib.availableOnly = !!checked;
+  await persistComfyuiLib();
+  renderComfyuiLibrary();
+}
+
 async function toggleComfyuiPinned(id) {
   const wf = state.comfyuiWorkflows.find(w => w.id === id);
   if (!wf) return;
@@ -3503,9 +3520,10 @@ function clearComfyuiLibFilters() {
   state.comfyuiLib.query = '';
   state.comfyuiLib.type = 'all';
   state.comfyuiLib.source = 'all';
-  state.comfyuiLib.availableOnly = false;
+  state.comfyuiLib.availableOnly = true;
   state.comfyuiLib.pinnedOnly = false;
   state.comfyuiLib.showHidden = false;
+  persistComfyuiLib();
   const q = document.getElementById('comfyui-lib-search');
   if (q) q.value = '';
   renderComfyuiLibrary();
@@ -3884,7 +3902,7 @@ function renderComfyuiLibrary() {
     <span style="width:10px;"></span>
     ${sourceChip('all', 'All sources')}${sourceChip('user', 'Yours')}${sourceChip('builtin', 'Built-in')}
     <span style="width:10px;"></span>
-    ${toggleChip(lib.availableOnly, 'Available only', "setComfyuiLibFilter({availableOnly:!state.comfyuiLib.availableOnly})")}
+    ${toggleChip(lib.availableOnly, 'Available only', "toggleComfyuiAvailableOnly(!state.comfyuiLib.availableOnly)")}
     ${toggleChip(lib.pinnedOnly, 'Pinned only', "setComfyuiLibFilter({pinnedOnly:!state.comfyuiLib.pinnedOnly})")}
     ${toggleChip(lib.hideApi, 'Hide API templates', "toggleComfyuiHideApi(!state.comfyuiLib.hideApi)")}
     ${hiddenCount ? toggleChip(lib.showHidden, 'Show hidden (' + hiddenCount + ')', "setComfyuiLibFilter({showHidden:!state.comfyuiLib.showHidden})") : ''}

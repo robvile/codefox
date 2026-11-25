@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.8.0.
+// 2. package.json version is 0.8.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.8.0', pkg.version === '0.8.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.8.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.0 — Local'));
+check('package.json version is 0.8.1', pkg.version === '0.8.1', 'got ' + pkg.version);
+check('sidebar footer shows 0.8.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.1 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1729,6 +1729,105 @@ check('README documents library search/filter/pin/hide and chat generation',
   && readme.includes('Generate in chat') && readme.includes('Import to `Assets/Generated/<workflow>/`'));
 check('CHANGELOG has the 0.8.0 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.0 — 2026-11-24'));
+
+// 26. v0.8.1 — dead branches convert (a bypassed loader feeding
+// a bypassed consumer is an either/or branch switched off by
+// design, not a broken workflow), a genuinely unfed ACTIVE
+// consumer still fails, missing nodes name their pack, and
+// Available only defaults ON (CodeFox only offers workflows
+// that are actually runnable on this machine).
+const uiObjectInfo3 = {
+  ...uiObjectInfo2,
+  LoraLoader: { input: { required: { model: ['MODEL', {}], clip: ['CLIP', {}], lora_name: uiCombo(['l.safetensors'], 'l.safetensors'), strength_model: uiFloat(1), strength_clip: uiFloat(1) } } },
+};
+// A bypassed CLIPLoader feeding a bypassed CLIPTextEncode: the
+// whole branch is dead, so the workflow converts and the dead
+// nodes never appear in the API graph.
+const uiDeadBranch = JSON.parse(JSON.stringify(uiPlainWorkflow));
+uiDeadBranch.nodes.push(
+  { id: 11, type: 'CLIPLoader', mode: 4, inputs: [], widgets_values: ['t5.safetensors', 'chroma', 'default'] },
+  { id: 12, type: 'CLIPTextEncode', mode: 4, inputs: [{ name: 'clip', type: 'CLIP', link: 20 }], widgets_values: ['dead branch'] },
+);
+uiDeadBranch.links.push([20, 11, 0, 12, 0, 'CLIP']);
+const convDeadBranch = comfy.convertUiGraphToApi(uiDeadBranch, uiObjectInfo3);
+check('dead branch converts: bypassed loader feeding a bypassed consumer is dropped silently',
+  convDeadBranch.ok === true
+  && !Object.values(convDeadBranch.graph).some(n => n.class_type === 'CLIPLoader')
+  && !Object.values(convDeadBranch.graph).some(n => n.class_type === 'CLIPTextEncode' && n.inputs.text === 'dead branch')
+  && convDeadBranch.graph['3'].inputs.clip[0] === '2'
+  && Object.keys(convDeadBranch.graph).length === 9);
+// The same shape with the consumer ACTIVE is genuinely broken
+// and must still fail naming it.
+check('dead-branch twin with an active consumer still fails naming the downstream node',
+  (() => {
+    const bad = JSON.parse(JSON.stringify(uiDeadBranch));
+    bad.nodes.find(n => n.id === 12).mode = 0;
+    const c = comfy.convertUiGraphToApi(bad, uiObjectInfo3);
+    return c.ok === false && /Bypassed node "CLIPLoader"/.test(c.error) && /required input "clip" of "CLIPTextEncode"/.test(c.error);
+  })());
+// A bypassed loader feeding a bypassed consumer THROUGH a
+// Reroute converts too (the consumer is found past the Reroute).
+const uiDeadReroute = JSON.parse(JSON.stringify(uiPlainWorkflow));
+uiDeadReroute.nodes.push(
+  { id: 11, type: 'UNETLoader', mode: 4, inputs: [], widgets_values: ['flux.safetensors', 'default'] },
+  { id: 12, type: 'Reroute', inputs: [{ name: '', type: '*', link: 20 }], outputs: [{ name: '', type: '*', links: [21] }], widgets_values: [] },
+  { id: 13, type: 'LoraLoader', mode: 4, inputs: [{ name: 'model', type: 'MODEL', link: 21 }], widgets_values: ['l.safetensors', 1, 1] },
+);
+uiDeadReroute.links.push([20, 11, 0, 12, 0, 'MODEL'], [21, 12, 0, 13, 0, 'MODEL']);
+const convDeadReroute = comfy.convertUiGraphToApi(uiDeadReroute, uiObjectInfo3);
+check('dead branch through a Reroute converts (consumer found past the Reroute)',
+  convDeadReroute.ok === true
+  && !Object.values(convDeadReroute.graph).some(n => n.class_type === 'LoraLoader')
+  && Object.keys(convDeadReroute.graph).length === 9);
+// A bypassed branch INSIDE a subgraph converts: a bypassed
+// CLIPLoader feeding a bypassed CLIPTextEncode in the subgraph
+// definition leaves the expanded graph unchanged.
+const uiDeadSub = JSON.parse(JSON.stringify(uiSubgraphWorkflow));
+const deadSubDef = uiDeadSub.definitions.subgraphs[0];
+deadSubDef.nodes.push(
+  { id: 6, type: 'CLIPLoader', mode: 4, inputs: [], widgets_values: ['t5.safetensors', 'chroma', 'default'] },
+  { id: 7, type: 'CLIPTextEncode', mode: 4, inputs: [{ name: 'clip', type: 'CLIP', link: 11 }], widgets_values: ['dead branch'] },
+);
+deadSubDef.links.push({ id: 11, origin_id: 6, origin_slot: 0, target_id: 7, target_slot: 0, type: 'CLIP' });
+const convDeadSub = comfy.convertUiGraphToApi(uiDeadSub, uiObjectInfo3);
+check('dead branch inside a subgraph converts (expanded graph unchanged)',
+  convDeadSub.ok === true && Object.keys(convDeadSub.graph).length === 6
+  && !Object.values(convDeadSub.graph).some(n => n.class_type === 'CLIPTextEncode' && n.inputs.text === 'dead branch'));
+// Missing nodes name their pack when it is known, and stay
+// plain when it is not.
+check('missing node names its pack when known (ComfyUI Essentials)',
+  comfy.missingNodeTypeMessage('ImageRemoveAlpha+', 99)
+    === 'Node type not installed: ImageRemoveAlpha+ (node 99) — ComfyUI Essentials (ComfyUI_essentials); install it in ComfyUI Desktop (ComfyUI Manager) and Rescan');
+check('missing Luma node says built-in Partner Nodes, not a Manager install',
+  /built-in Luma Partner Nodes/.test(comfy.missingNodeTypeMessage('LumaImageModifyNode', 2))
+  && /not a custom-node pack/.test(comfy.missingNodeTypeMessage('LumaReferenceNode', 5))
+  && !/Manager/.test(comfy.missingNodeTypeMessage('LumaVideoNode', 1))
+  && /built-in Luma Partner Nodes/.test(comfy.missingNodeTypeMessage('LumaImageToVideoNode', 3)));
+check('missing node with no known pack reports no pack',
+  comfy.missingNodeTypeMessage('NoSuchNode', 7) === 'Node type not installed: NoSuchNode (node 7)');
+check('converter missing-node error names the pack',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[0].type = 'ImageRemoveAlpha+'; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo2); return c.ok === false && /ComfyUI Essentials/.test(c.error); })());
+if (groupComfyuiErrors) {
+  const packErrs = [
+    'a.json: Node type not installed: LumaImageModifyNode (node 2) — ComfyUI\'s built-in Luma Partner Nodes; they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+    'b.json: Node type not installed: LumaImageModifyNode (node 9) — ComfyUI\'s built-in Luma Partner Nodes; they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+    'c.json: Node type not installed: LumaReferenceNode (node 5) — ComfyUI\'s built-in Luma Partner Nodes; they ship with ComfyUI, not a custom-node pack — update ComfyUI Desktop and make sure Partner Nodes are enabled, then Rescan',
+  ];
+  const packGroups = groupComfyuiErrors(packErrs);
+  check('missing-node groups stay one group per node type, pack shown in the reason',
+    packGroups.length === 2 && packGroups[0].count === 2 && /LumaImageModifyNode/.test(packGroups[0].reason) && /Partner Nodes/.test(packGroups[0].reason)
+    && packGroups.some(g => /LumaReferenceNode/.test(g.reason) && g.count === 1));
+}
+// Available only defaults ON and is persisted: CodeFox only
+// offers workflows that are actually runnable here.
+check('Available only defaults ON, is persisted, and Clear resets to it',
+  appJs.includes('availableOnly: true,')
+  && appJs.includes("comfyui_lib_available_only")
+  && appJs.includes('function toggleComfyuiAvailableOnly')
+  && appJs.includes("toggleComfyuiAvailableOnly(!state.comfyuiLib.availableOnly)")
+  && appJs.includes('state.comfyuiLib.availableOnly = true;'));
+check('CHANGELOG has the 0.8.1 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.1 — 2026-11-24'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');
