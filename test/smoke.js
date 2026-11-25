@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.5.2.
+// 2. package.json version is 0.5.3.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.5.2', pkg.version === '0.5.2', 'got ' + pkg.version);
-check('sidebar footer shows 0.5.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.5.2 — Local'));
+check('package.json version is 0.5.3', pkg.version === '0.5.3', 'got ' + pkg.version);
+check('sidebar footer shows 0.5.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.5.3 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -538,6 +538,71 @@ if (parserSrc && codeExtsMatch) {
   check('parser keeps path case from a file: fence',
     extractFileChanges('```file:Assets/Editor/CodeFoxBridge.cs\nx\n```\n')[0].path === 'Assets/Editor/CodeFoxBridge.cs');
 }
+
+// 18. v0.5.3 curated MCP presets — six only, one click to add the config.
+const presets = require(path.join(root, 'mcp-presets.js'));
+check('mcp-presets.js exports exactly 6 presets',
+  Array.isArray(presets.MCP_PRESETS) && presets.MCP_PRESETS.length === 6,
+  'got ' + (presets.MCP_PRESETS && presets.MCP_PRESETS.length));
+check('preset ids are blender, figma, unity, github, filesystem, git',
+  JSON.stringify(presets.MCP_PRESETS.map(p => p.id)) === JSON.stringify(['blender', 'figma', 'unity', 'github', 'filesystem', 'git']));
+for (const p of presets.MCP_PRESETS) {
+  check('preset ' + p.id + ' has name, description, command, args, needs, setupSteps',
+    !!p.name && !!p.description && !!p.command && Array.isArray(p.args) && p.args.length > 0
+    && Array.isArray(p.needs) && p.needs.length > 0 && Array.isArray(p.setupSteps) && p.setupSteps.length > 0);
+}
+const byId = {};
+for (const p of presets.MCP_PRESETS) byId[p.id] = p;
+check('Blender preset uses uvx blender-mcp',
+  byId.blender.command === 'uvx' && byId.blender.args.includes('blender-mcp'));
+check('Figma preset uses npx figma-developer-mcp and needs FIGMA_API_KEY',
+  byId.figma.command === 'npx' && byId.figma.args.includes('figma-developer-mcp')
+  && byId.figma.requiresToken && byId.figma.requiresToken.envKey === 'FIGMA_API_KEY');
+check('Unity preset uses uvx mcpforunityserver',
+  byId.unity.command === 'uvx' && byId.unity.args.includes('mcpforunityserver'));
+check('GitHub preset uses @modelcontextprotocol/server-github and needs a token',
+  byId.github.args.includes('@modelcontextprotocol/server-github')
+  && byId.github.requiresToken && byId.github.requiresToken.envKey === 'GITHUB_PERSONAL_ACCESS_TOKEN');
+check('Filesystem preset uses @modelcontextprotocol/server-filesystem and needs a folder',
+  byId.filesystem.args.includes('@modelcontextprotocol/server-filesystem') && byId.filesystem.requiresFolder === true);
+check('Git preset uses mcp-server-git and needs a folder',
+  byId.git.args.includes('mcp-server-git') && byId.git.requiresFolder === true);
+check('Blender preset says CodeFox cannot start Blender',
+  (byId.blender.note || '').includes('cannot start Blender'));
+check('Unity preset says it is Coplay, not affiliated with Unity Technologies',
+  byId.unity.description.includes('Coplay') && byId.unity.description.includes('not affiliated with Unity Technologies'));
+const figmaNoToken = presets.buildServerEntry(byId.figma, {});
+check('buildServerEntry refuses Figma without a token',
+  figmaNoToken.ok === false && figmaNoToken.entry === null);
+const figmaOk = presets.buildServerEntry(byId.figma, { token: 'figd_test123' });
+check('buildServerEntry builds Figma entry with the token as env',
+  figmaOk.ok === true && figmaOk.entry.env.FIGMA_API_KEY === 'figd_test123'
+  && figmaOk.entry.args === '-y figma-developer-mcp' && figmaOk.entry.command === 'npx'
+  && figmaOk.entry.enabled === true && figmaOk.entry.presetId === 'figma');
+const fsNoFolder = presets.buildServerEntry(byId.filesystem, {});
+check('buildServerEntry refuses Filesystem without a folder',
+  fsNoFolder.ok === false && fsNoFolder.entry === null);
+const fsOk = presets.buildServerEntry(byId.filesystem, { folder: 'C:\\shared\\assets' });
+check('buildServerEntry substitutes the folder into Filesystem args',
+  fsOk.ok === true && fsOk.entry.args === '-y @modelcontextprotocol/server-filesystem C:\\shared\\assets');
+const gitOk = presets.buildServerEntry(byId.git, { folder: 'C:\\TD Pizza Racer' });
+check('buildServerEntry substitutes the folder into Git args',
+  gitOk.ok === true && gitOk.entry.args === 'mcp-server-git --repository C:\\TD Pizza Racer');
+const blenderOk = presets.buildServerEntry(byId.blender, {});
+check('buildServerEntry builds Blender entry with no token or folder',
+  blenderOk.ok === true && blenderOk.entry.command === 'uvx' && blenderOk.entry.args === 'blender-mcp');
+check('mcp-presets.js is in package.json build.files',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('mcp-presets.js'));
+check('preload.js exposes rb.mcpPresets',
+  preloadJs.includes('mcpPresets') && preloadJs.includes("require('./mcp-presets')"));
+check('MCPs section has the Recommended presets heading',
+  appJs.includes('Recommended for game development') && appJs.includes('renderMcpPresets'));
+check('MCPs section installs a preset via buildServerEntry',
+  appJs.includes('installMcpPreset') && appJs.includes('buildServerEntry'));
+check('preset Install is disabled without a required token or folder',
+  appJs.includes('mcp-preset-install-') && appJs.includes('updateMcpPresetInstallBtn'));
+check('honest MCP scope note is still present',
+  appJs.includes('does not call MCP tools yet'));
 
 if (failures) {
   console.log('\n' + failures + ' check(s) FAILED');

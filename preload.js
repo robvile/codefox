@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const { UNITY_ASSET_EXTS, isUnityAssetPath } = require('./unity-assets');
+const { MCP_PRESETS, getPreset, buildServerEntry } = require('./mcp-presets');
 
 contextBridge.exposeInMainWorld('rb', {
   // Unity-native asset files (v0.5.1) — one source of truth, shared
@@ -8,6 +9,14 @@ contextBridge.exposeInMainWorld('rb', {
   unityAssets: {
     exts: UNITY_ASSET_EXTS,
     isUnityAssetPath: (p) => isUnityAssetPath(p),
+  },
+  // Curated MCP presets (v0.5.3) — one source of truth, shared with
+  // the smoke test via mcp-presets.js. Used by the MCPs section in
+  // app.js: six recommended servers, one click to add the config.
+  mcpPresets: {
+    list: MCP_PRESETS,
+    get: (id) => getPreset(id),
+    buildServerEntry: (preset, opts) => buildServerEntry(preset, opts),
   },
   db: {
     getAll: (table) => ipcRenderer.invoke('db:getAll', table),

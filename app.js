@@ -2238,15 +2238,141 @@ async function removeLocalFolderByIndex(i) {
 // Configuration + storage only. The assistant does not call MCP tools
 // yet — that wiring is the next step, and these settings are stored so
 // it can be added without reconfiguring. Nothing here is a cloud
-// marketplace or a one-click install: servers run on this machine.
+// marketplace: the six presets below are curated recommendations,
+// and adding one only adds the *configuration* in one click — the
+// app, token, addon, or plugin each one needs is separate, and each
+// card says what it needs.
 function renderMcpsPane(body) {
   body.innerHTML = `
     <p class="settings-note">MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring.</p>
+    <h3 style="font-size:13px;margin:14px 0 4px;">Recommended for game development</h3>
+    <p class="settings-note" style="margin:0 0 8px;">Six presets, each genuinely useful for making a Unity game. Adding one only adds the configuration — the app, token, addon, or plugin it needs is separate, and each card says what it needs.</p>
+    <div id="mcp-presets"></div>
+    <h3 style="font-size:13px;margin:18px 0 4px;">Your configured servers</h3>
     <div id="mcp-list"></div>
     <button class="btn btn-teal" onclick="showMcpForm()">+ Add MCP server</button>
     <div id="mcp-form"></div>`;
+  renderMcpPresets();
   renderMcpList();
   renderMcpForm();
+}
+
+// Per-preset inline input state, keyed by preset id:
+// { expanded, token, folder }. Window-scoped so it survives a
+// re-render of the settings pane (e.g. after saving another server).
+function mcpPresetInput(id) {
+  window._mcpPresetInputs = window._mcpPresetInputs || {};
+  if (!window._mcpPresetInputs[id]) window._mcpPresetInputs[id] = { expanded: false, token: '', folder: '' };
+  return window._mcpPresetInputs[id];
+}
+
+function isMcpPresetAdded(preset) {
+  return state.mcpServers.some(s => s.presetId === preset.id || s.name === preset.name);
+}
+
+function renderMcpPresets() {
+  const el = document.getElementById('mcp-presets');
+  if (!el) return;
+  const presets = (window.rb && rb.mcpPresets) ? rb.mcpPresets.list : [];
+  el.innerHTML = presets.map(p => {
+    const added = isMcpPresetAdded(p);
+    const inp = mcpPresetInput(p.id);
+    const needsToken = !!(p.requiresToken && p.requiresToken.envKey);
+    const needsFolder = !!p.requiresFolder;
+    const needsInput = needsToken || needsFolder;
+    let action = '';
+    if (added) {
+      action = '<button class="btn btn-secondary" disabled>Added ✓</button>';
+    } else if (needsInput && !inp.expanded) {
+      action = `<button class="btn btn-teal" onclick="expandMcpPreset('${p.id}')">Add</button>`;
+    } else if (needsInput && inp.expanded) {
+      const ready = (!needsToken || (inp.token || '').trim()) && (!needsFolder || (inp.folder || '').trim());
+      const hint = needsToken ? 'Enter your ' + escHtml(p.requiresToken.label.toLowerCase()) + ' first' : 'Pick a folder first';
+      action = `<button class="btn btn-teal" id="mcp-preset-install-${p.id}" onclick="installMcpPreset('${p.id}')" ${ready ? '' : 'disabled title="' + escHtml(hint) + '"'}>Install</button>`;
+    } else {
+      action = `<button class="btn btn-teal" onclick="installMcpPreset('${p.id}')">Add</button>`;
+    }
+    const inputBlock = (needsInput && inp.expanded && !added) ? `
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
+        ${needsToken ? `<label class="field-label">${escHtml(p.requiresToken.label)}
+          <input type="password" id="mcp-preset-token-${p.id}" value="${escHtml(inp.token || '')}" placeholder="${escHtml(p.requiresToken.placeholder || '')}" oninput="onMcpPresetTokenInput('${p.id}', this)" />
+        </label>` : ''}
+        ${needsFolder ? `<label class="field-label">Folder
+          <span style="display:flex;gap:8px;"><input id="mcp-preset-folder-${p.id}" value="${escHtml(inp.folder || '')}" placeholder="${escHtml(state.projectPath || 'C:\\\\path\\\\to\\\\folder')}" oninput="onMcpPresetFolderInput('${p.id}', this)" style="flex:1;" /><button class="btn btn-secondary" onclick="browseMcpPresetFolder('${p.id}')">Browse</button></span>
+        </label>` : ''}
+      </div>` : '';
+    return `
+    <div class="conn-row" style="align-items:flex-start;">
+      <span class="conn-ico">▣</span>
+      <span class="conn-row-info" style="flex:1;">
+        <span class="conn-name">${escHtml(p.name)}</span><br>
+        <span style="font-size:12px;color:var(--text2);">${escHtml(p.tagline)}</span><br>
+        <span style="font-size:12px;color:var(--text3);">${escHtml(p.description)}</span><br>
+        <span style="font-size:11px;color:var(--text3);">What you need: ${escHtml((p.needs || []).join(' · '))}</span>
+        ${p.note ? `<br><span style="font-size:11px;color:var(--text3);">${escHtml(p.note)}</span>` : ''}
+        <details style="font-size:11px;color:var(--text3);margin-top:4px;"><summary style="cursor:pointer;">Setup steps</summary><ol style="margin:6px 0 0 16px;padding:0;">${(p.setupSteps || []).map(s => `<li>${escHtml(s)}</li>`).join('')}</ol></details>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text3);">${escHtml(p.command + ' ' + (p.args || []).join(' '))}</span>
+        ${inputBlock}
+      </span>
+      <span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">${action}</span>
+    </div>`;
+  }).join('');
+}
+
+function expandMcpPreset(id) {
+  const inp = mcpPresetInput(id);
+  inp.expanded = true;
+  if (!inp.folder) inp.folder = state.projectPath || '';
+  renderMcpPresets();
+  const tokenEl = document.getElementById('mcp-preset-token-' + id);
+  if (tokenEl) tokenEl.focus();
+}
+
+function updateMcpPresetInstallBtn(id) {
+  const p = rb.mcpPresets.get(id);
+  const inp = mcpPresetInput(id);
+  const btn = document.getElementById('mcp-preset-install-' + id);
+  if (!p || !btn) return;
+  const ready = (!p.requiresToken || (inp.token || '').trim()) && (!p.requiresFolder || (inp.folder || '').trim());
+  btn.disabled = !ready;
+}
+
+function onMcpPresetTokenInput(id, el) {
+  mcpPresetInput(id).token = el.value;
+  updateMcpPresetInstallBtn(id);
+}
+
+function onMcpPresetFolderInput(id, el) {
+  mcpPresetInput(id).folder = el.value;
+  updateMcpPresetInstallBtn(id);
+}
+
+async function browseMcpPresetFolder(id) {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  mcpPresetInput(id).folder = folder;
+  const el = document.getElementById('mcp-preset-folder-' + id);
+  if (el) el.value = folder;
+  updateMcpPresetInstallBtn(id);
+}
+
+async function installMcpPreset(id) {
+  const preset = rb.mcpPresets.get(id);
+  if (!preset) return;
+  if (isMcpPresetAdded(preset)) { showToast(preset.name + ' is already added'); return; }
+  const inp = mcpPresetInput(id);
+  // Read the live DOM values too — they are the source of truth for
+  // what the user typed, in case an oninput event was missed.
+  const tokenEl = document.getElementById('mcp-preset-token-' + id);
+  const folderEl = document.getElementById('mcp-preset-folder-' + id);
+  const token = tokenEl ? tokenEl.value : (inp.token || '');
+  const folder = folderEl ? folderEl.value : (inp.folder || state.projectPath || '');
+  const res = rb.mcpPresets.buildServerEntry(preset, { token, folder });
+  if (!res.ok) { showToast(res.error || 'Could not add this preset'); return; }
+  state.mcpServers.push(res.entry);
+  await persistMcpServers();
+  renderSettingsView();
+  showToast('✓ ' + preset.name + ' MCP server added');
 }
 
 function renderMcpList() {

@@ -284,7 +284,18 @@ The titlebar status dot shows the active provider and selected model (e.g. "LM S
 
 ### MCPs
 
-Configure local MCP servers — name, command, arguments, and `KEY=value` environment lines — each with an enabled toggle. Servers run on this machine; CodeFox never sends your code to them or anywhere else. Honest scope: MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring. There is no cloud MCP marketplace and no one-click installs.
+Configure local MCP servers — name, command, arguments, and `KEY=value` environment lines — each with an enabled toggle. Servers run on this machine; CodeFox never sends your code to them or anywhere else. Honest scope: MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring. There is no cloud MCP marketplace.
+
+**Recommended presets** — six servers, each genuinely useful for making a Unity game, one click to add the configuration (the app, token, addon, or plugin each one needs is separate, and each card says what it needs):
+
+- **Blender** (`uvx blender-mcp`) — work with 3D models, scenes, and materials in Blender. Needs Blender 3.0+, `uv`, and the Blender MCP addon installed and enabled, with the MCP server started from Blender's 3D viewport.
+- **Figma** (`npx -y figma-developer-mcp`) — read Figma designs, export images, extract styles and tokens for UI. Needs a Figma personal access token (`figd_…`), entered in the preset card; Install stays disabled without one.
+- **Unity (Coplay)** (`uvx --from mcpforunityserver mcp-for-unity --transport stdio`) — control the Unity Editor directly: scenes, GameObjects, play mode. Needs `uv` and the Coplay Unity MCP plugin in your project. Maintained by Coplay, not affiliated with Unity Technologies. It overlaps with CodeFox's own bridge, which stays the safer default for file changes.
+- **GitHub** (`npx -y @modelcontextprotocol/server-github`) — read repos, issues, and pull requests. Needs a GitHub personal access token with repo read access.
+- **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem <folder>`) — give the assistant read access to a folder outside the project, e.g. a shared assets folder. Pick the folder in the preset card.
+- **Git** (`uvx mcp-server-git --repository <folder>`) — read git history, branches, and diffs for the project. Defaults to the active project folder.
+
+Adding a preset never adds a duplicate — if it is already configured, the card shows "Added ✓". A preset server appears in the configured-servers list below with Edit / Remove / toggle working exactly like a manually added server.
 
 ### Rules
 
@@ -328,7 +339,8 @@ upm-manifest.js Unity Package Manager manifest helpers — read / back up /
 unity-bridge.js Unity bridge install helpers — bundled file first,
               embedded copy as fallback; auto-install on connect
 unity-bridge-source.js Generated embedded bridge source (scripts/embed-bridge.js)
-preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills)
+mcp-presets.js  Curated MCP presets — the six recommended servers (plain Node, no Electron)
+preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills, rb.mcpPresets)
 app.js        All UI logic — Home, projects, state, chat, modes, tools, plans, file tree, apply/revert, diff
 index.html    Layout — top bar, sidebar, Home / chat / editor / connections / references, right build panel + file tree
 ```
