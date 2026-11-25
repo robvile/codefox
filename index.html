@@ -93,6 +93,7 @@
   .badge-connections { background: rgba(45,212,160,0.15); color: var(--teal); }
   .badge-references { background: rgba(255,107,107,0.15); color: var(--coral); }
   .badge-settings { background: rgba(124,111,255,0.15); color: var(--accent); }
+  .badge-comfyui { background: rgba(245,166,35,0.15); color: var(--amber); }
 
   /* ── Settings centre view (v0.4.0) ── */
   #settings-mode { flex: 1; overflow-y: auto; padding: 20px 24px 32px; min-height: 0; }
@@ -280,6 +281,17 @@
   .field-label { color: var(--text2); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
   .field-note { color: var(--text3); font-size: 11px; }
 
+  /* ── Guided MCP setup modal (v0.6.0) ── */
+  #mcp-setup-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+  #mcp-setup-modal-overlay.open { display: flex; }
+  #mcp-setup-modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 12px; padding: 24px; width: 600px; max-width: 92vw; max-height: 86vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  #mcp-setup-modal h2 { font-size: 15px; font-weight: 500; }
+  #mcp-setup-modal input, #mcp-setup-modal select { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; font-family: var(--font); width: 100%; outline: none; }
+  #mcp-setup-modal input:focus { border-color: var(--accent); }
+  #comfyui-mode { flex: 1; overflow-y: auto; padding: 20px 24px 32px; min-height: 0; }
+  #comfyui-mode input, #comfyui-mode select, #comfyui-mode textarea { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; font-family: var(--font); outline: none; }
+  #comfyui-mode input:focus, #comfyui-mode select:focus, #comfyui-mode textarea:focus { border-color: var(--accent); }
+
   /* ── Thinking indicator ── */
   .thinking { display: flex; gap: 4px; padding: 10px 14px; align-self: flex-start; }
   .thinking span { width: 6px; height: 6px; background: var(--text3); border-radius: 50%; animation: bounce 1.2s infinite; }
@@ -375,9 +387,10 @@
 
       <div class="sidebar-section" style="padding-bottom:6px;">
         <div class="nav-item" id="nav-connections" onclick="showConnections()"><span class="nav-ico">⇄</span>Connections</div>
+        <div class="nav-item" id="nav-comfyui" onclick="showComfyUI()"><span class="nav-ico">◈</span>ComfyUI</div>
       </div>
 
-      <div id="sidebar-footer">CodeFox 0.5.3 — Local · No account needed</div>
+      <div id="sidebar-footer">CodeFox 0.6.0 — Local · No account needed</div>
     </div>
 
     <!-- CENTER -->
@@ -466,6 +479,8 @@
         <div id="references-mode" class="hidden"></div>
         <!-- Settings mode (full window, v0.4.0) -->
         <div id="settings-mode" class="hidden"></div>
+        <!-- ComfyUI mode (v0.6.0) -->
+        <div id="comfyui-mode" class="hidden"></div>
       </div>
     </div>
 
@@ -544,6 +559,11 @@
 <!-- Secondary modal (project settings, new project, skills, tokens) -->
 <div id="sub-modal-overlay">
   <div id="sub-modal"></div>
+</div>
+
+<!-- Guided MCP setup modal (v0.6.0) -->
+<div id="mcp-setup-modal-overlay">
+  <div id="mcp-setup-modal"></div>
 </div>
 
 <!-- Diff preview overlay -->

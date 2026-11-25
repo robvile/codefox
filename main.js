@@ -1,10 +1,11 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { spawn, execFile } = require('child_process');
 const upm = require('./upm-manifest');
 const unityBridge = require('./unity-bridge');
+const comfyui = require('./comfyui');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -275,6 +276,10 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('use_condensed_rules', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('condensed_rules', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('mcp_servers', '[]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_url', 'http://127.0.0.1:8188')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_enabled', '1')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows_dir', '')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows', '[]')");
   } else {
     // Migration for existing databases: add the new keys without
     // overwriting anything the user already set.
@@ -297,6 +302,10 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('use_condensed_rules', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('condensed_rules', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('mcp_servers', '[]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_url', 'http://127.0.0.1:8188')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_enabled', '1')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows_dir', '')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows', '[]')");
   }
 
   // v0.5.0: max agent-loop rounds (default 5, range 1–10).
@@ -1150,6 +1159,242 @@ ipcMain.handle('shell:run', async (_, payload) => {
   }
   if (r.timedOut) return { ok: false, error: 'Command timed out after 60 seconds.', stdout: String(r.stdout || '').slice(0, 8000), stderr: String(r.stderr || '').slice(0, 8000) };
   return { ok: r.code === 0, code: r.code, stdout: String(r.stdout || '').slice(0, 8000), stderr: String(r.stderr || '').slice(0, 8000) };
+});
+
+
+// ── Open a link in the user's browser ────────────────────────────
+// Links in guided setup prompts (and the ComfyUI panel) open here,
+// never by navigating the app window. Only http(s) URLs are allowed.
+ipcMain.handle('shell:openExternal', async (_, url) => {
+  const u = String(url || '').trim();
+  if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'Only http(s) links can be opened.' };
+  try { await shell.openExternal(u); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+// ── MCP guided-setup checks (v0.6.0) ────────────────────────────
+// These are CodeFox's own checks, not user commands: they run even
+// when the shell tool is off, via child_process directly, never via
+// shell:run. A check reports exactly what was measured — a pass is
+// never claimed without a real response from the service or the
+// machine. A failed check never blocks adding; the guided prompt
+// also offers an "add it anyway" checkbox.
+function runWhere(cmd) {
+  return new Promise((resolve) => {
+    const finder = process.platform === 'win32' ? 'where' : 'which';
+    execFile(finder, [cmd], { timeout: 5000, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve({ found: false, path: null });
+      const p = String(stdout || '').split('\n')[0].trim();
+      resolve({ found: !!p, path: p || null });
+    });
+  });
+}
+function runVersion(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: 8000, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve({ ok: false, output: '' });
+      resolve({ ok: true, output: String(stdout || '').trim().split('\n')[0] });
+    });
+  });
+}
+async function checkTokenAgainstApi(url, headers, timeoutMs) {
+  try {
+    const res = await fetchJson(url, { headers }, timeoutMs || 10000);
+    if (res.ok) {
+      let who = null;
+      try { const d = await res.json(); who = (d && (d.name || d.login || d.username || (d.user && d.user.name))) || null; } catch {}
+      return { ok: true, checked: true, message: 'Token accepted' + (who ? ' — signed in as ' + who : '') + '.' };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, checked: true, message: 'Token rejected (HTTP ' + res.status + ') — check the token and try again.' };
+    }
+    return { ok: false, checked: true, message: 'Service answered HTTP ' + res.status + ' — the token could not be verified.' };
+  } catch (e) {
+    return { ok: false, checked: false, message: 'Could not reach the service: ' + (e.message || e) };
+  }
+}
+ipcMain.handle('mcp:checkToken', async (_, payload) => {
+  const p = payload || {};
+  const presetId = String(p.presetId || '');
+  const token = String(p.token || '').trim();
+  if (!token && presetId !== 'atlassian' && presetId !== 'trello') {
+    return { ok: false, checked: false, message: 'No token given — paste one first.' };
+  }
+  try {
+    if (presetId === 'figma') {
+      return await checkTokenAgainstApi('https://api.figma.com/v1/me', { 'X-Figma-Token': token });
+    }
+    if (presetId === 'github') {
+      return await checkTokenAgainstApi('https://api.github.com/user', { Authorization: 'Bearer ' + token, 'User-Agent': 'CodeFox' });
+    }
+    if (presetId === 'notion') {
+      return await checkTokenAgainstApi('https://api.notion.com/v1/users/me', { Authorization: 'Bearer ' + token, 'Notion-Version': '2022-06-28' });
+    }
+    if (presetId === 'atlassian') {
+      const site = String(p.site || '').trim().replace(/\/+$/, '');
+      const email = String(p.email || '').trim();
+      if (!site || !email || !token) return { ok: false, checked: false, message: 'Site URL, email, and API token are all needed for the check.' };
+      if (!/^https?:\/\//i.test(site)) return { ok: false, checked: false, message: 'Site URL must start with https:// — e.g. https://your-team.atlassian.net' };
+      const basic = Buffer.from(email + ':' + token).toString('base64');
+      return await checkTokenAgainstApi(site + '/rest/api/3/myself', { Authorization: 'Basic ' + basic });
+    }
+    if (presetId === 'trello') {
+      const apiKey = String(p.apiKey || '').trim();
+      if (!apiKey || !token) return { ok: false, checked: false, message: 'Both the API key and the token are needed for the check.' };
+      return await checkTokenAgainstApi('https://api.trello.com/1/members/me?key=' + encodeURIComponent(apiKey) + '&token=' + encodeURIComponent(token), {});
+    }
+    return { ok: false, checked: false, message: 'No automatic check for this preset.' };
+  } catch (e) {
+    return { ok: false, checked: false, message: 'Check failed: ' + (e.message || e) };
+  }
+});
+ipcMain.handle('mcp:checkApp', async (_, payload) => {
+  const presetId = String((payload || {}).presetId || '');
+  const checks = [];
+  try {
+    if (presetId === 'blender') {
+      const blender = await runWhere('blender');
+      const uvx = await runWhere('uvx');
+      checks.push({ label: 'Blender on PATH', found: blender.found, detail: blender.found ? blender.path : 'Blender not found on PATH — install Blender 3.0+ first' });
+      checks.push({ label: 'uvx on PATH', found: uvx.found, detail: uvx.found ? uvx.path : 'uvx not found on PATH — install uv first' });
+      if (uvx.found) {
+        const v = await runVersion('uvx', ['--version']);
+        checks.push({ label: 'uvx runs', found: v.ok, detail: v.ok ? v.output : 'uvx --version failed' });
+      }
+    } else if (presetId === 'unity' || presetId === 'git') {
+      const uvx = await runWhere('uvx');
+      checks.push({ label: 'uvx on PATH', found: uvx.found, detail: uvx.found ? uvx.path : 'uvx not found on PATH — install uv first' });
+      if (presetId === 'git') {
+        const git = await runWhere('git');
+        checks.push({ label: 'git on PATH', found: git.found, detail: git.found ? git.path : 'git not found on PATH — install git first' });
+      }
+    } else {
+      return { ok: false, checked: false, checks: [], message: 'No automatic check for this preset.' };
+    }
+    const allOk = checks.length > 0 && checks.every(c => c.found);
+    return { ok: allOk, checked: true, checks, message: allOk ? 'All prerequisites found.' : 'Some prerequisites are missing — see the list.' };
+  } catch (e) {
+    return { ok: false, checked: false, checks, message: 'Check failed: ' + (e.message || e) };
+  }
+});
+
+// ── ComfyUI native integration (v0.6.0) ─────────────────────────
+// CodeFox talks to a locally running ComfyUI instance over its own
+// HTTP API. Every call is guarded with a timeout and try/catch, and
+// the integration is inert until a connection succeeds — a missing
+// ComfyUI never blocks the app and no status is ever faked.
+let _comfyuiObjectInfoCache = { at: 0, data: null };
+ipcMain.handle('comfyui:status', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  try { return await comfyui.getComfyuiStatus(url); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e), url: comfyui.normalizeComfyuiUrl(url) }; }
+});
+ipcMain.handle('comfyui:objectInfo', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  if (_comfyuiObjectInfoCache.data && Date.now() - _comfyuiObjectInfoCache.at < 5 * 60 * 1000) {
+    return { ok: true, data: _comfyuiObjectInfoCache.data, cached: true };
+  }
+  try {
+    const r = await comfyui.getObjectInfo(url);
+    if (r.ok) {
+      _comfyuiObjectInfoCache = { at: Date.now(), data: r.data };
+      return { ok: true, data: r.data, capabilities: comfyui.detectCapabilities(r.data), cached: false };
+    }
+    return r;
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle('comfyui:queue', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  try { return await comfyui.getQueue(url); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle('comfyui:history', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  try { return await comfyui.getHistory(url, payload && payload.promptId); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle('comfyui:submit', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  let graph = (payload && payload.prompt) || null;
+  let unapplied = [];
+  if (!graph && payload && payload.file) {
+    // Submit from a stored workflow file: read the graph, then
+    // substitute the caller's inputs into a clone — the stored
+    // workflow file is never mutated.
+    try {
+      if (!fs.existsSync(payload.file)) return { ok: false, error: 'Workflow file not found: ' + payload.file };
+      const stored = JSON.parse(fs.readFileSync(payload.file, 'utf8'));
+      const built = comfyui.buildSubmitPrompt(stored, (payload.inputs && typeof payload.inputs === 'object') ? payload.inputs : {});
+      graph = built.prompt;
+      unapplied = built.unapplied;
+    } catch (e) { return { ok: false, error: 'Could not read workflow file: ' + e.message }; }
+  }
+  if (!graph || typeof graph !== 'object') return { ok: false, error: 'No workflow graph to submit.' };
+  try {
+    const r = await comfyui.submitPrompt(url, graph, (payload && payload.clientId) || undefined);
+    if (r.ok && unapplied.length) r.unapplied = unapplied;
+    return r;
+  }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Download one output and save it to destPath on disk. Bytes never
+// go base64 through the renderer.
+ipcMain.handle('comfyui:view', async (_, payload) => {
+  const p = payload || {};
+  const url = p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  if (!p.filename) return { ok: false, error: 'comfyui:view needs a filename.' };
+  const destPath = p.destPath || path.join(require('os').tmpdir(), 'codefox-comfyui', String(p.promptId || 'cache'), String(p.filename).split(/[\\/]/).pop());
+  try {
+    return await comfyui.downloadView(url, { filename: p.filename, subfolder: p.subfolder || '', type: p.type || 'output' }, destPath);
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle('comfyui:uploadImage', async (_, payload) => {
+  const p = payload || {};
+  const url = p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  if (!p.filePath) return { ok: false, error: 'comfyui:uploadImage needs a filePath.' };
+  try { return await comfyui.uploadImage(url, p.filePath, { subfolder: p.subfolder || '', overwrite: !!p.overwrite }); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle('comfyui:defaultWorkflowsDir', async () => {
+  try { return { ok: true, dir: comfyui.defaultWorkflowsDir() }; }
+  catch (e) { return { ok: false, error: String((e && e.message) || e), dir: '' }; }
+});
+// Read the user's workflow folder and catalogue every *.json in it.
+// The stored catalogue (purpose labels + approvals) is merged back
+// in by id, so a rescan never wipes the user's labels. When ComfyUI
+// is not running, object_info cannot be fetched, so every workflow
+// is marked unavailable with the honest reason — never "checked"
+// when it was not.
+ipcMain.handle('comfyui:listWorkflows', async (_, payload) => {
+  const p = payload || {};
+  const dir = p.dir || readSetting('comfyui_workflows_dir', '') || comfyui.defaultWorkflowsDir();
+  let stored = [];
+  try { stored = JSON.parse(readSetting('comfyui_workflows', '[]') || '[]'); } catch { stored = []; }
+  let objectInfo = null;
+  let objectInfoError = null;
+  try {
+    const r = await comfyui.getObjectInfo(p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL));
+    if (r.ok) objectInfo = r.data; else objectInfoError = r.error;
+  } catch (e) { objectInfoError = String((e && e.message) || e); }
+  const imported = comfyui.importWorkflowsFromDir(dir, objectInfo, stored);
+  if (!imported.ok) return { ...imported, dir, objectInfoError };
+  if (!objectInfo) {
+    for (const w of imported.workflows) {
+      w.available = false;
+      w.availableReason = 'ComfyUI not running — dependencies not checked yet' + (objectInfoError ? ' (' + objectInfoError + ')' : '');
+      if (!w.missing.includes('ComfyUI not running')) w.missing = ['ComfyUI not running — could not check nodes/models'];
+    }
+  }
+  return { ok: true, dir, workflows: imported.workflows, errors: imported.errors, objectInfoError };
+});
+// Read one stored workflow graph back from its file, for submit.
+ipcMain.handle('comfyui:readWorkflow', async (_, payload) => {
+  const file = (payload && payload.file) || '';
+  try {
+    if (!file || !fs.existsSync(file)) return { ok: false, error: 'Workflow file not found: ' + file };
+    const graph = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { ok: true, graph };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
 
 // ── Ollama management IPC ─────────────────────────────────────────

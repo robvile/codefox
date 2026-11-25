@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'comfyui.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -24,8 +24,8 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
 
 // 2. package.json version is 0.5.3.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.5.3', pkg.version === '0.5.3', 'got ' + pkg.version);
-check('sidebar footer shows 0.5.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.5.3 — Local'));
+check('package.json version is 0.6.0', pkg.version === '0.6.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.6.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -539,13 +539,15 @@ if (parserSrc && codeExtsMatch) {
     extractFileChanges('```file:Assets/Editor/CodeFoxBridge.cs\nx\n```\n')[0].path === 'Assets/Editor/CodeFoxBridge.cs');
 }
 
-// 18. v0.5.3 curated MCP presets — six only, one click to add the config.
+// 18. v0.5.3 curated MCP presets, extended in v0.6.0 — ten only, one click to add the config, plus a guided setup prompt.
 const presets = require(path.join(root, 'mcp-presets.js'));
-check('mcp-presets.js exports exactly 6 presets',
-  Array.isArray(presets.MCP_PRESETS) && presets.MCP_PRESETS.length === 6,
+check('mcp-presets.js exports exactly 10 presets',
+  Array.isArray(presets.MCP_PRESETS) && presets.MCP_PRESETS.length === 10,
   'got ' + (presets.MCP_PRESETS && presets.MCP_PRESETS.length));
-check('preset ids are blender, figma, unity, github, filesystem, git',
-  JSON.stringify(presets.MCP_PRESETS.map(p => p.id)) === JSON.stringify(['blender', 'figma', 'unity', 'github', 'filesystem', 'git']));
+check('preset ids are exactly the 10 verified ids',
+  JSON.stringify(presets.MCP_PRESETS.map(p => p.id)) === JSON.stringify(['blender', 'figma', 'unity', 'github', 'filesystem', 'git', 'atlassian', 'notion', 'trello', 'perforce']));
+check('no Miro preset in mcp-presets.js',
+  !fs.readFileSync(path.join(root, 'mcp-presets.js'), 'utf8').toLowerCase().includes('miro'));
 for (const p of presets.MCP_PRESETS) {
   check('preset ' + p.id + ' has name, description, command, args, needs, setupSteps',
     !!p.name && !!p.description && !!p.command && Array.isArray(p.args) && p.args.length > 0
@@ -604,8 +606,245 @@ check('preset Install is disabled without a required token or folder',
 check('honest MCP scope note is still present',
   appJs.includes('does not call MCP tools yet'));
 
-if (failures) {
-  console.log('\n' + failures + ' check(s) FAILED');
-  process.exit(1);
+
+// 19. v0.6.0 — guided setup prompt, four new presets, ComfyUI.
+check('every preset has a checkKind',
+  presets.MCP_PRESETS.every(p => typeof p.checkKind === 'string' && p.checkKind.length > 0));
+check('token presets declare a real check',
+  ['figma', 'github', 'notion', 'atlassian', 'trello'].every(id => {
+    const p = byId[id];
+    return p && ['figma', 'github', 'notion', 'atlassian', 'trello'].includes(p.checkKind);
+  }));
+check('Atlassian preset uses uvx mcp-atlassian with site/email/token fields',
+  byId.atlassian.command === 'uvx' && byId.atlassian.args.includes('mcp-atlassian')
+  && Array.isArray(byId.atlassian.requiresFields)
+  && ['site', 'email', 'token'].every(k => byId.atlassian.requiresFields.some(f => f.key === k))
+  && byId.atlassian.env.JIRA_URL === '<site>' && byId.atlassian.env.JIRA_USERNAME === '<email>'
+  && byId.atlassian.env.JIRA_API_TOKEN === '<token>');
+check('Notion preset uses the official server and needs NOTION_TOKEN',
+  byId.notion.command === 'npx' && byId.notion.args.includes('@notionhq/notion-mcp-server')
+  && byId.notion.requiresToken && byId.notion.requiresToken.envKey === 'NOTION_TOKEN');
+check('Trello preset needs an API key and a token',
+  byId.trello.args.includes('@delorenj/mcp-server-trello')
+  && Array.isArray(byId.trello.requiresFields)
+  && byId.trello.requiresFields.some(f => f.key === 'apiKey')
+  && byId.trello.requiresFields.some(f => f.key === 'token')
+  && byId.trello.env.TRELLO_API_KEY === '<apiKey>' && byId.trello.env.TRELLO_TOKEN === '<token>');
+check('Perforce preset is read-only uvx with no automatic check',
+  byId.perforce.command === 'uvx' && byId.perforce.args.includes('p4mcp-server')
+  && byId.perforce.args.includes('--readonly') && byId.perforce.checkKind === 'none');
+check('Filesystem preset has no automatic check',
+  byId.filesystem.checkKind === 'none');
+const atlOk = presets.buildServerEntry(byId.atlassian, { fields: { site: 'https://team.atlassian.net', email: 'a@example.com', token: 'ATATT123' } });
+check('buildServerEntry builds Atlassian entry from site/email/token fields',
+  atlOk.ok === true && atlOk.entry.env.JIRA_URL === 'https://team.atlassian.net'
+  && atlOk.entry.env.JIRA_USERNAME === 'a@example.com' && atlOk.entry.env.JIRA_API_TOKEN === 'ATATT123'
+  && atlOk.entry.args === 'mcp-atlassian');
+check('buildServerEntry refuses Atlassian without an email',
+  presets.buildServerEntry(byId.atlassian, { fields: { site: 'https://team.atlassian.net', token: 'ATATT123' } }).ok === false);
+const trelloOk = presets.buildServerEntry(byId.trello, { fields: { apiKey: 'key123', token: 'tok456' } });
+check('buildServerEntry builds Trello entry from apiKey/token fields',
+  trelloOk.ok === true && trelloOk.entry.env.TRELLO_API_KEY === 'key123' && trelloOk.entry.env.TRELLO_TOKEN === 'tok456');
+check('main.js has mcp:checkToken + mcp:checkApp IPCs (not via shell:run)',
+  mainJs.includes("ipcMain.handle('mcp:checkToken'") && mainJs.includes("ipcMain.handle('mcp:checkApp'")
+  && mainJs.includes('api.figma.com/v1/me') && mainJs.includes('api.github.com/user')
+  && mainJs.includes('api.notion.com/v1/users/me') && mainJs.includes('rest/api/3/myself')
+  && mainJs.includes('api.trello.com/1/members/me'));
+check('main.js has shell:openExternal IPC using shell.openExternal',
+  mainJs.includes("ipcMain.handle('shell:openExternal'") && mainJs.includes('shell.openExternal'));
+check('preload.js exposes rb.mcp checks and rb.shell.openExternal',
+  preloadJs.includes('checkToken') && preloadJs.includes('checkApp') && preloadJs.includes('openExternal'));
+check('guided setup modal exists in index.html + app.js',
+  indexHtml.includes('mcp-setup-modal-overlay') && indexHtml.includes('id="mcp-setup-modal"')
+  && appJs.includes('function openMcpSetupModal') && appJs.includes('runMcpSetupCheck')
+  && appJs.includes('I have done the steps above'));
+check('guided setup Add is gated on check pass or the anyway checkbox',
+  appJs.includes('setup.checkPassed') && appJs.includes('mcp-setup-anyway') && appJs.includes('updateMcpSetupAddBtn'));
+check('MCPs section says ten presets and offers Quick add',
+  appJs.includes('Ten presets') && appJs.includes('Quick add'));
+
+// ComfyUI helper: workflow parser, submit-payload builder, capabilities.
+const comfy = require(path.join(root, 'comfyui.js'));
+check('comfyui.js exports the client + parser + capabilities',
+  typeof comfy.parseWorkflowGraph === 'function' && typeof comfy.buildSubmitPrompt === 'function'
+  && typeof comfy.detectCapabilities === 'function' && typeof comfy.getComfyuiStatus === 'function'
+  && typeof comfy.submitPrompt === 'function' && typeof comfy.downloadView === 'function'
+  && typeof comfy.uploadImage === 'function' && typeof comfy.importWorkflowsFromDir === 'function'
+  && comfy.DEFAULT_COMFYUI_URL === 'http://127.0.0.1:8188');
+const fakeWorkflow = {
+  '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'sd_xl.safetensors' } },
+  '2': { class_type: 'CLIPTextEncode', _meta: { title: 'Positive' }, inputs: { text: 'a knight' } },
+  '3': { class_type: 'CLIPTextEncode', _meta: { title: 'Negative' }, inputs: { text: 'blurry' } },
+  '4': { class_type: 'KSampler', inputs: { seed: 42, steps: 20, cfg: 7, sampler_name: 'euler', scheduler: 'normal', positive: ['2', 0], negative: ['3', 0], latent_image: ['5', 0], model: ['1', 0] } },
+  '5': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+  '6': { class_type: 'VAEDecode', inputs: { samples: ['4', 0], vae: ['1', 2] } },
+  '7': { class_type: 'SaveImage', inputs: { filename_prefix: 'card-art', images: ['6', 0] } },
+  '8': { class_type: 'ControlNetApply', inputs: { strength: 1.0, conditioning: ['2', 0], control_net: ['9', 0], image: ['10', 0] } },
+  '9': { class_type: 'ControlNetLoader', inputs: { control_net_name: 'control.safetensors' } },
+  '10': { class_type: 'LoadImage', inputs: { image: 'ref.png' } },
+};
+const fakeObjectInfo = {
+  CheckpointLoaderSimple: { input: { required: { ckpt_name: [['sd_xl.safetensors']] } } },
+  CLIPTextEncode: { input: { required: { text: [['']] } } },
+  KSampler: { input: { required: {} } },
+  EmptyLatentImage: { input: { required: {} } },
+  VAEDecode: { input: { required: {} } },
+  SaveImage: { input: { required: {} } },
+  LoadImage: { input: { required: {} } },
+};
+const parsedWf = comfy.parseWorkflowGraph(fakeWorkflow, fakeObjectInfo);
+check('workflow parser detects positive/negative prompts by KSampler link',
+  parsedWf.inputs.some(i => i.role === 'positive' && i.value === 'a knight')
+  && parsedWf.inputs.some(i => i.role === 'negative' && i.value === 'blurry'));
+check('workflow parser detects KSampler seed/steps/cfg',
+  parsedWf.inputs.some(i => i.inputName === 'seed' && i.value === 42)
+  && parsedWf.inputs.some(i => i.inputName === 'steps' && i.value === 20)
+  && parsedWf.inputs.some(i => i.inputName === 'cfg' && i.value === 7));
+check('workflow parser detects SaveImage outputs',
+  parsedWf.outputs.some(o => o.classType === 'SaveImage' && o.nodeId === '7'));
+check('workflow parser reports a missing node class and marks unavailable',
+  parsedWf.available === false
+  && parsedWf.missing.some(m => m.includes('ControlNetApply'))
+  && parsedWf.missing.some(m => m.includes('ControlNetLoader')));
+check('workflow parser accepts the installed checkpoint',
+  !parsedWf.missing.some(m => m.includes('sd_xl.safetensors')));
+const missingCkpt = comfy.parseWorkflowGraph(
+  { '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'gone.safetensors' } } }, fakeObjectInfo);
+check('workflow parser reports a missing checkpoint',
+  missingCkpt.missing.some(m => m.includes('gone.safetensors')) && missingCkpt.available === false);
+const built = comfy.buildSubmitPrompt(fakeWorkflow, { positive: 'a dragon', seed: 7, '1.ckpt_name': 'other.safetensors', nosuchinput: 'x' });
+check('submit-payload builder substitutes positive/seed/checkpoint',
+  built.prompt['2'].inputs.text === 'a dragon' && built.prompt['4'].inputs.seed === 7
+  && built.prompt['1'].inputs.ckpt_name === 'other.safetensors'
+  && built.applied.includes('positive') && built.applied.includes('seed')
+  && built.unapplied.includes('nosuchinput'));
+check('submit-payload builder does not mutate the stored workflow',
+  fakeWorkflow['2'].inputs.text === 'a knight' && fakeWorkflow['4'].inputs.seed === 42
+  && fakeWorkflow['1'].inputs.ckpt_name === 'sd_xl.safetensors');
+const caps = comfy.detectCapabilities({ KSampler: {}, CheckpointLoaderSimple: {}, SaveVideo: {}, ImageUpscaleWithModel: {}, ControlNetLoader: {} });
+check('capability detection lists only what the install has',
+  caps.some(c => c.id === 'image') && caps.some(c => c.id === 'video')
+  && caps.some(c => c.id === 'upscale') && caps.some(c => c.id === 'controlnet')
+  && !caps.some(c => c.id === 'inpaint'));
+check('capability detection returns nothing without object_info',
+  comfy.detectCapabilities(null).length === 0);
+check('defaultWorkflowsDir returns a string',
+  typeof comfy.defaultWorkflowsDir() === 'string');
+
+// Workflow import from a folder: valid JSON catalogued, bad JSON
+// reported, stored purpose + approval survive a rescan.
+const tmpWf = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-comfyui-'));
+try {
+  fs.writeFileSync(path.join(tmpWf, 'card-art.json'), JSON.stringify(fakeWorkflow));
+  fs.writeFileSync(path.join(tmpWf, 'broken.json'), '{not json');
+  fs.writeFileSync(path.join(tmpWf, 'notes.txt'), 'not a workflow');
+  const imported = comfy.importWorkflowsFromDir(tmpWf, fakeObjectInfo,
+    [{ id: 'card-art', purpose: 'Card art for the game', approved: true }]);
+  check('import catalogues the valid workflow and skips non-JSON files',
+    imported.ok === true && imported.workflows.length === 1 && imported.workflows[0].id === 'card-art');
+  check('import keeps the stored purpose and approval',
+    imported.workflows[0].purpose === 'Card art for the game' && imported.workflows[0].approved === true);
+  check('import reports the broken JSON file',
+    imported.errors.length === 1 && imported.errors[0].includes('broken.json'));
+  check('import refuses a missing folder',
+    comfy.importWorkflowsFromDir(path.join(tmpWf, 'no-such-folder'), fakeObjectInfo, []).ok === false);
+} finally {
+  fs.rmSync(tmpWf, { recursive: true, force: true });
 }
-console.log('\nAll smoke checks passed.');
+
+check('main.js has the comfyui:* IPCs and seeds the ComfyUI settings',
+  mainJs.includes("ipcMain.handle('comfyui:status'") && mainJs.includes("ipcMain.handle('comfyui:objectInfo'")
+  && mainJs.includes("ipcMain.handle('comfyui:queue'") && mainJs.includes("ipcMain.handle('comfyui:history'")
+  && mainJs.includes("ipcMain.handle('comfyui:submit'") && mainJs.includes("ipcMain.handle('comfyui:view'")
+  && mainJs.includes("ipcMain.handle('comfyui:uploadImage'") && mainJs.includes("ipcMain.handle('comfyui:listWorkflows'")
+  && mainJs.includes("'comfyui_url', 'http://127.0.0.1:8188'") && mainJs.includes("'comfyui_workflows', '[]'"));
+check('comfyui.js status falls back to /object_info and never fakes ok',
+  fs.readFileSync(path.join(root, 'comfyui.js'), 'utf8').includes('/system_stats')
+  && fs.readFileSync(path.join(root, 'comfyui.js'), 'utf8').includes('/object_info')
+  && mainJs.includes('getComfyuiStatus'));
+check('preload.js exposes rb.comfyui with status/submit/view/history',
+  preloadJs.includes('comfyui:') && preloadJs.includes("ipcRenderer.invoke('comfyui:status'")
+  && preloadJs.includes("ipcRenderer.invoke('comfyui:submit'") && preloadJs.includes("ipcRenderer.invoke('comfyui:view'"));
+check('package.json build.files includes comfyui.js',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('comfyui.js'));
+check('ComfyUI view + sidebar item exist in index.html/app.js',
+  indexHtml.includes('nav-comfyui') && indexHtml.includes('comfyui-mode') && indexHtml.includes('showComfyUI()')
+  && appJs.includes('function showComfyUI') && appJs.includes('function renderComfyUIView')
+  && appJs.includes('Workflow Library') && appJs.includes('Discovered capabilities'));
+check('ComfyUI view has connection card, Generate panel, history, import',
+  appJs.includes('comfyui-url') && appJs.includes('runComfyuiFromPanel') && appJs.includes('comfyuiHistory')
+  && appJs.includes('Assets/Generated/') && appJs.includes('importComfyuiOutputs'));
+check('only approved workflows auto-run in the Agent loop',
+  appJs.includes('function parseComfyuiBlocks') && appJs.includes("type: 'comfyui'")
+  && appJs.includes('if (!wf.approved)') && appJs.includes('function showComfyuiBar')
+  && appJs.includes('Workflow unavailable'));
+check('agent loop polls ComfyUI (no WebSocket client) with a 10-minute cap',
+  appJs.includes('function pollComfyuiPrompt') && appJs.includes('10 * 60 * 1000')
+  && !appJs.includes('new WebSocket'));
+check('ComfyUI settings live in Settings → Connections, not Model',
+  appJs.includes("Open ComfyUI panel") && appJs.includes('verifyComfyuiFromSettings'));
+check('README documents ComfyUI, approval, and the agent block',
+  readme.includes('ComfyUI') && readme.includes('Approved for autonomous execution')
+  && readme.includes('```comfyui') && readme.includes('/system_stats')
+  && readme.includes('Miro') && readme.includes('no Miro preset'));
+check('README documents the guided setup prompt',
+  readme.includes('guided setup prompt') && readme.includes('Add server'));
+
+// ComfyUI HTTP client against a mock server (no real ComfyUI).
+const http = require('http');
+const mockServer = http.createServer((req, res) => {
+  if (req.url === '/system_stats') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ comfyui_version: '0.3.60', system: { os: 'windows' } }));
+  } else if (req.url === '/object_info') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ KSampler: { input: { required: {} } } }));
+  } else if (req.url === '/prompt' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ prompt_id: 'mock-prompt-1', number: 1, node_errors: {} }));
+    });
+  } else if (req.url === '/view?filename=x.png&subfolder=&type=output') {
+    res.writeHead(200, { 'Content-Type': 'image/png' });
+    res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+(async () => {
+  await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
+  const base = 'http://127.0.0.1:' + mockServer.address().port;
+  try {
+    const st = await comfy.getComfyuiStatus(base);
+    check('mock server: status reports ok with the real version',
+      st.ok === true && st.version === '0.3.60');
+    const sub = await comfy.submitPrompt(base, fakeWorkflow, 'test-client');
+    check('mock server: submit returns a prompt_id',
+      sub.ok === true && sub.prompt_id === 'mock-prompt-1');
+    const tmpDl = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-comfyui-dl-'));
+    try {
+      const dl = await comfy.downloadView(base, { filename: 'x.png', subfolder: '', type: 'output' }, path.join(tmpDl, 'x.png'));
+      check('mock server: view downloads bytes to disk',
+        dl.ok === true && fs.existsSync(path.join(tmpDl, 'x.png')) && fs.readFileSync(path.join(tmpDl, 'x.png'))[0] === 0x89);
+    } finally { fs.rmSync(tmpDl, { recursive: true, force: true }); }
+  } finally { mockServer.close(); }
+  const down = await comfy.getComfyuiStatus('http://127.0.0.1:1');
+  check('status reports not-ok (never fake ok) when nothing is listening',
+    down.ok === false && !!down.error);
+  finish();
+})().catch((e) => {
+  check('mock ComfyUI server tests ran without throwing', false, String(e && e.message));
+  finish();
+});
+
+function finish() {
+  if (failures) {
+    console.log('\n' + failures + ' check(s) FAILED');
+    process.exit(1);
+  }
+  console.log('\nAll smoke checks passed.');
+}

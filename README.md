@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.5.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.6.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -26,7 +26,8 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 - **References** — pages and plans in one list: AI-authored architecture docs (pages) and step-by-step plans, kept per project so they grow into a living knowledge base
 - **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it
 - **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/` (and can be removed again from Settings → Connections, which deletes the file); it installs automatically whenever a Unity project is connected, and opening Settings → Connections on a project without a bridge installs it then. Figma/Jira tokens are stored locally and used only for those imports
-- **MCPs** — configure local MCP servers (command, arguments, environment) in Settings → MCPs. Servers run on this machine; the assistant does not call MCP tools yet, and the UI says so — the settings are stored so that wiring can be added without reconfiguring
+- **MCPs** — configure local MCP servers (command, arguments, environment) in Settings → MCPs, with ten recommended presets and a guided setup prompt that walks through the steps and checks each token or app for real. Servers run on this machine; the assistant does not call MCP tools yet, and the UI says so — the settings are stored so that wiring can be added without reconfiguring
+- **ComfyUI** — a native integration with a locally running ComfyUI (default `http://127.0.0.1:8188`): import your own workflow JSON files, see which nodes and models each one needs, generate images from the ComfyUI panel or from the Agent loop, and import the results into the project under `Assets/Generated/<workflow>/`. Only workflows you approve run from the Agent loop without asking
 - **Shell tool** — with the shell off by default, the assistant's PowerShell blocks never run on their own. Turn it on in Settings → Advanced to run commands, auto-approve safe prefixes, or auto-accept project changes (still snapshotted first, always revertible)
 - **File tree** — browse your project, view files, add them to chat with one click. Search across all files instantly.
 - **Apply changes** — LLM responses containing code blocks get a one-click "Apply changes" button that writes files to disk. A **Review diff** button shows a line-by-line diff before you apply.
@@ -200,6 +201,34 @@ https://github.com/user/repo.git#1.0.0
 
 Package installs and removals **always** need approval (see above). The project scan includes the installed packages (with requested and locked versions), so the model knows what is already installed and does not re-install it. Settings → Connections (and the Connections view) lists the installed packages under the Unity row, each with a Remove button that needs a confirm click.
 
+### ComfyUI
+
+CodeFox connects directly to a locally running ComfyUI instance — a **native** provider, not an MCP server. ComfyUI handles generation; CodeFox handles the workflow: importing your workflows, checking them, running them, and getting the results into the project.
+
+**Connection** — open **ComfyUI** in the sidebar (under Connections) or Settings → Connections → ComfyUI. The default URL is `http://127.0.0.1:8188` (configurable). **Verify** checks the real server: it tries `GET /system_stats` and falls back to `GET /object_info` on ComfyUI versions that do not serve it, and shows the ComfyUI version when the server reports one. When ComfyUI is not running the panel says "Not running" with the real error — nothing is faked, and the integration stays inert until a connection succeeds. **Open ComfyUI ↗** opens the URL in your browser.
+
+**Discovered capabilities** — read live from `GET /object_info` and shown as chips: image generation (KSampler + CheckpointLoader present), video, upscaling, ControlNet, inpainting, image-to-image, LoRA, IP-Adapter. A capability is only listed when this install actually has the nodes for it.
+
+**Workflow Library** — pick the folder containing your ComfyUI workflow JSON files (CodeFox looks for the usual ComfyUI Desktop workflows folder first, otherwise you pick one). **Rescan** reads every `*.json` in that folder as an API-format workflow graph and catalogues it: name (from the filename), a purpose label you can edit, the configurable inputs it detected (positive/negative prompt from the CLIPTextEncode nodes wired into the KSampler, seed / steps / cfg / sampler / scheduler, checkpoint name, input image, filename prefix, and any other string/number input), the output nodes (SaveImage / PreviewImage / SaveVideo), and missing dependencies — node types not present in `/object_info`, and checkpoint names not in the model lists ComfyUI reports. A workflow with missing dependencies is marked **Unavailable** with the reason shown; nothing is auto-installed. Workflows are stored as your own files plus this catalogue (`comfyui_workflows` setting) — CodeFox never hardcodes a workflow graph and never ships a sample workflow as if it were yours.
+
+**Generate** — select a workflow and the panel shows editable inputs for it: prompt and negative prompt, seed (with a Randomise button), steps, cfg, and any other detected input. **Run** submits the workflow and polls `/queue` + `/history` every 2 seconds (polling, not a WebSocket — by design) until it completes, with a Cancel button and a 10-minute cap. On completion the output images appear as thumbnails, each with **Import to project** (and an **Import all** button). Import copies the file into the active project under `Assets/Generated/<workflow-name>/`, snapshotted first so revert can delete it, and adds a Reference entry noting the workflow and the settings used.
+
+**History** — the last 20 generations from `GET /history`, with prompt id, status, and a **View outputs** action.
+
+**Agent mode** — in Agent mode only, the model can invoke ComfyUI with a fenced block:
+
+```
+```comfyui
+{"workflow": "card art", "inputs": {"positive": "a knight holding a sword, painterly", "seed": 42}}
+```
+```
+
+The workflow must exist in the catalogue and be Available (missing dependencies → a tool result saying so, and the loop continues). **Approved for autonomous execution** is a per-workflow toggle (default off): approved workflows submit immediately and the loop polls to completion, then auto-imports the outputs to `Assets/Generated/<workflow>/` and continues with a tool result listing the filenames and the project path. Unapproved workflows pause the loop on a Run/Review bar ("Generate with `<workflow>`? `<inputs>`") — Run submits and resumes, Dismiss resumes with a decline note. Generation never runs in Ask/Plan mode: there the block is shown as text only.
+
+**API endpoints used** — `GET /system_stats` (status, with `/object_info` fallback), `GET /object_info` (nodes, models, capabilities; cached 5 minutes), `POST /prompt` (submit), `GET /queue` + `GET /history` (polling), `GET /view` (download outputs to disk), `POST /upload/image` (upload an input image). No new npm dependencies: the client uses Node's global `fetch` + `FormData`.
+
+**Known limits** — polling, not a WebSocket, so progress updates arrive every 2 seconds; generation is local and can take minutes; a workflow's missing nodes/models are reported, not auto-installed; a workflow whose checkpoint is missing cannot run until you install it in ComfyUI.
+
 ### References
 Click **References** in the sidebar to see the project's pages and plans in one list — plans are labelled "Plan", pages are labelled "Reference". After a plan executes, create a Reference documenting what was done. The AI can draft it. References become permanent architecture docs you can discuss in chat.
 
@@ -280,13 +309,13 @@ The titlebar status dot shows the active provider and selected model (e.g. "LM S
 
 ### Connections
 
-**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** is disabled (greyed out, "Bridge is up to date") while the installed bridge is current and becomes clickable only when a newer bundled bridge is available, the toggle enables/disables it (off removes the file and stays off — auto-install respects it), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists, and the installed bridge version is shown next to it. A **Packages** list under the Unity row shows the installed packages from `Packages/manifest.json`, each with a Remove button (confirm click). A **Manage MCP connections →** button jumps to the MCPs section.
+**Your Connections** — local integrations for this project. Nothing here phones home. Filter by Unity / Folders, add a Unity project or a local folder, and manage the Unity bridge: **Update plugin** is disabled (greyed out, "Bridge is up to date") while the installed bridge is current and becomes clickable only when a newer bundled bridge is available, the toggle enables/disables it (off removes the file and stays off — auto-install respects it), and the ⋯ menu has **Disconnect**. Status is checked live from whether the bridge file exists, and the installed bridge version is shown next to it. A **Packages** list under the Unity row shows the installed packages from `Packages/manifest.json`, each with a Remove button (confirm click). A **Manage MCP connections →** button jumps to the MCPs section. A **ComfyUI** card shows the local ComfyUI status (Verify + **Open ComfyUI panel →**), mirroring the LM Studio card — ComfyUI settings (URL, workflows folder) live here, not in Model, because it is not a language model.
 
 ### MCPs
 
 Configure local MCP servers — name, command, arguments, and `KEY=value` environment lines — each with an enabled toggle. Servers run on this machine; CodeFox never sends your code to them or anywhere else. Honest scope: MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring. There is no cloud MCP marketplace.
 
-**Recommended presets** — six servers, each genuinely useful for making a Unity game, one click to add the configuration (the app, token, addon, or plugin each one needs is separate, and each card says what it needs):
+**Recommended presets** — ten servers, each genuinely useful for making a Unity game. **Add** opens a guided setup prompt: it shows what the preset does, numbered steps you can actually follow (with a link that opens in your browser), the exact input(s) needed (token as a password field, folder with Browse), and a **Check** button that verifies the token against the service's own API (Figma `GET /v1/me`, GitHub `GET /user`, Notion `GET /v1/users/me`, Jira `GET /rest/api/3/myself`, Trello `GET /1/members/me`) or checks the app is on PATH (Blender, `uvx`) — and reports exactly what was found. **Add server** stays disabled until the check passes or you tick "I have done the steps above — add it anyway", so a failed check never blocks you and a pass is never faked. Presets with no automatic check (Perforce, Filesystem) say so in the prompt and the checkbox is the only path. The inline token/folder inputs on each card stay as the quick path (**Quick add**). Adding a preset only adds the configuration — the app, token, addon, or plugin each one needs is separate, and each card says what it needs:
 
 - **Blender** (`uvx blender-mcp`) — work with 3D models, scenes, and materials in Blender. Needs Blender 3.0+, `uv`, and the Blender MCP addon installed and enabled, with the MCP server started from Blender's 3D viewport.
 - **Figma** (`npx -y figma-developer-mcp`) — read Figma designs, export images, extract styles and tokens for UI. Needs a Figma personal access token (`figd_…`), entered in the preset card; Install stays disabled without one.
@@ -294,6 +323,12 @@ Configure local MCP servers — name, command, arguments, and `KEY=value` enviro
 - **GitHub** (`npx -y @modelcontextprotocol/server-github`) — read repos, issues, and pull requests. Needs a GitHub personal access token with repo read access.
 - **Filesystem** (`npx -y @modelcontextprotocol/server-filesystem <folder>`) — give the assistant read access to a folder outside the project, e.g. a shared assets folder. Pick the folder in the preset card.
 - **Git** (`uvx mcp-server-git --repository <folder>`) — read git history, branches, and diffs for the project. Defaults to the active project folder.
+- **Atlassian (Jira + Confluence)** (`uvx mcp-atlassian`) — read Jira issues (and Confluence pages, with the optional Confluence fields). Needs your Jira site URL, Atlassian account email, and an API token from id.atlassian.com → Security → API tokens. Checked against the Jira API.
+- **Notion** (`npx -y @notionhq/notion-mcp-server`) — read Notion pages and databases. Needs a Notion Personal Access Token (`ntn_…`); the integration must also be given access to the pages (open a page → ⋯ → Add connections), or the token sees nothing. Checked against the Notion API.
+- **Trello** (`npx -y @delorenj/mcp-server-trello`) — read Trello boards, lists, and cards. Needs two credentials from trello.com/app-key: the API key and a token generated on the same page. Checked against the Trello API.
+- **Perforce (P4)** (`uvx p4mcp-server --readonly`) — read a Perforce depot (files, changelists, history), read-only by default. Needs a reachable P4 server with a valid login; the connection comes from your `.p4config` / `P4PORT` / `P4USER`. No automatic check — follow the steps, then tick the box.
+
+There is deliberately no Miro preset: the official Miro MCP server is a remote HTTP server with OAuth only (no local stdio command that fits CodeFox's config model), and the community binary has no Windows one-click install path.
 
 Adding a preset never adds a duplicate — if it is already configured, the card shows "Added ✓". A preset server appears in the configured-servers list below with Edit / Remove / toggle working exactly like a manually added server.
 
@@ -333,14 +368,18 @@ main.js       Electron main process — DB, IPC, file system, LLM providers
               project:delete, skills:list / skills:set, unity:runTests /
               unity:buildCheck / unity:installBridge / unity:removeBridge /
               unity:ensureBridge, unity:listPackages / unity:addPackage /
-              unity:removePackage, fs:moveFile), Ollama process management
+              unity:removePackage, fs:moveFile, shell:openExternal,
+              mcp:checkToken / mcp:checkApp, comfyui:status / comfyui:objectInfo /
+              comfyui:queue / comfyui:history / comfyui:submit / comfyui:view /
+              comfyui:uploadImage / comfyui:listWorkflows), Ollama process management
 upm-manifest.js Unity Package Manager manifest helpers — read / back up /
               edit Packages/manifest.json (plain Node, no Electron)
 unity-bridge.js Unity bridge install helpers — bundled file first,
               embedded copy as fallback; auto-install on connect
 unity-bridge-source.js Generated embedded bridge source (scripts/embed-bridge.js)
-mcp-presets.js  Curated MCP presets — the six recommended servers (plain Node, no Electron)
-preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills, rb.mcpPresets)
+mcp-presets.js  Curated MCP presets — the ten recommended servers (plain Node, no Electron)
+comfyui.js      Native ComfyUI provider — HTTP client + workflow parsing (plain Node, no Electron)
+preload.js    Context bridge — exposes safe API to renderer (rb.llm, rb.project, rb.unity, rb.skills, rb.mcpPresets, rb.shell.openExternal, rb.mcp, rb.comfyui)
 app.js        All UI logic — Home, projects, state, chat, modes, tools, plans, file tree, apply/revert, diff
 index.html    Layout — top bar, sidebar, Home / chat / editor / connections / references, right build panel + file tree
 ```

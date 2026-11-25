@@ -94,5 +94,22 @@ contextBridge.exposeInMainWorld('rb', {
   },
   shell: {
     run: (payload) => ipcRenderer.invoke('shell:run', payload || {}),
-  }
+    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  },
+  mcp: {
+    checkToken: (payload) => ipcRenderer.invoke('mcp:checkToken', payload || {}),
+    checkApp: (payload) => ipcRenderer.invoke('mcp:checkApp', payload || {}),
+  },
+  comfyui: {
+    status: (payload) => ipcRenderer.invoke('comfyui:status', payload || {}),
+    objectInfo: (payload) => ipcRenderer.invoke('comfyui:objectInfo', payload || {}),
+    queue: (payload) => ipcRenderer.invoke('comfyui:queue', payload || {}),
+    history: (payload) => ipcRenderer.invoke('comfyui:history', payload || {}),
+    submit: (payload) => ipcRenderer.invoke('comfyui:submit', payload || {}),
+    view: (payload) => ipcRenderer.invoke('comfyui:view', payload || {}),
+    uploadImage: (payload) => ipcRenderer.invoke('comfyui:uploadImage', payload || {}),
+    listWorkflows: (payload) => ipcRenderer.invoke('comfyui:listWorkflows', payload || {}),
+    readWorkflow: (payload) => ipcRenderer.invoke('comfyui:readWorkflow', payload || {}),
+    defaultWorkflowsDir: () => ipcRenderer.invoke('comfyui:defaultWorkflowsDir'),
+  },
 });

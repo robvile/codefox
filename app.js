@@ -52,6 +52,19 @@ let state = {
   condensedRules: '',
   mcpServers: [],
   agentMaxRounds: 5,
+  // ComfyUI (v0.6.0) — native local provider, alongside LM Studio.
+  // Inert until a connection succeeds; nothing here blocks the app.
+  comfyuiUrl: 'http://127.0.0.1:8188',
+  comfyuiWorkflowsDir: '',
+  comfyuiWorkflows: [],
+  comfyuiStatus: null,
+  comfyuiObjectInfo: null,
+  comfyuiCapabilities: [],
+  comfyuiSelectedId: null,
+  comfyuiGenInputs: {},
+  comfyuiOutputs: [],
+  comfyuiHistory: [],
+  comfyuiGenerating: null,
 };
 
 // ── Agent loop state (v0.5.0) ──────────────────────────────────────
@@ -245,6 +258,11 @@ async function init() {
   state.agentMaxRounds = clampAgentMaxRounds(parseInt(await rb.db.getSetting('agent_max_rounds') || '5', 10));
   state.useCondensedRules = (await rb.db.getSetting('use_condensed_rules') || '0') === '1';
   state.condensedRules = await rb.db.getSetting('condensed_rules') || '';
+  state.comfyuiUrl = await rb.db.getSetting('comfyui_url') || 'http://127.0.0.1:8188';
+  state.comfyuiWorkflowsDir = await rb.db.getSetting('comfyui_workflows_dir') || '';
+  try { state.comfyuiWorkflows = JSON.parse(await rb.db.getSetting('comfyui_workflows') || '[]'); }
+  catch { state.comfyuiWorkflows = []; }
+  if (!Array.isArray(state.comfyuiWorkflows)) state.comfyuiWorkflows = [];
   try { state.mcpServers = JSON.parse(await rb.db.getSetting('mcp_servers') || '[]'); }
   catch { state.mcpServers = []; }
   if (!Array.isArray(state.mcpServers)) state.mcpServers = [];
@@ -409,10 +427,10 @@ function renderReferencesList(pages, plans) {
 // ── Mode switching ────────────────────────────────────────────────
 function setMode(mode, title, badgeClass) {
   state.mode = mode;
-  const badgeLabels = { chat: 'Chat', ruleset: 'Ruleset', plan: 'Plan', page: 'Reference', home: 'Home', connections: 'Connections', references: 'References', settings: 'Settings' };
+  const badgeLabels = { chat: 'Chat', ruleset: 'Ruleset', plan: 'Plan', page: 'Reference', home: 'Home', connections: 'Connections', references: 'References', settings: 'Settings', comfyui: 'ComfyUI' };
   const badge = document.getElementById('center-mode-badge');
   badge.textContent = badgeLabels[mode] || (mode.charAt(0).toUpperCase() + mode.slice(1));
-  badge.className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : mode === 'home' ? 'home' : mode === 'connections' ? 'connections' : mode === 'references' ? 'references' : mode === 'settings' ? 'settings' : 'ruleset');
+  badge.className = 'badge-' + (mode === 'chat' ? 'chat' : mode === 'plan' ? 'plan' : mode === 'page' ? 'page' : mode === 'home' ? 'home' : mode === 'connections' ? 'connections' : mode === 'references' ? 'references' : mode === 'settings' ? 'settings' : mode === 'comfyui' ? 'comfyui' : 'ruleset');
   document.getElementById('center-title').textContent = title;
   const topTitle = document.getElementById('topbar-title');
   if (topTitle) topTitle.textContent = mode === 'home' ? 'Home' : title;
@@ -420,7 +438,7 @@ function setMode(mode, title, badgeClass) {
   // Centre header is hidden on Home (the hero carries the project name).
   document.getElementById('center-header').classList.toggle('hidden', mode === 'home');
 
-  const panes = { chat: 'chat-mode', ruleset: 'editor-mode', page: 'editor-mode', plan: 'plan-mode', home: 'home-mode', connections: 'connections-mode', references: 'references-mode', settings: 'settings-mode' };
+  const panes = { chat: 'chat-mode', ruleset: 'editor-mode', page: 'editor-mode', plan: 'plan-mode', home: 'home-mode', connections: 'connections-mode', references: 'references-mode', settings: 'settings-mode', comfyui: 'comfyui-mode' };
   for (const id of new Set(Object.values(panes))) {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', panes[mode] !== id);
@@ -436,6 +454,7 @@ function setMode(mode, title, badgeClass) {
   document.getElementById('nav-references')?.classList.toggle('active', mode === 'references' || mode === 'page' || mode === 'plan');
   document.getElementById('nav-connections')?.classList.toggle('active', mode === 'connections');
   document.getElementById('nav-settings')?.classList.toggle('active', mode === 'settings');
+  document.getElementById('nav-comfyui')?.classList.toggle('active', mode === 'comfyui');
 
   // Settings has its own Save button; clear any actions left over from
   // the editor / plan views.
@@ -445,6 +464,7 @@ function setMode(mode, title, badgeClass) {
   if (mode === 'connections') renderConnectionsView();
   if (mode === 'references') renderReferencesView();
   if (mode === 'settings') renderSettingsView();
+  if (mode === 'comfyui') renderComfyUIView();
 }
 
 // ── Load items from sidebar ───────────────────────────────────────
@@ -754,6 +774,29 @@ function extractShellBlocksWithIndex(text) {
   return out;
 }
 
+// ComfyUI blocks (v0.6.0, Agent mode only): ```comfyui with JSON
+// {"workflow": "<name or id>", "inputs": {...}}. Ask/Plan never
+// parse these — the block is shown as text only there.
+function parseComfyuiBlocks(text) {
+  const out = [];
+  const re = /```comfyui\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    out.push({
+      workflow: parsed ? (parsed.workflow || parsed.name || parsed.id || '') : '',
+      inputs: (parsed && parsed.inputs && typeof parsed.inputs === 'object') ? parsed.inputs : {},
+      raw: m[1].trim(),
+      valid: !!parsed && !!(parsed.workflow || parsed.name || parsed.id),
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
+
 // All actions in one reply, in the order they appear: file changes
 // (one action for the whole set, applied together), one action per
 // shell block, one action per package line.
@@ -773,6 +816,9 @@ function parseAgentActions(text) {
   }
   for (const p of parseUpmBlocks(text, 'upm-install')) {
     actions.push({ type: 'package-install', name: p.name, version: p.version, isGit: p.isGit, raw: p.raw, valid: p.valid, index: p.index });
+  }
+  for (const b of parseComfyuiBlocks(text)) {
+    actions.push({ type: 'comfyui', workflow: b.workflow, inputs: b.inputs, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
@@ -845,12 +891,13 @@ function stopAgentLoop() {
   if (!loopState) return;
   loopState.stopRequested = true;
   try { rb.llm.removeListeners(); } catch {}
-  for (const id of ['apply-bar', 'shell-bar', 'package-bar']) {
+  for (const id of ['apply-bar', 'shell-bar', 'package-bar', 'comfyui-bar']) {
     const el = document.getElementById(id);
     if (el) el.remove();
   }
   if (window._shellQueue) window._shellQueue = [];
   if (window._packageQueue) window._packageQueue = [];
+  if (state.comfyuiGenerating) window._comfyuiPollStop = state.comfyuiGenerating.promptId;
   if (loopState.pendingResolve) {
     const settle = loopState.pendingResolve;
     loopState.pendingResolve = null;
@@ -1138,6 +1185,50 @@ async function processAgentActions(actions) {
         await appendToolResult('User declined ' + label + ': ' + (action.name || action.raw));
       }
       outcomes++;
+    } else if (action.type === 'comfyui') {
+      // ComfyUI generation (v0.6.0, Agent mode only). The workflow
+      // must exist in the catalogue AND be Available; an unapproved
+      // workflow pauses on a Run/Review bar instead of running.
+      if (!action.valid) {
+        await appendToolResult('Tool result — ComfyUI: could not parse the ```comfyui block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"workflow": "<name>", "inputs": {...}}.');
+        outcomes++;
+        continue;
+      }
+      const wf = findComfyuiWorkflow(action.workflow);
+      if (!wf) {
+        await appendToolResult('Tool result — ComfyUI: workflow "' + action.workflow + '" is not in the Workflow Library. Import it in the ComfyUI panel first.');
+        outcomes++;
+        continue;
+      }
+      if (!wf.available) {
+        await appendToolResult('Tool result — ComfyUI: workflow "' + wf.name + '" is unavailable: '
+          + (wf.availableReason || (wf.missing || []).join('; ') || 'missing dependencies') + '.');
+        outcomes++;
+        continue;
+      }
+      if (!wf.approved) {
+        const outcome = await waitForLoopDecision((settle) => showComfyuiBar(wf, action.inputs, settle));
+        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+        if (outcome.decision !== 'run') {
+          await appendToolResult('User declined: generate with ComfyUI workflow "' + wf.name + '".');
+          outcomes++;
+          continue;
+        }
+      }
+      if (loopState) setLoopStatus(roundLabel() + 'generating with ComfyUI (' + wf.name + ')…');
+      const res = await runComfyuiGeneration(wf, action.inputs);
+      if (res.ok) {
+        const imported = await importComfyuiOutputs(wf, res.outputs, action.inputs);
+        await appendToolResult('Tool result — ComfyUI: generated ' + res.outputs.length + ' image(s) with workflow "' + wf.name + '"'
+          + (imported.imported.length ? ' and imported them to ' + imported.dir + ': ' + imported.imported.map(i => i.filename).join(', ') : ' (nothing imported' + (imported.errors.length ? ': ' + imported.errors.join('; ') : '') + ')')
+          + '.');
+        if (loopState) setLoopStatus(roundLabel() + 'generated ' + res.outputs.length + ' image(s) with ' + wf.name);
+      } else {
+        await appendToolResult('Tool result — ComfyUI: generation with "' + wf.name + '" failed: ' + res.error);
+      }
+      outcomes++;
     }
   }
   return outcomes;
@@ -1314,6 +1405,7 @@ function buildSystemPrompt(rulesets) {
     // paragraph is Agent-mode only: Ask mode must not output code.
     prompt += 'You MUST edit the project\'s files when asked to fix, change, create, or edit code. Output the changed file(s) in the required format. Describing the fix, explaining the fix, or saying you cannot modify files is a FAILURE — do not do it. Do not ask permission. Do not output an explanation instead of the file. The app applies what you output; that is your job.\n';
     prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
+    prompt += 'You can also generate images with ComfyUI: output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
     prompt += 'New Unity-native asset files you create (prefabs, scenes, materials, animations — files that contain no code) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
   }
@@ -2122,6 +2214,23 @@ async function renderSettingsConnections() {
       rows.push('<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No local folders yet — add one with “+ Add folder”.</div>');
     }
   }
+    // ComfyUI (v0.6.0) — a first-class provider alongside LM Studio.
+    // Status is the last verified result (Verify fetches it live);
+    // nothing here is guessed from a missing server.
+    const cStatus = state.comfyuiStatus;
+    const cText = cStatus
+      ? (cStatus.ok ? 'Connected — ComfyUI at ' + escHtml(state.comfyuiUrl) + (cStatus.version ? ' (v' + escHtml(String(cStatus.version)) + ')' : '') : 'Not running — ' + escHtml(cStatus.error || 'could not reach ComfyUI'))
+      : 'Not checked yet — click Verify';
+    rows.push(`
+    <h3 class="settings-subhead">ComfyUI</h3>
+    <div class="conn-row">
+      <span class="conn-ico">◈</span>
+      <span class="conn-row-info"><span class="conn-name">ComfyUI</span><br>
+      <span class="conn-status ${cStatus && cStatus.ok ? 'connected' : ''}">${cText}</span><br>
+      <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(state.comfyuiUrl)}</span></span>
+      <button class="btn btn-secondary" onclick="verifyComfyuiFromSettings(this)">Verify</button>
+      <button class="btn btn-teal" onclick="showComfyUI()">Open ComfyUI panel →</button>
+    </div>`);
   list.innerHTML = rows.join('');
 }
 
@@ -2246,7 +2355,7 @@ function renderMcpsPane(body) {
   body.innerHTML = `
     <p class="settings-note">MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring.</p>
     <h3 style="font-size:13px;margin:14px 0 4px;">Recommended for game development</h3>
-    <p class="settings-note" style="margin:0 0 8px;">Six presets, each genuinely useful for making a Unity game. Adding one only adds the configuration — the app, token, addon, or plugin it needs is separate, and each card says what it needs.</p>
+    <p class="settings-note" style="margin:0 0 8px;">Ten presets, each genuinely useful for making a Unity game. Adding one only adds the configuration — the app, token, addon, or plugin it needs is separate, and each card says what it needs. <b>Add</b> opens a guided setup prompt that walks through the steps and checks the token or the app for real; <b>Quick add</b> (on cards that need a token or folder) skips the prompt and uses the values typed on the card.</p>
     <div id="mcp-presets"></div>
     <h3 style="font-size:13px;margin:18px 0 4px;">Your configured servers</h3>
     <div id="mcp-list"></div>
@@ -2262,7 +2371,7 @@ function renderMcpsPane(body) {
 // re-render of the settings pane (e.g. after saving another server).
 function mcpPresetInput(id) {
   window._mcpPresetInputs = window._mcpPresetInputs || {};
-  if (!window._mcpPresetInputs[id]) window._mcpPresetInputs[id] = { expanded: false, token: '', folder: '' };
+  if (!window._mcpPresetInputs[id]) window._mcpPresetInputs[id] = { expanded: false, token: '', folder: '', fields: {} };
   return window._mcpPresetInputs[id];
 }
 
@@ -2284,13 +2393,13 @@ function renderMcpPresets() {
     if (added) {
       action = '<button class="btn btn-secondary" disabled>Added ✓</button>';
     } else if (needsInput && !inp.expanded) {
-      action = `<button class="btn btn-teal" onclick="expandMcpPreset('${p.id}')">Add</button>`;
+      action = `<button class="btn btn-teal" onclick="openMcpSetupModal('${p.id}')">Add</button><button class="btn btn-secondary" onclick="expandMcpPreset('${p.id}')" title="Skip the guided prompt — type the token or folder on the card instead">Quick add</button>`;
     } else if (needsInput && inp.expanded) {
       const ready = (!needsToken || (inp.token || '').trim()) && (!needsFolder || (inp.folder || '').trim());
       const hint = needsToken ? 'Enter your ' + escHtml(p.requiresToken.label.toLowerCase()) + ' first' : 'Pick a folder first';
       action = `<button class="btn btn-teal" id="mcp-preset-install-${p.id}" onclick="installMcpPreset('${p.id}')" ${ready ? '' : 'disabled title="' + escHtml(hint) + '"'}>Install</button>`;
     } else {
-      action = `<button class="btn btn-teal" onclick="installMcpPreset('${p.id}')">Add</button>`;
+      action = `<button class="btn btn-teal" onclick="openMcpSetupModal('${p.id}')">Add</button>`;
     }
     const inputBlock = (needsInput && inp.expanded && !added) ? `
       <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
@@ -2367,7 +2476,7 @@ async function installMcpPreset(id) {
   const folderEl = document.getElementById('mcp-preset-folder-' + id);
   const token = tokenEl ? tokenEl.value : (inp.token || '');
   const folder = folderEl ? folderEl.value : (inp.folder || state.projectPath || '');
-  const res = rb.mcpPresets.buildServerEntry(preset, { token, folder });
+  const res = rb.mcpPresets.buildServerEntry(preset, { token, folder, fields: inp.fields || {} });
   if (!res.ok) { showToast(res.error || 'Could not add this preset'); return; }
   state.mcpServers.push(res.entry);
   await persistMcpServers();
@@ -2486,6 +2595,656 @@ async function removeMcpServer(id) {
   state.mcpServers = state.mcpServers.filter(x => x.id !== id);
   await persistMcpServers();
   renderSettingsView();
+}
+
+// ── Guided MCP setup prompt (v0.6.0) ────────────────────────────
+// The Add button on any preset that needs externals opens this
+// modal instead of silently adding a server. It shows what the
+// preset does, numbered steps the user can follow, the exact
+// input(s) needed, a Check button that runs a real check, and an
+// Add server button that stays disabled until the check passes or
+// the user ticks "I have done the steps — add it anyway". A failed
+// check never blocks adding; a pass is never faked.
+function openMcpSetupModal(id) {
+  const preset = rb.mcpPresets.get(id);
+  if (!preset) return;
+  const inp = mcpPresetInput(id);
+  if (!inp.folder) inp.folder = state.projectPath || '';
+  window._mcpSetup = { id, checkPassed: false, checkRan: false };
+  const overlay = document.getElementById('mcp-setup-modal-overlay');
+  const modal = document.getElementById('mcp-setup-modal');
+  if (!overlay || !modal) return;
+  const fieldsHtml = (preset.requiresFields || []).map(f => `
+    <label class="field-label">${escHtml(f.label)}
+      <input id="mcp-setup-field-${f.key}" type="${f.password ? 'password' : 'text'}" value="${escHtml((inp.fields && inp.fields[f.key]) || '')}" placeholder="${escHtml(f.placeholder || '')}" />
+    </label>`).join('');
+  const tokenHtml = preset.requiresToken ? `
+    <label class="field-label">${escHtml(preset.requiresToken.label)}
+      <input id="mcp-setup-token" type="password" value="${escHtml(inp.token || '')}" placeholder="${escHtml(preset.requiresToken.placeholder || '')}" />
+    </label>` : '';
+  const folderHtml = preset.requiresFolder ? `
+    <label class="field-label">Folder
+      <span style="display:flex;gap:8px;"><input id="mcp-setup-folder" value="${escHtml(inp.folder || '')}" style="flex:1;" /><button class="btn btn-secondary" onclick="browseMcpSetupFolder()">Browse</button></span>
+    </label>` : '';
+  const hasCheck = preset.checkKind && preset.checkKind !== 'none';
+  modal.innerHTML = `
+    <h2>Set up ${escHtml(preset.name)}</h2>
+    <p style="color:var(--text2);font-size:12px;line-height:1.6;">${escHtml(preset.description)}</p>
+    <div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Steps</div>
+      <ol style="margin:0 0 0 18px;padding:0;color:var(--text2);font-size:12px;line-height:1.7;">${(preset.setupSteps || []).map(s => `<li>${escHtml(s)}</li>`).join('')}</ol>
+      ${preset.helpUrl ? `<div style="margin-top:8px;"><button class="btn btn-secondary" onclick="rb.shell.openExternal('${escHtml(preset.helpUrl)}')">Open setup page ↗</button></div>` : ''}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;">${tokenHtml}${fieldsHtml}${folderHtml}</div>
+    <div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Check</div>
+      ${hasCheck
+        ? `<p style="color:var(--text3);font-size:12px;margin-bottom:8px;">${escHtml(preset.checkLabel || '')}</p>
+           <button class="btn btn-secondary" id="mcp-setup-check-btn" onclick="runMcpSetupCheck()">Check</button>`
+        : `<p style="color:var(--text3);font-size:12px;">${escHtml(preset.checkLabel || 'No automatic check for this one — follow the steps, then tick the box.')}</p>`}
+      <div id="mcp-setup-check-result" style="font-size:12px;margin-top:8px;color:var(--text2);white-space:pre-wrap;"></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:flex-start;color:var(--text2);font-size:12px;cursor:pointer;">
+      <input type="checkbox" id="mcp-setup-anyway" onchange="updateMcpSetupAddBtn()" style="width:auto;margin-top:2px;" />
+      <span>I have done the steps above — add it anyway</span>
+    </label>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="closeMcpSetupModal()">Cancel</button>
+      <button class="btn btn-primary" id="mcp-setup-add-btn" onclick="confirmMcpSetupAdd()" disabled>Add server</button>
+    </div>`;
+  overlay.classList.add('open');
+  updateMcpSetupAddBtn();
+}
+
+function closeMcpSetupModal() {
+  const overlay = document.getElementById('mcp-setup-modal-overlay');
+  if (overlay) overlay.classList.remove('open');
+  window._mcpSetup = null;
+}
+
+// Live values from the modal inputs (DOM first, stored input state
+// as the fallback), so a Check or an Add always uses what the user
+// actually typed.
+function mcpSetupValues() {
+  const setup = window._mcpSetup;
+  const inp = setup ? mcpPresetInput(setup.id) : { token: '', folder: '', fields: {} };
+  const tokenEl = document.getElementById('mcp-setup-token');
+  const folderEl = document.getElementById('mcp-setup-folder');
+  const fields = { ...(inp.fields || {}) };
+  document.querySelectorAll('[id^="mcp-setup-field-"]').forEach(el => {
+    fields[el.id.replace('mcp-setup-field-', '')] = el.value;
+  });
+  return {
+    token: tokenEl ? tokenEl.value : (inp.token || ''),
+    folder: folderEl ? folderEl.value : (inp.folder || ''),
+    fields,
+  };
+}
+
+function updateMcpSetupAddBtn() {
+  const setup = window._mcpSetup;
+  const btn = document.getElementById('mcp-setup-add-btn');
+  if (!setup || !btn) return;
+  const anyway = document.getElementById('mcp-setup-anyway');
+  btn.disabled = !(setup.checkPassed || (anyway && anyway.checked));
+}
+
+async function browseMcpSetupFolder() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  const el = document.getElementById('mcp-setup-folder');
+  if (el) el.value = folder;
+}
+
+async function runMcpSetupCheck() {
+  const setup = window._mcpSetup;
+  if (!setup) return;
+  const preset = rb.mcpPresets.get(setup.id);
+  if (!preset) return;
+  const btn = document.getElementById('mcp-setup-check-btn');
+  const resultEl = document.getElementById('mcp-setup-check-result');
+  const vals = mcpSetupValues();
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  if (resultEl) { resultEl.textContent = 'Checking…'; resultEl.style.color = 'var(--text2)'; }
+  let res = { ok: false, message: 'No check for this preset.' };
+  try {
+    if (preset.checkKind === 'blender' || preset.checkKind === 'uvx') {
+      res = await rb.mcp.checkApp({ presetId: preset.id });
+      if (resultEl) {
+        const lines = (res.checks || []).map(c => (c.found ? '✓ ' : '✗ ') + c.label + ' — ' + c.detail).join('\n');
+        resultEl.textContent = (lines ? lines + '\n' : '') + (res.message || '');
+        resultEl.style.color = res.ok ? 'var(--green)' : 'var(--amber)';
+      }
+    } else {
+      res = await rb.mcp.checkToken({
+        presetId: preset.id,
+        token: vals.token,
+        site: vals.fields.site,
+        email: vals.fields.email,
+        apiKey: vals.fields.apiKey,
+      });
+      if (resultEl) {
+        resultEl.textContent = (res.ok ? '✓ ' : '✗ ') + (res.message || '');
+        resultEl.style.color = res.ok ? 'var(--green)' : 'var(--amber)';
+      }
+    }
+  } catch (e) {
+    res = { ok: false, message: 'Check failed: ' + (e.message || e) };
+    if (resultEl) { resultEl.textContent = '✗ ' + res.message; resultEl.style.color = 'var(--amber)'; }
+  }
+  setup.checkPassed = !!(res && res.ok);
+  setup.checkRan = true;
+  if (btn) { btn.disabled = false; btn.textContent = 'Check'; }
+  updateMcpSetupAddBtn();
+}
+
+async function confirmMcpSetupAdd() {
+  const setup = window._mcpSetup;
+  if (!setup) return;
+  const vals = mcpSetupValues();
+  const inp = mcpPresetInput(setup.id);
+  inp.token = vals.token;
+  inp.folder = vals.folder;
+  inp.fields = vals.fields;
+  closeMcpSetupModal();
+  await installMcpPreset(setup.id);
+}
+
+// ── ComfyUI (v0.6.0) ─────────────────────────────────────────────
+// Native provider alongside LM Studio: CodeFox talks to a locally
+// running ComfyUI instance over its own HTTP API (/system_stats,
+// /object_info, /prompt, /queue, /history, /view, /upload/image).
+// Monitoring is by POLLING /queue + /history every 2 seconds —
+// there is no WebSocket client. Every call is guarded with a
+// timeout; when ComfyUI is not running every panel says so honestly
+// and nothing is faked. No workflow is hardcoded: workflows are the
+// user's own JSON files, imported from a folder they pick, and the
+// catalogue stores the parsed definition (never a sample workflow).
+function showComfyUI() {
+  setMode('comfyui', 'ComfyUI');
+}
+
+function comfyuiSlug(name) {
+  return String(name || 'workflow').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'workflow';
+}
+
+function findComfyuiWorkflow(nameOrId) {
+  const key = String(nameOrId || '').trim().toLowerCase();
+  if (!key) return null;
+  return state.comfyuiWorkflows.find(w => w.id === key || String(w.name || '').toLowerCase() === key) || null;
+}
+
+async function persistComfyuiWorkflows() {
+  await rb.db.setSetting('comfyui_workflows', JSON.stringify(state.comfyuiWorkflows));
+  await rb.db.setSetting('comfyui_workflows_dir', state.comfyuiWorkflowsDir || '');
+  await rb.db.setSetting('comfyui_url', state.comfyuiUrl || 'http://127.0.0.1:8188');
+}
+
+async function verifyComfyui() {
+  const url = state.comfyuiUrl || 'http://127.0.0.1:8188';
+  let st;
+  try { st = await rb.comfyui.status({ url }); }
+  catch (e) { st = { ok: false, error: String((e && e.message) || e), url }; }
+  state.comfyuiStatus = st;
+  if (st.ok) {
+    try {
+      const info = await rb.comfyui.objectInfo({ url });
+      if (info.ok) {
+        state.comfyuiObjectInfo = info.data;
+        state.comfyuiCapabilities = info.capabilities || [];
+      }
+    } catch {}
+  }
+  return st;
+}
+
+async function verifyComfyuiFromSettings(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  const st = await verifyComfyui();
+  showToast(st.ok ? '✓ ComfyUI connected' + (st.version ? ' (v' + st.version + ')' : '') : '⚠ ' + (st.error || 'ComfyUI is not running'));
+  if (state.mode === 'settings') renderSettingsView();
+  if (state.mode === 'comfyui') renderComfyUIView();
+}
+
+async function refreshComfyuiWorkflows() {
+  let r;
+  try { r = await rb.comfyui.listWorkflows({ dir: state.comfyuiWorkflowsDir, url: state.comfyuiUrl }); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  if (!r.ok) return r;
+  state.comfyuiWorkflows = r.workflows || [];
+  state.comfyuiWorkflowsDir = r.dir || state.comfyuiWorkflowsDir;
+  if (!state.comfyuiSelectedId && state.comfyuiWorkflows.length) {
+    state.comfyuiSelectedId = state.comfyuiWorkflows[0].id;
+  }
+  await persistComfyuiWorkflows();
+  return { ok: true, errors: r.errors || [] };
+}
+
+async function refreshComfyuiHistory() {
+  let r;
+  try { r = await rb.comfyui.history({ url: state.comfyuiUrl }); }
+  catch (e) { state.comfyuiHistory = []; return; }
+  if (!r.ok || !r.data || typeof r.data !== 'object') { state.comfyuiHistory = []; return; }
+  const entries = Object.entries(r.data).slice(-20).reverse().map(([promptId, entry]) => ({
+    promptId,
+    status: (entry && entry.status && entry.status.status_str) || (entry && entry.status && entry.status.completed ? 'completed' : 'unknown'),
+    completed: !!(entry && entry.status && entry.status.completed),
+    outputs: comfyuiOutputsFromHistoryEntry(entry),
+  }));
+  state.comfyuiHistory = entries;
+}
+
+// History entries carry outputs as { nodeId: { images: [{ filename,
+// subfolder, type }] } } (and video nodes the same shape).
+function comfyuiOutputsFromHistoryEntry(entry) {
+  const out = [];
+  const outputs = (entry && entry.outputs) || {};
+  for (const nodeOut of Object.values(outputs)) {
+    for (const img of (nodeOut.images || [])) {
+      out.push({ filename: img.filename, subfolder: img.subfolder || '', type: img.type || 'output' });
+    }
+    for (const vid of (nodeOut.video || nodeOut.gifs || [])) {
+      out.push({ filename: vid.filename, subfolder: vid.subfolder || '', type: vid.type || 'output' });
+    }
+  }
+  return out;
+}
+
+function comfyuiFileUrl(p) {
+  return encodeURI('file:///' + String(p || '').replace(/\\/g, '/').replace(/^\//, ''));
+}
+
+async function browseComfyuiWorkflowsDir() {
+  const folder = await rb.fs.pickFolder();
+  if (!folder) return;
+  state.comfyuiWorkflowsDir = folder;
+  await persistComfyuiWorkflows();
+  await refreshComfyuiWorkflows();
+  renderComfyUIView();
+  showToast('✓ Workflows folder set — ' + state.comfyuiWorkflows.length + ' workflow(s) found');
+}
+
+async function onComfyuiUrlSave() {
+  const el = document.getElementById('comfyui-url');
+  if (el && el.value.trim()) state.comfyuiUrl = el.value.trim();
+  await rb.db.setSetting('comfyui_url', state.comfyuiUrl);
+  state.comfyuiStatus = null;
+  state.comfyuiObjectInfo = null;
+  state.comfyuiCapabilities = [];
+  await verifyComfyui();
+  await refreshComfyuiWorkflows();
+  renderComfyUIView();
+}
+
+function onComfyuiInputChange(key, el) {
+  state.comfyuiGenInputs[key] = el.type === 'number' ? Number(el.value) : el.value;
+}
+
+function randomiseComfyuiSeed() {
+  const seed = Math.floor(Math.random() * 1000000000000000);
+  state.comfyuiGenInputs.seed = seed;
+  const el = document.getElementById('comfyui-input-seed');
+  if (el) el.value = String(seed);
+}
+
+async function setComfyuiPurpose(id, el) {
+  const wf = state.comfyuiWorkflows.find(w => w.id === id);
+  if (!wf) return;
+  wf.purpose = el.value;
+  await persistComfyuiWorkflows();
+}
+
+async function toggleComfyuiApproved(id, checked) {
+  const wf = state.comfyuiWorkflows.find(w => w.id === id);
+  if (!wf) return;
+  wf.approved = !!checked;
+  await persistComfyuiWorkflows();
+  renderComfyUIView();
+  showToast(wf.approved
+    ? '✓ "' + wf.name + '" approved for autonomous execution — the Agent loop may run it without asking'
+    : '"' + wf.name + '" is no longer approved — the Agent loop will ask before running it');
+}
+
+function selectComfyuiWorkflow(id) {
+  state.comfyuiSelectedId = id;
+  state.comfyuiGenInputs = {};
+  state.comfyuiOutputs = [];
+  renderComfyUIView();
+}
+
+// One generation, end to end: submit the stored workflow file with
+// the caller's inputs, poll /queue + /history every 2 seconds until
+// it completes (10-minute cap), then download each output to the
+// local temp cache for thumbnails. Importing into the project is a
+// separate step (importComfyuiOutputs) — the Agent loop does it
+// automatically, the panel asks with Import buttons.
+async function runComfyuiGeneration(wf, inputs, onProgress) {
+  const sub = await rb.comfyui.submit({ file: wf.file, inputs: inputs || {}, url: state.comfyuiUrl });
+  if (!sub.ok) return { ok: false, error: sub.error || 'Submit failed' };
+  if (sub.unapplied && sub.unapplied.length && onProgress) {
+    onProgress('Submitted — ignored inputs: ' + sub.unapplied.join(', '));
+  }
+  const poll = await pollComfyuiPrompt(sub.prompt_id, onProgress);
+  if (!poll.ok) return poll;
+  const outputs = [];
+  for (const o of poll.outputs) {
+    const dl = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', promptId: sub.prompt_id, url: state.comfyuiUrl });
+    outputs.push({ ...o, localPath: dl.ok ? dl.path : null, downloadError: dl.ok ? null : dl.error });
+  }
+  return { ok: true, promptId: sub.prompt_id, outputs };
+}
+
+// Poll /queue + /history for one prompt_id. Returns
+// { ok, outputs } on completion, { ok:false, error } on timeout,
+// failure, or user cancel. Polling, not a WebSocket, by design.
+async function pollComfyuiPrompt(promptId, onProgress) {
+  const start = Date.now();
+  const timeoutMs = 10 * 60 * 1000;
+  while (Date.now() - start < timeoutMs) {
+    if (window._comfyuiPollStop === promptId) {
+      window._comfyuiPollStop = null;
+      return { ok: false, error: 'Cancelled by user.' };
+    }
+    let hist = null;
+    try { hist = await rb.comfyui.history({ promptId, url: state.comfyuiUrl }); } catch {}
+    if (hist && hist.ok && hist.data && hist.data[promptId]) {
+      const entry = hist.data[promptId];
+      if (entry.status && entry.status.completed) {
+        return { ok: true, outputs: comfyuiOutputsFromHistoryEntry(entry) };
+      }
+      if (entry.status && entry.status.status_str === 'error') {
+        return { ok: false, error: 'ComfyUI reported an error for this prompt — check the ComfyUI console.' };
+      }
+    }
+    try {
+      const q = await rb.comfyui.queue({ url: state.comfyuiUrl });
+      if (q && q.ok && q.data) {
+        const running = (q.data.queue_running || []).some(item => String(item[1]) === String(promptId));
+        const pending = (q.data.queue_pending || []).findIndex(item => String(item[1]) === String(promptId));
+        if (onProgress) onProgress(running ? 'Running…' : pending >= 0 ? 'Queued — position ' + (pending + 1) : 'Waiting for ComfyUI…');
+      } else if (onProgress) onProgress('Waiting for ComfyUI…');
+    } catch {
+      if (onProgress) onProgress('Waiting for ComfyUI…');
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return { ok: false, error: 'Generation timed out after 10 minutes.' };
+}
+
+function stopComfyuiGeneration() {
+  if (state.comfyuiGenerating && state.comfyuiGenerating.promptId) {
+    window._comfyuiPollStop = state.comfyuiGenerating.promptId;
+  }
+  state.comfyuiGenerating = null;
+  renderComfyUIView();
+}
+
+async function runComfyuiFromPanel() {
+  const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
+  if (!wf) { showToast('Pick a workflow first'); return; }
+  if (!wf.available) { showToast('⚠ Workflow unavailable: ' + (wf.availableReason || (wf.missing || []).join('; '))); return; }
+  state.comfyuiGenerating = { workflowId: wf.id, promptId: null, status: 'Submitting…' };
+  state.comfyuiOutputs = [];
+  renderComfyUIView();
+  const res = await runComfyuiGeneration(wf, { ...state.comfyuiGenInputs }, (msg) => {
+    if (state.comfyuiGenerating) state.comfyuiGenerating.status = msg;
+    const el = document.getElementById('comfyui-progress');
+    if (el) el.textContent = msg;
+  });
+  state.comfyuiGenerating = null;
+  if (!res.ok) {
+    showToast('⚠ ' + res.error);
+    renderComfyUIView();
+    return;
+  }
+  state.comfyuiOutputs = res.outputs;
+  renderComfyUIView();
+  showToast('✓ Generated ' + res.outputs.length + ' image(s) — use Import to copy them into the project');
+}
+
+// Copy generated outputs into the active project under
+// Assets/Generated/<workflow-name>/, snapshotted first so revert
+// can delete them (new files, like the v0.5.1 auto-apply rule), and
+// add a Reference entry noting the workflow and settings used.
+async function importComfyuiOutputs(wf, outputs, inputs) {
+  const slug = comfyuiSlug(wf.name);
+  const dir = 'Assets/Generated/' + slug + '/';
+  const imported = [];
+  const errors = [];
+  if (!state.projectPath) {
+    return { dir, imported, errors: ['No project folder set — pick a project first'] };
+  }
+  const snapshotId = 'snap_' + Date.now();
+  let wroteAny = false;
+  for (const o of (outputs || [])) {
+    const dest = resolvePath(dir + o.filename);
+    let exists = false;
+    try { exists = await rb.fs.exists(dest); } catch {}
+    if (exists) {
+      errors.push(o.filename + ': already exists in the project — skipped, existing file kept');
+      continue;
+    }
+    const res = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', destPath: dest, url: state.comfyuiUrl });
+    if (res.ok) {
+      imported.push({ filename: o.filename, path: dest });
+      wroteAny = true;
+      try { await rb.db.insert('file_backups', { snapshot_id: snapshotId, file_path: dest, content: NEW_FILE_SENTINEL }); } catch {}
+    } else {
+      errors.push(o.filename + ': ' + (res.error || 'download failed'));
+    }
+  }
+  if (wroteAny) {
+    try {
+      await rb.db.insert('snapshots', { id: snapshotId, label: 'ComfyUI — ' + wf.name + ' (' + imported.length + ' file' + (imported.length !== 1 ? 's' : '') + ')', file_count: imported.length });
+    } catch {}
+    showRevertBar(snapshotId, 'ComfyUI — ' + wf.name, 0, imported.length);
+    refreshSidebar().catch(() => {});
+    try {
+      await rb.db.insert('pages', {
+        name: 'ComfyUI — ' + wf.name + ' — ' + new Date().toLocaleString(),
+        content: 'Generated with ComfyUI workflow "' + wf.name + '" (' + (wf.file || 'from history') + ').\n'
+          + 'Outputs imported to ' + dir + ': ' + imported.map(i => i.filename).join(', ') + '\n'
+          + 'Inputs: ' + JSON.stringify(inputs || {}) + '\n',
+        project_id: state.activeProjectId,
+      });
+    } catch {}
+    await rb.unity.refresh(state.projectPath);
+  }
+  return { dir, imported, errors };
+}
+
+async function importComfyuiOutputAt(index) {
+  const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
+  const o = state.comfyuiOutputs[index];
+  if (!wf || !o) return;
+  const res = await importComfyuiOutputs(wf, [o], { ...state.comfyuiGenInputs });
+  if (res.imported.length) showToast('✓ Imported ' + res.imported[0].filename + ' to ' + res.dir);
+  else showToast('⚠ ' + (res.errors[0] || 'Import failed'));
+  renderComfyUIView();
+}
+
+async function importAllComfyuiOutputs() {
+  const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
+  if (!wf || !state.comfyuiOutputs.length) return;
+  const res = await importComfyuiOutputs(wf, state.comfyuiOutputs, { ...state.comfyuiGenInputs });
+  if (res.imported.length) showToast('✓ Imported ' + res.imported.length + ' image(s) to ' + res.dir);
+  else showToast('⚠ ' + (res.errors[0] || 'Import failed'));
+  renderComfyUIView();
+}
+
+async function viewComfyuiHistoryOutputs(promptId) {
+  const entry = state.comfyuiHistory.find(h => h.promptId === promptId);
+  if (!entry || !entry.outputs.length) { showToast('No outputs for this generation'); return; }
+  const withLocal = [];
+  for (const o of entry.outputs) {
+    const dl = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', promptId, url: state.comfyuiUrl });
+    withLocal.push({ ...o, localPath: dl.ok ? dl.path : null });
+  }
+  state.comfyuiOutputs = withLocal;
+  renderComfyUIView();
+  showToast(withLocal.some(o => o.localPath) ? '✓ Outputs downloaded — use Import to copy them into the project' : '⚠ Could not download the outputs — is ComfyUI still running?');
+}
+
+// Run/Review bar for an unapproved workflow in the Agent loop.
+// Run submits and resumes the loop with the tool result; Dismiss
+// resumes it with a "User declined" note.
+function showComfyuiBar(wf, inputs, settle) {
+  const existing = document.getElementById('comfyui-bar');
+  if (existing) existing.remove();
+  const bar = document.createElement('div');
+  bar.id = 'comfyui-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const summary = Object.entries(inputs || {}).map(([k, v]) => k + ': ' + String(v).slice(0, 60)).join(', ') || 'default inputs';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;';
+  label.textContent = 'Generate with ComfyUI workflow "' + wf.name + '"? ' + summary + ' (This workflow is not approved for autonomous execution.)';
+  const runBtn = document.createElement('button');
+  runBtn.className = 'btn btn-teal';
+  runBtn.textContent = 'Run';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Dismiss';
+  let decided = false;
+  runBtn.onclick = () => { if (decided) return; decided = true; bar.remove(); settle({ decision: 'run' }); };
+  dismissBtn.onclick = () => { if (decided) return; decided = true; bar.remove(); settle({ decision: 'declined' }); };
+  bar.appendChild(label);
+  bar.appendChild(runBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+}
+
+// ── ComfyUI centre view ───────────────────────────────────────────
+async function renderComfyUIView() {
+  const el = document.getElementById('comfyui-mode');
+  if (!el) return;
+  if (!state._comfyuiLoaded) {
+    state._comfyuiLoaded = true;
+    el.innerHTML = '<h2 style="font-size:15px;font-weight:600;margin-bottom:4px;">ComfyUI</h2><p style="color:var(--text3);font-size:12px;">Checking ComfyUI…</p>';
+    await verifyComfyui();
+    await refreshComfyuiWorkflows();
+    await refreshComfyuiHistory();
+    if (state.mode !== 'comfyui') return;
+  }
+  const st = state.comfyuiStatus;
+  const statusText = st
+    ? (st.ok ? 'Connected — ComfyUI at ' + state.comfyuiUrl + (st.version ? ' (v' + st.version + ')' : '') : 'Not running — ' + (st.error || 'could not reach ComfyUI'))
+    : 'Not checked yet';
+  const caps = state.comfyuiCapabilities || [];
+  const selected = findComfyuiWorkflow(state.comfyuiSelectedId);
+  const gen = state.comfyuiGenerating;
+
+  const inputFieldHtml = (inp) => {
+    const key = inp.role === 'positive' ? 'positive' : inp.role === 'negative' ? 'negative' : inp.nodeId + '.' + inp.inputName;
+    const cur = state.comfyuiGenInputs[key] !== undefined ? state.comfyuiGenInputs[key] : inp.value;
+    const esc = escHtml(String(cur == null ? '' : cur));
+    if (inp.role === 'positive' || inp.role === 'negative') {
+      return `<label class="field-label">${escHtml(inp.label)}
+        <textarea id="comfyui-input-${key}" oninput="onComfyuiInputChange('${key}', this)" style="min-height:56px;">${esc}</textarea>
+      </label>`;
+    }
+    if (inp.inputName === 'seed') {
+      return `<label class="field-label">Seed
+        <span style="display:flex;gap:8px;"><input id="comfyui-input-seed" type="number" value="${esc}" oninput="onComfyuiInputChange('${key}', this)" style="flex:1;" /><button class="btn btn-secondary" onclick="randomiseComfyuiSeed()">Randomise</button></span>
+      </label>`;
+    }
+    if (inp.type === 'number') {
+      return `<label class="field-label">${escHtml(inp.label)} <span style="color:var(--text3);font-size:11px;">(${escHtml(inp.classType)} · node ${escHtml(inp.nodeId)})</span>
+        <input type="number" value="${esc}" oninput="onComfyuiInputChange('${key}', this)" />
+      </label>`;
+    }
+    return `<label class="field-label">${escHtml(inp.label)} <span style="color:var(--text3);font-size:11px;">(${escHtml(inp.classType)} · node ${escHtml(inp.nodeId)})</span>
+      <input type="text" value="${esc}" oninput="onComfyuiInputChange('${key}', this)" />
+    </label>`;
+  };
+
+  const libraryHtml = state.comfyuiWorkflows.length
+    ? state.comfyuiWorkflows.map(w => {
+        const isSel = selected && selected.id === w.id;
+        return `<div class="conn-row" style="align-items:flex-start;${isSel ? 'border-color:var(--accent);' : ''}">
+          <span class="conn-ico">◈</span>
+          <span class="conn-row-info" style="flex:1;">
+            <span class="conn-name">${escHtml(w.name)}</span>
+            <span style="font-size:11px;color:${w.available ? 'var(--teal)' : 'var(--amber)'};"> ${w.available ? 'Available' : 'Unavailable — ' + escHtml(w.availableReason || (w.missing || []).join('; '))}</span><br>
+            <span style="font-size:12px;color:var(--text2);">Purpose: </span>
+            <input value="${escHtml(w.purpose || '')}" onchange="setComfyuiPurpose('${w.id}', this)" style="width:260px;padding:3px 8px;font-size:12px;" />
+            <br><span style="font-size:11px;color:var(--text3);">${escHtml((w.inputs || []).length)} configurable input(s) · ${escHtml((w.outputs || []).length)} output node(s)${(w.missing || []).length ? ' · Missing: ' + escHtml(w.missing.join('; ')) : ''}</span>
+            <br><span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(w.file)}</span>
+          </span>
+          <span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+            <label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:12px;cursor:pointer;" title="Only approved workflows run from the Agent loop without asking">
+              <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
+            </label>
+            <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
+          </span>
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;">No workflows imported yet — pick the folder where your ComfyUI workflow JSON files live, then Rescan. Workflows are your own files; CodeFox never ships a sample workflow.</div>';
+
+  const generateHtml = selected
+    ? `<h3 class="settings-subhead">Generate — ${escHtml(selected.name)}</h3>
+      ${selected.available ? '' : `<p style="color:var(--amber);font-size:12px;">Unavailable: ${escHtml(selected.availableReason || (selected.missing || []).join('; '))}</p>`}
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
+        ${(selected.inputs || []).map(inputFieldHtml).join('')}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+        <button class="btn btn-teal" onclick="runComfyuiFromPanel()" ${selected.available && !gen ? '' : 'disabled'}>${gen ? 'Generating…' : 'Run'}</button>
+        ${gen ? `<button class="btn btn-danger" onclick="stopComfyuiGeneration()">Cancel</button>` : ''}
+        <span id="comfyui-progress" style="font-size:12px;color:var(--text2);">${gen ? escHtml(gen.status || 'Working…') : ''}</span>
+      </div>
+      ${state.comfyuiOutputs.length ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">
+          ${state.comfyuiOutputs.map((o, i) => `
+            <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;width:180px;">
+              ${o.localPath ? `<img src="${comfyuiFileUrl(o.localPath)}" style="width:100%;border-radius:6px;display:block;" />` : `<div style="color:var(--text3);font-size:11px;">Could not download thumbnail${o.downloadError ? ': ' + escHtml(o.downloadError) : ''}</div>`}
+              <div style="font-size:11px;color:var(--text2);font-family:var(--mono);margin:6px 0;word-break:break-all;">${escHtml(o.filename)}</div>
+              <button class="btn btn-secondary" onclick="importComfyuiOutputAt(${i})" style="font-size:11px;">Import to project</button>
+            </div>`).join('')}
+        </div>
+        <div style="margin-top:10px;"><button class="btn btn-teal" onclick="importAllComfyuiOutputs()">Import all to project</button>
+        <span style="font-size:11px;color:var(--text3);margin-left:8px;">Imports to Assets/Generated/${escHtml(comfyuiSlug(selected.name))}/ — snapshotted first, so revert can delete them.</span></div>
+      ` : ''}`
+    : '<p style="color:var(--text3);font-size:12px;">Select a workflow above to generate with it.</p>';
+
+  const historyHtml = state.comfyuiHistory.length
+    ? state.comfyuiHistory.map(h => `
+      <div class="conn-row">
+        <span class="conn-ico">◈</span>
+        <span class="conn-row-info"><span class="conn-name" style="font-family:var(--mono);font-size:11px;">${escHtml(h.promptId)}</span><br>
+        <span class="conn-status">${escHtml(h.status)}${h.completed ? ' ✓' : ''} · ${h.outputs.length} output(s)</span></span>
+        <button class="btn btn-secondary" onclick="viewComfyuiHistoryOutputs('${escHtml(h.promptId)}')" ${h.outputs.length ? '' : 'disabled'}>View outputs</button>
+      </div>`).join('')
+    : '<div style="color:var(--text3);font-size:12px;">No generations in ComfyUI history yet — or ComfyUI is not running.</div>';
+
+  el.innerHTML = `
+    <h2 style="font-size:15px;font-weight:600;margin-bottom:4px;">ComfyUI</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px;">Generate images with your local ComfyUI, and bring the results into the project. ComfyUI handles generation; CodeFox handles the workflow. Monitoring is by polling — there is no WebSocket client.</p>
+    <h3 class="settings-subhead">Connection</h3>
+    <div class="conn-row">
+      <span class="conn-ico">◈</span>
+      <span class="conn-row-info" style="flex:1;">
+        <span style="display:flex;gap:8px;align-items:center;">
+          <input id="comfyui-url" value="${escHtml(state.comfyuiUrl)}" style="flex:1;" placeholder="http://127.0.0.1:8188" />
+          <button class="btn btn-secondary" onclick="onComfyuiUrlSave()">Save + Verify</button>
+        </span>
+        <span class="conn-status ${st && st.ok ? 'connected' : ''}" style="display:block;margin-top:6px;">${escHtml(statusText)}</span>
+      </span>
+      <button class="btn btn-secondary" onclick="rb.shell.openExternal('${escHtml(state.comfyuiUrl)}')">Open ComfyUI ↗</button>
+    </div>
+    <h3 class="settings-subhead">Discovered capabilities</h3>
+    ${st && st.ok
+      ? (caps.length ? `<div class="chip-row">${caps.map(c => `<span class="chip">${escHtml(c.label)}</span>`).join('')}</div>` : '<p style="color:var(--text3);font-size:12px;">Connected, but no familiar node families were found in /object_info.</p>')
+      : '<p style="color:var(--text3);font-size:12px;">Capabilities appear here once ComfyUI answers — they are read live from /object_info, never assumed.</p>'}
+    <h3 class="settings-subhead">Workflow Library</h3>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+      <input id="comfyui-workflows-dir" value="${escHtml(state.comfyuiWorkflowsDir || '')}" placeholder="Folder with your ComfyUI workflow JSON files" style="flex:1;" readonly />
+      <button class="btn btn-secondary" onclick="browseComfyuiWorkflowsDir()">Browse</button>
+      <button class="btn btn-secondary" onclick="refreshComfyuiWorkflows().then(() => renderComfyUIView())">Rescan</button>
+    </div>
+    ${libraryHtml}
+    ${generateHtml}
+    <h3 class="settings-subhead">History</h3>
+    <p class="settings-note">Last 20 generations from ComfyUI /history.</p>
+    ${historyHtml}`;
 }
 
 // ── Rules section ─────────────────────────────────────────────────
@@ -3819,9 +4578,10 @@ async function renderConnectionsView() {
   const list = document.getElementById('connections-list');
   if (!list) return;
 
-  const [llmStatus, ollamaStatus, bridgeExists, figmaToken, jiraToken, jiraUrl, pkgInfo] = await Promise.all([
+  const [llmStatus, ollamaStatus, comfyuiStatus, bridgeExists, figmaToken, jiraToken, jiraUrl, pkgInfo] = await Promise.all([
     rb.llm.status().catch(() => ({ running: false })),
     rb.ollama.status().catch(() => ({ running: false })),
+    rb.comfyui.status().catch(() => ({ ok: false, error: 'Could not reach ComfyUI' })),
     state.projectPath ? rb.fs.exists(state.projectPath + '/Assets/Editor/CodeFoxBridge.cs') : Promise.resolve(false),
     rb.db.getSetting('figma_token'),
     rb.db.getSetting('jira_token'),
@@ -3841,6 +4601,12 @@ async function renderConnectionsView() {
       status: ollamaStatus.running ? 'Running' : 'Not running',
       connected: !!ollamaStatus.running,
       action: '<button class="btn btn-secondary" onclick="showSettings(\'model\')">Configure</button>',
+    },
+    {
+      ico: '◈', name: 'ComfyUI',
+      status: comfyuiStatus.ok ? 'Connected — ComfyUI at ' + (state.comfyuiUrl || 'http://127.0.0.1:8188') : 'Not running — ' + (comfyuiStatus.error || 'could not reach ComfyUI'),
+      connected: !!comfyuiStatus.ok,
+      action: '<button class="btn btn-secondary" onclick="showComfyUI()">Open ComfyUI panel</button>',
     },
     {
       ico: '⬡', name: 'Unity Bridge',
