@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.7.1.
+// 2. package.json version is 0.7.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.7.1', pkg.version === '0.7.1', 'got ' + pkg.version);
-check('sidebar footer shows 0.7.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.1 — Local'));
+check('package.json version is 0.7.2', pkg.version === '0.7.2', 'got ' + pkg.version);
+check('sidebar footer shows 0.7.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.2 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1294,8 +1294,8 @@ check('UI-format workflow without /object_info fails with the reason (not an emp
   (() => { const p = comfy.parseWorkflowGraph(uiPlainWorkflow, null); return p.ok === false && /UI-format/.test(p.error); })());
 check('UI-format workflow with a node type the install lacks names the type',
   (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[0].type = 'NoSuchNode'; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo); return c.ok === false && /NoSuchNode/.test(c.error); })());
-check('bypassed (muted) node in a UI workflow fails with the reason',
-  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[2].mode = 2; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo); return c.ok === false && /Bypassed/.test(c.error); })());
+check('muted node feeding a required input fails naming the downstream node',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[1].mode = 2; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo); return c.ok === false && /CLIPTextEncode/.test(c.error) && /required input "clip"/.test(c.error); })());
 // CFGGuider carries positive/negative like BasicGuider (the
 // Chroma-style path the old role detection missed).
 const guiderWorkflow = {
@@ -1329,6 +1329,11 @@ try {
   const frontendTpl = path.join(progComfy, 'web_custom_versions', 'Comfy-Org_ComfyUI_frontend', '1.0.0', 'templates');
   fs.mkdirSync(frontendTpl, { recursive: true });
   fs.writeFileSync(path.join(frontendTpl, 'image_flux_t2i.json'), JSON.stringify(uiPlainWorkflow));
+  // Locale files ship next to the templates — not workflows, and
+  // they must not count as files found or appear as problems.
+  fs.writeFileSync(path.join(frontendTpl, 'index.json'), JSON.stringify({ en: 'Templates', de: 'Vorlagen' }));
+  fs.writeFileSync(path.join(frontendTpl, 'index.de.json'), JSON.stringify({ de: 'Vorlagen' }));
+  fs.writeFileSync(path.join(frontendTpl, 'random.json'), JSON.stringify({ foo: 1, bar: [2, 3] }));
   const cnEx = path.join(progComfy, 'custom_nodes', 'some-pack', 'example_workflows');
   fs.mkdirSync(cnEx, { recursive: true });
   fs.writeFileSync(path.join(cnEx, 'pack_wf.json'), JSON.stringify(uiPlainWorkflow));
@@ -1340,6 +1345,7 @@ try {
   fs.mkdirSync(wfDir2, { recursive: true });
   fs.writeFileSync(path.join(wfDir2, 'txt2img.json'), JSON.stringify(fakeWorkflow));
   fs.writeFileSync(path.join(wfDir2, 'broken.json'), '{not json');
+  fs.writeFileSync(path.join(wfDir2, 'index.json'), JSON.stringify({ en: 'Workflows' }));
   for (const [cat, files] of [['diffusion_models', ['flux.safetensors']], ['vae', ['v.safetensors']], ['text_encoders', ['clip.safetensors']]]) {
     fs.mkdirSync(path.join(userDir2, 'models', cat), { recursive: true });
     for (const f of files) fs.writeFileSync(path.join(userDir2, 'models', cat, f), 'x');
@@ -1347,7 +1353,7 @@ try {
   const scan2 = comfy.scanComfyui({ home: home2, appData: appData2, localAppData: local2, drives: [] });
   check('scan records the Desktop exe only when the exe exists on disk',
     scan2.ok === true && scan2.desktopExe === path.join(progComfy, 'ComfyUI.exe'));
-  check('scan finds built-in templates in the frontend package, custom-node examples, and the uv cache',
+  check('scan finds built-in templates in the frontend package, custom-node examples, and the uv cache (locale files do not count)',
     scan2.templateDirs.length === 3 && scan2.templateDirs.every(t => t.count === 1)
     && scan2.templateDirs.some(t => t.kind === 'frontend')
     && scan2.templateDirs.some(t => t.kind === 'custom-node')
@@ -1362,10 +1368,11 @@ try {
   check('scan adopts the workflows folder with files in it',
     scan2.workflowsDir === wfDir2);
   const importedUser = comfy.importWorkflowsFromDir(wfDir2, uiObjectInfo, [], { recursive: true });
-  check('user workflows import labelled user, malformed files surface as errors (not silent zeros)',
+  check('user workflows import labelled user, malformed files surface as errors (not silent zeros), locale files are ignored',
     importedUser.ok === true && importedUser.workflows.length === 1
     && importedUser.workflows[0].source === 'user'
-    && importedUser.errors.length === 1 && /broken\.json/.test(importedUser.errors[0]));
+    && importedUser.errors.length === 1 && /broken\.json/.test(importedUser.errors[0])
+    && !importedUser.errors.some(e => /index\.json/.test(e)));
   const templateFiles = [];
   for (const t of scan2.templateDirs) {
     for (const f of fs.readdirSync(t.dir).filter(f => f.toLowerCase().endsWith('.json'))) templateFiles.push(path.join(t.dir, f));
@@ -1375,11 +1382,12 @@ try {
     defaultPurpose: 'Built-in template — from ComfyUI Desktop',
     titleByName: { image_qwen_image: { title: 'Qwen Image Text to Image', description: 'Text to image with Qwen' } },
   });
-  check('templates import labelled builtin with server titles',
+  check('templates import labelled builtin with server titles, locale files ignored (no errors for them)',
     importedTpl.ok === true && importedTpl.workflows.length === 3
     && importedTpl.workflows.every(w => w.source === 'builtin' && w.id.startsWith('tpl-'))
     && importedTpl.workflows.some(w => w.name === 'Qwen Image Text to Image' && w.description === 'Text to image with Qwen')
-    && importedTpl.workflows.every(w => w.purpose === 'Built-in template — from ComfyUI Desktop'));
+    && importedTpl.workflows.every(w => w.purpose === 'Built-in template — from ComfyUI Desktop')
+    && importedTpl.errors.length === 0);
   const importedNoInfo = comfy.importWorkflowsFromFiles([path.join(frontendTpl, 'image_flux_t2i.json')], null, [], { source: 'builtin' });
   check('UI-format template without ComfyUI running fails with the reason (not a silent zero)',
     importedNoInfo.workflows.length === 0 && importedNoInfo.errors.length === 1 && /UI-format/.test(importedNoInfo.errors[0]));
@@ -1403,8 +1411,129 @@ check('ComfyUI view launches the native app, labels built-ins, and teaches the e
 check('README documents built-in templates, UI-format conversion, and the native Open button',
   readme.includes('Built-in template') && readme.includes('UI-format')
   && readme.includes('comfyui-workflow-templates') && readme.includes('Desktop app'));
-check('CHANGELOG has the 0.7.1 entry',
-  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.7.1 — 2026-11-24'));
+// 24. v0.7.2 — bypassed / muted nodes resolve the way ComfyUI
+// does, PrimitiveNode inlines, non-workflow JSON is ignored,
+// and each library section has an Approve all button.
+// (The old v0.7.1 behaviour — failing a workflow for a bypassed
+// node and telling the user to switch it back on — was wrong: Desktop's
+// own templates are full of bypassed optional branches, and the
+// frontend resolves them into pass-through links at submission.)
+const uiObjectInfo2 = {
+  ...uiObjectInfo,
+  ImageScale: { input: { required: { image: ['IMAGE', {}], upscale_method: uiCombo(['nearest-exact', 'bilinear'], 'bilinear'), width: uiInt(512), height: uiInt(512), crop: uiCombo(['disabled', 'center'], 'disabled') } } },
+  LoadImage: { input: { required: { image: uiStr('ref.png'), upload: uiCombo(['image', 'mask'], 'image') } } },
+  // Fixture-only stand-in for the many real nodes whose image
+  // input is optional (reference-image inputs on edit nodes).
+  TestOptionalImage: { input: { required: { model: ['MODEL', {}] }, optional: { image: ['IMAGE', {}] } } },
+};
+// A bypassed node mid-chain: ImageScale (mode 4) between
+// VAEDecode and SaveImage in the plain workflow.
+const uiBypassMid = JSON.parse(JSON.stringify(uiPlainWorkflow));
+uiBypassMid.nodes.push({ id: 11, type: 'ImageScale', mode: 4, inputs: [{ name: 'image', type: 'IMAGE', link: 20 }], widgets_values: ['bilinear', 512, 512, 'disabled'] });
+uiBypassMid.links = uiBypassMid.links.filter(l => l[0] !== 9);
+uiBypassMid.links.push([20, 8, 0, 11, 0, 'IMAGE'], [21, 11, 0, 9, 0, 'IMAGE']);
+// The SaveImage entry must point at the new link from the
+// bypassed node — entries and the links array stay consistent,
+// as they are in a real saved file.
+uiBypassMid.nodes[8].inputs[0].link = 21;
+const convBypassMid = comfy.convertUiGraphToApi(uiBypassMid, uiObjectInfo2);
+check('bypassed node mid-chain rewires to its input (frontend passthrough)',
+  convBypassMid.ok === true && convBypassMid.graph['9'].inputs.images[0] === '8'
+  && !Object.values(convBypassMid.graph).some(n => n.class_type === 'ImageScale'));
+// A bypassed terminal node (SaveImage) simply disappears.
+check('bypassed terminal node disappears and the rest converts',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[8].mode = 4; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo2); return c.ok === true && !Object.values(c.graph).some(n => n.class_type === 'SaveImage') && Object.keys(c.graph).length === 8; })());
+// A bypassed source node (LoadImage, no connected input) feeding
+// an OPTIONAL input: the link is dropped, the input is left out.
+const uiBypassSource = {
+  nodes: [
+    { id: 1, type: 'CheckpointLoaderSimple', inputs: [], widgets_values: ['sd15.safetensors'] },
+    { id: 2, type: 'LoadImage', mode: 4, inputs: [], widgets_values: ['ref.png', 'image'] },
+    { id: 3, type: 'TestOptionalImage', inputs: [{ name: 'model', type: 'MODEL', link: 1 }, { name: 'image', type: 'IMAGE', link: 2 }], widgets_values: [] },
+  ],
+  links: [[1, 1, 0, 3, 0, 'MODEL'], [2, 2, 0, 3, 1, 'IMAGE']],
+};
+const convBypassSource = comfy.convertUiGraphToApi(uiBypassSource, uiObjectInfo2);
+check('bypassed source node feeding an optional input drops the link, input left out',
+  convBypassSource.ok === true && convBypassSource.graph['3'].inputs.model[0] === '1'
+  && !('image' in convBypassSource.graph['3'].inputs)
+  && !Object.values(convBypassSource.graph).some(n => n.class_type === 'LoadImage'));
+// The same bypassed source feeding a REQUIRED input is a genuine
+// problem and names the downstream node.
+check('bypassed source feeding a required input fails naming the downstream node',
+  (() => {
+    const bad = {
+      nodes: [
+        { id: 1, type: 'LoadImage', mode: 4, inputs: [], widgets_values: ['ref.png', 'image'] },
+        { id: 2, type: 'SaveImage', inputs: [{ name: 'images', type: 'IMAGE', link: 1 }], widgets_values: ['out'] },
+      ],
+      links: [[1, 1, 0, 2, 0, 'IMAGE']],
+    };
+    const c = comfy.convertUiGraphToApi(bad, uiObjectInfo2);
+    return c.ok === false && /Bypassed node "LoadImage"/.test(c.error) && /required input "images" of "SaveImage"/.test(c.error);
+  })());
+// A muted terminal node disappears too.
+check('muted terminal node disappears and the rest converts',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[8].mode = 2; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo2); return c.ok === true && !Object.values(c.graph).some(n => n.class_type === 'SaveImage'); })());
+// PrimitiveNode: its value is inlined into the downstream widget
+// input (KSampler seed), and the node itself is never emitted.
+const uiPrimitive = JSON.parse(JSON.stringify(uiPlainWorkflow));
+uiPrimitive.nodes[5].inputs.push({ name: 'seed', type: 'INT', link: 20, widget: { name: 'seed' } });
+uiPrimitive.nodes.push({ id: 11, type: 'PrimitiveNode', inputs: [], outputs: [{ name: 'connect to widget input', type: '*', links: [20] }], widgets_values: [12345] });
+uiPrimitive.links.push([20, 11, 0, 6, 4, 'INT']);
+const convPrimitive = comfy.convertUiGraphToApi(uiPrimitive, uiObjectInfo2);
+check('PrimitiveNode value is inlined into the downstream input, node never emitted',
+  convPrimitive.ok === true && convPrimitive.graph['6'].inputs.seed === 12345
+  && !Object.values(convPrimitive.graph).some(n => n.class_type === 'PrimitiveNode'));
+// A bypassed node INSIDE a subgraph is rewired the same way
+// during expansion: ImageScale between the subgraph's KSampler
+// and its output.
+const uiBypassSub = JSON.parse(JSON.stringify(uiSubgraphWorkflow));
+const subDef = uiBypassSub.definitions.subgraphs[0];
+subDef.nodes.push({ id: 6, type: 'ImageScale', mode: 4, inputs: [{ name: 'image', type: 'IMAGE', link: 11 }], widgets_values: ['bilinear', 512, 512, 'disabled'] });
+subDef.links = subDef.links.filter(l => l.id !== 9);
+subDef.links.push(
+  { id: 11, origin_id: 4, origin_slot: 0, target_id: 6, target_slot: 0, type: 'IMAGE' },
+  { id: 9, origin_id: 6, origin_slot: 0, target_id: -20, target_slot: 0, type: 'IMAGE' },
+);
+const convBypassSub = comfy.convertUiGraphToApi(uiBypassSub, uiObjectInfo2);
+const subSave = convBypassSub.ok ? Object.values(convBypassSub.graph).find(n => n.class_type === 'SaveImage') : null;
+const subSampler = convBypassSub.ok ? Object.entries(convBypassSub.graph).find(([, n]) => n.class_type === 'KSampler') : null;
+check('bypassed node inside a subgraph rewires to the internal producer',
+  convBypassSub.ok === true && Object.keys(convBypassSub.graph).length === 6
+  && !Object.values(convBypassSub.graph).some(n => n.class_type === 'ImageScale')
+  && subSave && subSave.inputs.images[0] === subSampler[0]);
+// Conversion is pure: converting the same graph twice gives the
+// same result and the input graph is unmutated.
+check('conversion does not mutate its input (same graph converts identically twice)',
+  (() => {
+    const before = JSON.stringify(uiBypassMid);
+    const a = comfy.convertUiGraphToApi(uiBypassMid, uiObjectInfo2);
+    const b = comfy.convertUiGraphToApi(uiBypassMid, uiObjectInfo2);
+    return a.ok === true && b.ok === true
+      && JSON.stringify(a.graph) === JSON.stringify(b.graph)
+      && JSON.stringify(uiBypassMid) === before;
+  })());
+// A genuinely missing node type still fails honestly.
+check('genuinely missing node type still reported (not swallowed by the bypass fix)',
+  (() => { const bad = JSON.parse(JSON.stringify(uiPlainWorkflow)); bad.nodes[0].type = 'LumaImageModifyNode'; const c = comfy.convertUiGraphToApi(bad, uiObjectInfo2); return c.ok === false && /LumaImageModifyNode/.test(c.error); })());
+// Non-workflow JSON is not a workflow candidate.
+check('locale / stray JSON is not a workflow candidate, API and UI graphs are',
+  comfy.isWorkflowGraph({ en: 'hello', de: 'hallo' }) === false
+  && comfy.isWorkflowGraph({ foo: 1 }) === false
+  && comfy.isWorkflowGraph({ '1': { class_type: 'KSampler', inputs: {} } }) === true
+  && comfy.isWorkflowGraph({ nodes: [] }) === true);
+// The old advice string is built from parts so this file itself
+// does not contain it (the check below greps the shipped files).
+const UNBYPASS = 'un-' + 'bypass';
+check('the old "switch the node back on" advice is gone from shipped code and docs',
+  !fs.readFileSync(path.join(root, 'comfyui.js'), 'utf8').includes(UNBYPASS) && !appJs.includes(UNBYPASS) && !mainJs.includes(UNBYPASS)
+  && !readme.includes(UNBYPASS) && !fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes(UNBYPASS));
+check('ComfyUI view has an Approve all button per library section',
+  appJs.includes('function approveAllComfyuiWorkflows') && appJs.includes("approveAllComfyuiWorkflows('user')")
+  && appJs.includes("approveAllComfyuiWorkflows('builtin')") && appJs.includes('Approve all'));
+check('CHANGELOG has the 0.7.2 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.7.2 — 2026-11-24'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');
@@ -1457,6 +1586,47 @@ const mockServer = http.createServer((req, res) => {
   const down = await comfy.getComfyuiStatus('http://127.0.0.1:1');
   check('status reports not-ok (never fake ok) when nothing is listening',
     down.ok === false && !!down.error);
+  // Bulk approve: run the REAL approveAllComfyuiWorkflows from
+  // app.js (extracted by brace matching, not a copy) against a
+  // mock library with several workflows per section.
+  try {
+    const fnStart = appJs.indexOf('async function approveAllComfyuiWorkflows(source) {');
+    let depth = 0, fnEnd = -1;
+    for (let i = fnStart; i < appJs.length; i++) {
+      if (appJs[i] === '{') depth++;
+      else if (appJs[i] === '}') { depth--; if (depth === 0) { fnEnd = i + 1; break; } }
+    }
+    const fnText = appJs.slice(fnStart, fnEnd);
+    const fnBody = fnText.slice(fnText.indexOf('{') + 1, -1);
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const approveAll = new AsyncFunction('source', 'state', 'persistComfyuiWorkflows', 'renderComfyUIView', 'showToast', fnBody);
+    const mockState = { comfyuiWorkflows: [
+      { id: 'u1', source: 'user', approved: false },
+      { id: 'u2', source: 'user', approved: true },
+      { id: 't1', source: 'builtin', approved: false },
+      { id: 't2', source: 'builtin', approved: false },
+    ] };
+    let persisted = 0, rendered = 0, toast = '';
+    const mockPersist = async () => { persisted++; };
+    const mockRender = () => { rendered++; };
+    const mockToast = (m) => { toast = m; };
+    await approveAll('builtin', mockState, mockPersist, mockRender, mockToast);
+    check('Approve all (built-in) sets every flag in that section and nothing else',
+      mockState.comfyuiWorkflows.find(w => w.id === 't1').approved === true
+      && mockState.comfyuiWorkflows.find(w => w.id === 't2').approved === true
+      && mockState.comfyuiWorkflows.find(w => w.id === 'u1').approved === false
+      && mockState.comfyuiWorkflows.find(w => w.id === 'u2').approved === true
+      && persisted === 1 && rendered === 1 && /2 built-in templates/.test(toast));
+    await approveAll('user', mockState, mockPersist, mockRender, mockToast);
+    check('Approve all (user) sets every flag in that section',
+      mockState.comfyuiWorkflows.find(w => w.id === 'u1').approved === true
+      && persisted === 2 && /2 workflows/.test(toast));
+    await approveAll('nobody', mockState, mockPersist, mockRender, mockToast);
+    check('Approve all with an empty section does nothing (no persist)',
+      persisted === 2 && rendered === 2);
+  } catch (e) {
+    check('Approve all runs against a mock library', false, String(e && e.message));
+  }
   finish();
 })().catch((e) => {
   check('mock ComfyUI server tests ran without throwing', false, String(e && e.message));

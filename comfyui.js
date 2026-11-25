@@ -340,7 +340,15 @@ function parseWorkflowGraph(graph, objectInfo) {
 // done honestly, so conversion fails with a clear error instead of
 // guessing. Node types absent from /object_info fail the same way,
 // except the annotation nodes (Note / MarkdownNote), which are
-// skipped — they are never executed.
+// skipped — they are never executed. Bypassed (mode 4) and muted
+// (mode 2) nodes and PrimitiveNodes are NOT failures: the
+// frontend's graphToPrompt resolves them before a prompt is ever
+// built — a bypassed node becomes a pass-through link, a muted
+// node and its links are dropped, a PrimitiveNode's value is
+// written straight into the downstream widget — and this
+// converter mirrors that (see resolveSkippedUiNodes). Only a
+// required input left with nothing to feed it fails, naming the
+// downstream node.
 //
 // Subgraphs (the "blueprint" nodes the newer templates are built
 // from, e.g. the Flux and Qwen text-to-image templates) are
@@ -362,6 +370,33 @@ const UI_SUBGRAPH_OUTPUT_NODE = -20;
 
 function isUiWorkflowGraph(graph) {
   return !!(graph && typeof graph === 'object' && !Array.isArray(graph) && Array.isArray(graph.nodes));
+}
+
+// An API-format workflow is an object with at least one
+// numeric-keyed node carrying a class_type. A JSON file that is
+// neither this nor a UI-format graph is not a workflow at all —
+// the locale/translation files (index*.json) the template package
+// ships, or any other stray JSON — and must be silently ignored
+// by the import, never listed as an import problem.
+function isApiWorkflowGraph(graph) {
+  if (!graph || typeof graph !== 'object' || Array.isArray(graph)) return false;
+  return Object.keys(graph).some(k => /^\d+$/.test(k)
+    && graph[k] && typeof graph[k] === 'object' && typeof graph[k].class_type === 'string');
+}
+
+function isWorkflowGraph(graph) {
+  return isUiWorkflowGraph(graph) || isApiWorkflowGraph(graph);
+}
+
+// True when a file on disk parses as a workflow graph (either
+// format). Never throws — unreadable or malformed JSON is not a
+// workflow; malformed files are still reported by the import
+// itself (see importWorkflowsFromFiles), this is only the
+// "is it a workflow at all" question the scan counts ask.
+function isWorkflowJsonFile(file) {
+  try {
+    return isWorkflowGraph(JSON.parse(fs.readFileSync(file, 'utf8')));
+  } catch { return false; }
 }
 
 // Normalise a LiteGraph link to { id, originId, originSlot,
@@ -415,6 +450,19 @@ function uiDefInputs(def) {
   return out;
 }
 
+// One def input by name: { spec, required }. Null when the def
+// has no such input (a custom node whose definition the install
+// does not report, or a stale name in an old file).
+function uiDefInputSpec(def, name) {
+  const groups = (def && def.input) || {};
+  for (const [groupName, group] of [['required', groups.required], ['optional', groups.optional]]) {
+    if (group && Object.prototype.hasOwnProperty.call(group, name)) {
+      return { spec: group[name], required: groupName === 'required' };
+    }
+  }
+  return null;
+}
+
 // Expand every subgraph instance in a UI graph into flat nodes +
 // links. Returns { ok, nodes, links, error }. `nodes` are cloned
 // UI nodes; links are normalised link objects. An input entry that
@@ -425,7 +473,18 @@ function expandUiSubgraphs(uiGraph) {
   const subgraphs = {};
   const defs = (uiGraph && uiGraph.definitions && uiGraph.definitions.subgraphs) || [];
   for (const s of defs) if (s && s.id != null) subgraphs[String(s.id)] = s;
-  const plainNodes = (uiGraph.nodes || []).map(n => ({ ...n }));
+  // Clone nodes DEEPLY enough that conversion never mutates the
+  // caller's graph: expansion and the skipped-node pass edit input
+  // entries in place (link ids, __literal values), and a shallow
+  // clone would share those entries with the stored workflow —
+  // converting the same graph twice would then see the first
+  // conversion's edits.
+  const cloneUiNode = (n) => ({
+    ...n,
+    inputs: Array.isArray(n.inputs) ? n.inputs.map(i => ({ ...i })) : n.inputs,
+    outputs: Array.isArray(n.outputs) ? n.outputs.map(o => ({ ...o, links: Array.isArray(o.links) ? [...o.links] : o.links })) : n.outputs,
+  });
+  const plainNodes = (uiGraph.nodes || []).map(cloneUiNode);
   const plainLinks = (uiGraph.links || []).map(normalizeUiLink).filter(Boolean);
   if (!Object.keys(subgraphs).length) return { ok: true, nodes: plainNodes, links: plainLinks };
   let nodes = plainNodes.map(n => ({ ...n, __depth: 0 }));
@@ -448,7 +507,12 @@ function expandUiSubgraphs(uiGraph) {
   rebuildLinkIndex();
 
   for (;;) {
-    const idx = nodes.findIndex(n => subgraphs[String(n.type)] && (n.__depth || 0) < UI_SUBGRAPH_MAX_DEPTH);
+    // A bypassed (mode 4) or muted (mode 2) instance is NOT
+    // expanded: the frontend never runs a muted/bypassed
+    // subgraph's inner nodes — the instance is bypassed like any
+    // other node (see resolveSkippedUiNodes below), so it stays
+    // one node and the passthrough/drop logic handles it.
+    const idx = nodes.findIndex(n => subgraphs[String(n.type)] && n.mode !== 2 && n.mode !== 4 && (n.__depth || 0) < UI_SUBGRAPH_MAX_DEPTH);
     if (idx < 0) break;
     const inst = nodes[idx];
     const sub = subgraphs[String(inst.type)];
@@ -458,8 +522,7 @@ function expandUiSubgraphs(uiGraph) {
     for (const sn of (sub.nodes || [])) {
       const fresh = ++maxId;
       idMap.set(sn.id, fresh);
-      const clone = { ...sn, id: fresh, __depth: depth + 1 };
-      if (Array.isArray(sn.inputs)) clone.inputs = sn.inputs.map(i => ({ ...i }));
+      const clone = { ...cloneUiNode(sn), id: fresh, __depth: depth + 1 };
       newNodes.push(clone);
     }
     const subLinks = (sub.links || []).map(normalizeUiLink).filter(Boolean);
@@ -577,7 +640,7 @@ function expandUiSubgraphs(uiGraph) {
     links.push(...newLinks);
     rebuildLinkIndex();
   }
-  const stuck = nodes.find(n => subgraphs[String(n.type)]);
+  const stuck = nodes.find(n => subgraphs[String(n.type)] && n.mode !== 2 && n.mode !== 4);
   if (stuck) {
     return { ok: false, error: 'Subgraph nesting deeper than ' + UI_SUBGRAPH_MAX_DEPTH + ' levels is not supported (' + stuck.type + ')' };
   }
@@ -620,6 +683,141 @@ function convertUiNode(node, objectInfo, resolveOrigin) {
   return { ok: true, inputs };
 }
 
+// Resolve the nodes ComfyUI's own frontend never executes, the
+// way its graphToPrompt does — before conversion, so a workflow
+// full of them converts instead of failing:
+//   * bypassed (mode 4): the node is left out and each outgoing
+//     link is rewired to whatever feeds the node's matching
+//     input — the same-slot input when it is connected, else the
+//     first connected input. That is the frontend's passthrough:
+//     the converter resolves a bypassed node into a pass-through
+//     link and the node disappears. A bypassed source node
+//     (LoadImage, RecordAudio, …) has no input to pass through,
+//     so its outgoing links are dropped and the downstream input
+//     is left unconnected — valid for optional inputs, and for a
+//     widget-backed input the node's own widget/default value
+//     applies instead.
+//   * muted (mode 2): the node and all of its links are dropped;
+//     its outputs simply stop existing.
+//   * PrimitiveNode: a virtual node (isVirtualNode in the
+//     frontend, never in /object_info) whose value is written
+//     straight into each downstream widget-backed input —
+//     exactly what its applyToGraph does in the editor.
+// A downstream REQUIRED link-typed input left with nothing to
+// feed it is a genuine problem — the graph could not run in
+// ComfyUI Desktop either, so conversion fails naming the
+// downstream node instead of producing a broken graph.
+// Returns { ok, nodes, links, error }. The caller's arrays are
+// not mutated (nodes/links are fresh copies); node objects are
+// the expanded clones, so input entries may be edited in place.
+function resolveSkippedUiNodes(nodes, links, objectInfo) {
+  let outNodes = nodes.slice();
+  let outLinks = links.slice();
+  const byId = new Map();
+  const rebuild = () => { byId.clear(); for (const n of outNodes) byId.set(n.id, n); };
+  rebuild();
+  const linkById = new Map();
+  for (const l of outLinks) linkById.set(l.id, l);
+  const findEntry = (node, slot) => (node && Array.isArray(node.inputs) ? node.inputs[slot] : null) || null;
+  const isRequiredLinkInput = (target, entryName) => {
+    const def = objectInfo && target && objectInfo[target.type];
+    if (!def) return false;
+    const found = uiDefInputSpec(def, entryName);
+    return !!(found && found.required && !uiDefInputIsWidget(found.spec));
+  };
+  // Ultimate non-Reroute consumers of one link: the frontend
+  // resolves links through Reroutes, so a dropped link's real
+  // consumers may sit behind one. Returns [{ node, entry }].
+  const ultimateConsumers = (linkId) => {
+    const seen = new Set();
+    const found = [];
+    const walk = (id) => {
+      if (id == null || seen.has(id)) return;
+      seen.add(id);
+      const l = linkById.get(id);
+      if (!l) return;
+      const target = byId.get(l.targetId);
+      if (!target) return;
+      const entry = findEntry(target, l.targetSlot);
+      if (!entry) return;
+      if (target.type === 'Reroute') {
+        for (const out of outLinks) if (out.originId === target.id) walk(out.id);
+        return;
+      }
+      found.push({ node: target, entry });
+    };
+    walk(linkId);
+    return found;
+  };
+  const removeLink = (linkId) => {
+    const l = linkById.get(linkId);
+    if (l) {
+      const target = byId.get(l.targetId);
+      const entry = target ? findEntry(target, l.targetSlot) : null;
+      if (entry) entry.link = null;
+    }
+    linkById.delete(linkId);
+    outLinks = outLinks.filter(x => x.id !== linkId);
+  };
+  // A dropped link that fed a required input is a real problem —
+  // name the downstream node so the user knows what is broken.
+  const droppedLinkError = (kind, node, linkId) => {
+    const consumers = ultimateConsumers(linkId);
+    const bad = consumers.find(c => c.entry && c.entry.name && isRequiredLinkInput(c.node, c.entry.name));
+    if (!bad) return null;
+    const head = (kind === 'bypassed' ? 'Bypassed' : 'Muted') + ' node "' + (node.type || '?') + '" (id ' + node.id + ')';
+    const tail = 'required input "' + bad.entry.name + '" of "' + (bad.node.type || '?') + '" (id ' + bad.node.id + ')';
+    return kind === 'bypassed'
+      ? head + ' has no connected input to pass through to ' + tail
+      : head + ' leaves ' + tail + ' with nothing to feed it';
+  };
+  const skipped = outNodes.filter(n => n && (n.mode === 2 || n.mode === 4 || n.type === 'PrimitiveNode'));
+  for (const node of skipped) {
+    if (!byId.has(node.id)) continue;
+    const outgoing = outLinks.filter(x => x.originId === node.id);
+    if (node.mode === 4) {
+      // Bypassed: rewire each outgoing link to the matching input.
+      for (const l of outgoing) {
+        const inputs = Array.isArray(node.inputs) ? node.inputs : [];
+        let src = null;
+        const same = inputs[l.originSlot];
+        if (same && same.link != null && linkById.has(same.link)) src = same;
+        if (!src) src = inputs.find(e => e && e.link != null && linkById.has(e.link)) || null;
+        if (src) {
+          const srcLink = linkById.get(src.link);
+          l.originId = srcLink.originId;
+          l.originSlot = srcLink.originSlot;
+        } else {
+          const err = droppedLinkError('bypassed', node, l.id);
+          if (err) return { ok: false, error: err };
+          removeLink(l.id);
+        }
+      }
+    } else if (node.mode === 2) {
+      // Muted: drop the node and all of its links.
+      for (const l of outgoing) {
+        const err = droppedLinkError('muted', node, l.id);
+        if (err) return { ok: false, error: err };
+        removeLink(l.id);
+      }
+    } else {
+      // PrimitiveNode: inline its value into each downstream input.
+      const value = Array.isArray(node.widgets_values) && node.widgets_values.length ? node.widgets_values[0] : undefined;
+      for (const l of outgoing) {
+        if (value !== undefined) {
+          for (const c of ultimateConsumers(l.id)) c.entry.__literal = value;
+        }
+        removeLink(l.id);
+      }
+    }
+    // Drop every link into the node, then the node itself.
+    for (const l of outLinks.filter(x => x.targetId === node.id)) removeLink(l.id);
+    outNodes = outNodes.filter(n => n.id !== node.id);
+    rebuild();
+  }
+  return { ok: true, nodes: outNodes, links: outLinks };
+}
+
 // Convert a UI-format workflow graph to its API-format equivalent.
 // Returns { ok, graph, error }.
 function convertUiGraphToApi(uiGraph, objectInfo) {
@@ -629,20 +827,14 @@ function convertUiGraphToApi(uiGraph, objectInfo) {
   }
   const expanded = expandUiSubgraphs(uiGraph);
   if (!expanded.ok) return expanded;
-  const nodes = expanded.nodes;
-  const links = expanded.links;
+  const resolved = resolveSkippedUiNodes(expanded.nodes, expanded.links, objectInfo);
+  if (!resolved.ok) return resolved;
+  const nodes = resolved.nodes;
+  const links = resolved.links;
   const byId = new Map();
   for (const n of nodes) byId.set(n.id, n);
   const linkMap = new Map();
   for (const l of links) linkMap.set(l.id, l);
-  // Bypassed / muted nodes (mode 2 or 4) have no honest API
-  // equivalent — the graph would silently do something else.
-  // Fail with the reason instead of guessing.
-  for (const n of nodes) {
-    if (n && (n.mode === 2 || n.mode === 4)) {
-      return { ok: false, error: 'Bypassed node "' + (n.type || '?') + '" (id ' + n.id + ') is not supported — un-bypass it in ComfyUI Desktop and save again' };
-    }
-  }
   const resolveOrigin = (linkId) => {
     let cur = linkMap.get(linkId);
     let guard = 0;
@@ -947,10 +1139,19 @@ function findDesktopExe(dir) {
   return path.join(dir, preferred);
 }
 
-// Count *.json files in a folder (top level only). 0 when the
-// folder does not exist.
-function countJsonFiles(dir) {
-  try { return fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')).length; } catch { return 0; }
+// Count *.json files in a folder (top level only) that are
+// actually workflow graphs. 0 when the folder does not exist.
+// The template package ships locale files (index*.json) next to
+// its workflows — those are not workflows and must not inflate
+// the count. See isWorkflowGraph.
+function countWorkflowJsonFiles(dir) {
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.json')); } catch { return 0; }
+  let count = 0;
+  for (const f of files) {
+    if (isWorkflowJsonFile(path.join(dir, f))) count++;
+  }
+  return count;
 }
 
 // Where ComfyUI Desktop's built-in/template workflows live on disk
@@ -975,7 +1176,7 @@ function findFrontendTemplateDirs(base) {
     try { vers = fs.readdirSync(path.join(wcv, pkg), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { continue; }
     for (const v of vers) {
       const dir = path.join(wcv, pkg, v, 'templates');
-      const count = countJsonFiles(dir);
+      const count = countWorkflowJsonFiles(dir);
       if (count) out.push({ dir, count, kind: 'frontend' });
     }
   }
@@ -990,7 +1191,7 @@ function findCustomNodeExampleDirs(base) {
   for (const pack of packs) {
     for (const rel of ['example_workflows', 'workflows', 'workflow', 'example', 'examples']) {
       const dir = path.join(cn, pack, rel);
-      const count = countJsonFiles(dir);
+      const count = countWorkflowJsonFiles(dir);
       if (count) out.push({ dir, count, kind: 'custom-node' });
     }
   }
@@ -1008,7 +1209,7 @@ function findUvCacheTemplateDirs(localAppData) {
     try { hashes = fs.readdirSync(path.join(cacheRoot, sub), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name); } catch { continue; }
     for (const h of hashes) {
       const dir = path.join(cacheRoot, sub, h, 'comfyui_workflow_templates_json', 'templates');
-      const count = countJsonFiles(dir);
+      const count = countWorkflowJsonFiles(dir);
       if (count) out.push({ dir, count, kind: 'uv-cache' });
       if (out.length >= 5) return out;
     }
@@ -1025,7 +1226,7 @@ function findUvCacheTemplateDirs(localAppData) {
       const full = path.join(d, e.name);
       if (e.name === 'comfyui_workflow_templates_json') {
         const dir = path.join(full, 'templates');
-        const count = countJsonFiles(dir);
+        const count = countWorkflowJsonFiles(dir);
         if (count) out.push({ dir, count, kind: 'uv-cache' });
         continue;
       }
@@ -1110,7 +1311,9 @@ function scanComfyui(overrides) {
         let exists = false;
         try { exists = fs.existsSync(dir) && fs.statSync(dir).isDirectory(); } catch {}
         if (exists) {
-          const files = listFilesRecursive(dir, ['.json'], 5, 500);
+          // Only workflow graphs count — a workflows folder can
+          // hold other JSON too, and those are not workflows.
+          const files = listFilesRecursive(dir, ['.json'], 5, 500).filter(isWorkflowJsonFile);
           entry.workflows = { dir, count: files.length };
           if (files.length && !firstWithFiles) firstWithFiles = dir;
           if (!firstExisting) firstExisting = dir;
@@ -1164,10 +1367,12 @@ function scanComfyui(overrides) {
 // filename stem to { title, description } from the server's
 // /api/workflow_templates catalogue, and opts.defaultPurpose is
 // the purpose label for entries with no stored label. Returns
-// { ok, workflows, errors }. A file that is not valid JSON, is
-// not a workflow graph, or (for UI-format graphs) cannot be
-// converted without /object_info is reported in `errors` with its
-// filename and reason — never a silent zero.
+// { ok, workflows, errors }. A file that is not valid JSON, or
+// (for UI-format graphs) cannot be converted without
+// /object_info, is reported in `errors` with its filename and
+// reason — never a silent zero. A file that is not a workflow at
+// all (a locale file, a random JSON file) is silently ignored
+// instead: it is not an import problem.
 function importWorkflowsFromFiles(files, objectInfo, stored, opts) {
   const byId = {};
   for (const s of (stored || [])) if (s && s.id) byId[s.id] = s;
@@ -1180,6 +1385,19 @@ function importWorkflowsFromFiles(files, objectInfo, stored, opts) {
   for (const full of (files || [])) {
     const file = path.basename(full);
     const stem = file.replace(/\.json$/i, '');
+    let graph;
+    try {
+      graph = JSON.parse(fs.readFileSync(full, 'utf8'));
+    } catch (e) {
+      errors.push(file + ': not valid JSON — ' + e.message);
+      continue;
+    }
+    // Not a workflow at all (a locale file, a random JSON file):
+    // silently ignored — it is not an import problem, it does
+    // not count as a file found, and it must not claim an id a
+    // real workflow of the same name would need. See
+    // isWorkflowGraph.
+    if (!isWorkflowGraph(graph)) continue;
     const meta = titleByName[stem] || titleByName[file] || null;
     const name = (source === 'builtin' && meta && meta.title) ? meta.title : stem;
     let id = (source === 'builtin' ? 'tpl-' : '') + slugifyWorkflowId(name);
@@ -1190,13 +1408,6 @@ function importWorkflowsFromFiles(files, objectInfo, stored, opts) {
       id = id + '-' + slugifyWorkflowId(path.basename(path.dirname(full)));
     }
     seenIds.add(id);
-    let graph;
-    try {
-      graph = JSON.parse(fs.readFileSync(full, 'utf8'));
-    } catch (e) {
-      errors.push(file + ': not valid JSON — ' + e.message);
-      continue;
-    }
     const parsed = parseWorkflowGraph(graph, objectInfo);
     if (!parsed.ok) { errors.push(file + ': ' + parsed.error); continue; }
     const prev = byId[id];
@@ -1262,6 +1473,10 @@ module.exports = {
   importWorkflowsFromDir,
   importWorkflowsFromFiles,
   isUiWorkflowGraph,
+  isApiWorkflowGraph,
+  isWorkflowGraph,
+  isWorkflowJsonFile,
+  resolveSkippedUiNodes,
   convertUiGraphToApi,
   readDesktopConfig,
   findDesktopExe,

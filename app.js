@@ -3156,6 +3156,20 @@ async function toggleComfyuiApproved(id, checked) {
     : '"' + wf.name + '" is no longer approved — the Agent loop will ask before running it');
 }
 
+// Approve every workflow in one library section ("Your workflows"
+// or "Built-in templates") for autonomous execution, in one
+// click. This is an explicit per-click choice — it changes
+// nothing about the default: workflows still arrive unapproved
+// and are only approved when the user says so, here or one by one.
+async function approveAllComfyuiWorkflows(source) {
+  const list = state.comfyuiWorkflows.filter(w => (w.source || 'user') === source);
+  if (!list.length) return;
+  for (const w of list) w.approved = true;
+  await persistComfyuiWorkflows();
+  renderComfyUIView();
+  showToast('✓ Approved ' + list.length + ' ' + (source === 'builtin' ? 'built-in template' : 'workflow') + (list.length !== 1 ? 's' : '') + ' for autonomous execution — the Agent loop may run them without asking');
+}
+
 function selectComfyuiWorkflow(id) {
   state.comfyuiSelectedId = id;
   state.comfyuiGenInputs = {};
@@ -3515,8 +3529,8 @@ async function renderComfyUIView() {
   const builtinWfs = state.comfyuiWorkflows.filter(w => w.source === 'builtin');
   const libraryHtml = state.comfyuiWorkflows.length
     ? `<div style="max-height:340px;overflow:auto;padding-right:4px;">
-        ${userWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:4px 0 6px;">Your workflows (${userWfs.length})</div>` + userWfs.map(workflowRowHtml).join('') : ''}
-        ${builtinWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:10px 0 6px;">Built-in templates (${builtinWfs.length}) — from ComfyUI Desktop, read-only files (CodeFox never writes into them)</div>` + builtinWfs.map(workflowRowHtml).join('') : ''}
+        ${userWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:4px 0 6px;">Your workflows (${userWfs.length}) <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="approveAllComfyuiWorkflows('user')" title="Approve every workflow in this section for autonomous execution — the Agent loop may run them without asking. New workflows are still unapproved until you approve them.">Approve all</button></div>` + userWfs.map(workflowRowHtml).join('') : ''}
+        ${builtinWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:10px 0 6px;">Built-in templates (${builtinWfs.length}) — from ComfyUI Desktop, read-only files (CodeFox never writes into them) <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="approveAllComfyuiWorkflows('builtin')" title="Approve every built-in template in this section for autonomous execution — the Agent loop may run them without asking. New templates are still unapproved until you approve them.">Approve all</button></div>` + builtinWfs.map(workflowRowHtml).join('') : ''}
       </div>
       ${libraryErrorsHtml}`
     : emptyLibraryHtml + libraryErrorsHtml;
