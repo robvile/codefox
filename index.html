@@ -292,6 +292,33 @@
   #comfyui-mode input, #comfyui-mode select, #comfyui-mode textarea { background: var(--bg3); border: 1px solid var(--border2); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; font-family: var(--font); outline: none; }
   #comfyui-mode input:focus, #comfyui-mode select:focus, #comfyui-mode textarea:focus { border-color: var(--accent); }
 
+  /* ── ComfyUI view (v0.8.0) ──
+     Two-column Generate form, compact one-line library rows,
+     and the workflow picker dropdown. Reuses the app's own
+     variables — no new design system. */
+  .cf-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .cf-two-col { grid-template-columns: 1fr; } }
+  .cf-lib-row { display: flex; align-items: center; gap: 8px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; font-size: 12px; }
+  .cf-lib-row.selected { border-color: var(--accent); }
+  .cf-lib-row.hidden-row { opacity: 0.45; }
+  .cf-lib-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .cf-lib-name:hover { color: var(--accent); }
+  .cf-type-tag { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
+  .cf-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .cf-dot.ok { background: var(--teal); }
+  .cf-dot.bad { background: var(--amber); }
+  .cf-icon-btn { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 13px; padding: 2px 4px; font-family: var(--font); flex-shrink: 0; }
+  .cf-icon-btn:hover { color: var(--text); }
+  .cf-icon-btn.on { color: var(--amber); }
+  .cf-section-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); font-weight: 600; cursor: pointer; padding: 8px 0 6px; }
+  .cf-section-head:hover { color: var(--text); }
+  .cf-picker-wrap { position: relative; }
+  .cf-picker-results { position: absolute; left: 0; right: 0; top: 100%; z-index: 20; background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-height: 240px; overflow-y: auto; margin-top: 4px; }
+  .cf-picker-item { padding: 8px 12px; cursor: pointer; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  .cf-picker-item:hover { background: var(--bg3); }
+  .cf-chat-result { font-family: var(--font); font-size: 12px; }
+  .cf-chat-result img, .cf-chat-result video { max-width: 100%; border-radius: 8px; display: block; }
+
   /* ── Thinking indicator ── */
   .thinking { display: flex; gap: 4px; padding: 10px 14px; align-self: flex-start; }
   .thinking span { width: 6px; height: 6px; background: var(--text3); border-radius: 50%; animation: bounce 1.2s infinite; }
@@ -402,7 +429,7 @@
         <div class="nav-item" id="nav-comfyui" onclick="showComfyUI()"><span class="nav-ico">◈</span>ComfyUI</div>
       </div>
 
-      <div id="sidebar-footer">CodeFox 0.7.2 — Local · No account needed</div>
+      <div id="sidebar-footer">CodeFox 0.8.0 — Local · No account needed</div>
     </div>
 
     <!-- CENTER -->

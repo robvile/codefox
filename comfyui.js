@@ -1421,6 +1421,13 @@ function importWorkflowsFromFiles(files, objectInfo, stored, opts) {
       available: parsed.available,
       availableReason: parsed.availableReason,
       approved: !!(prev && prev.approved),
+      // v0.8.0: pin / hide / last-used survive a rescan exactly
+      // like purpose and approval — the library is the user's
+      // curated view, and a rescan must never un-pin, un-hide, or
+      // forget what was used recently.
+      pinned: !!(prev && prev.pinned),
+      hidden: !!(prev && prev.hidden),
+      lastUsedAt: (prev && typeof prev.lastUsedAt === 'number') ? prev.lastUsedAt : 0,
       // The simple generation form for this workflow (prompt /
       // sampler / size), computed once here so the renderer never
       // has to guess at it. See describeSimpleForm().

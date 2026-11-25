@@ -74,6 +74,24 @@ let state = {
   // failed to import".
   comfyuiDesktopExe: '',
   comfyuiWorkflowErrors: [],
+  // v0.8.0: the Workflow Library's own view state. The query,
+  // type/source filters, sort and the available/pinned toggles
+  // are session-only (they reset when the app restarts); hideApi
+  // and the collapsed sections are persisted (see
+  // persistComfyuiLib) because they are the user's durable
+  // choices about what the library shows.
+  comfyuiLib: {
+    query: '',
+    type: 'all',
+    source: 'all',
+    availableOnly: false,
+    pinnedOnly: false,
+    hideApi: false,
+    showHidden: false,
+    sort: 'name',
+    collapsedUser: false,
+    collapsedBuiltin: true,
+  },
 };
 
 // ── Agent loop state (v0.5.0) ──────────────────────────────────────
@@ -319,6 +337,17 @@ async function init() {
   try { state.comfyuiWorkflows = JSON.parse(await rb.db.getSetting('comfyui_workflows') || '[]'); }
   catch { state.comfyuiWorkflows = []; }
   if (!Array.isArray(state.comfyuiWorkflows)) state.comfyuiWorkflows = [];
+  // v0.8.0: the library's durable choices — hide the api_ cloud
+  // templates, and which sections start collapsed. First run:
+  // built-ins start collapsed (there can be hundreds of them).
+  state.comfyuiLib.hideApi = (await rb.db.getSetting('comfyui_lib_hide_api') || '0') === '1';
+  try {
+    const collapsed = JSON.parse(await rb.db.getSetting('comfyui_lib_collapsed') || 'null');
+    if (collapsed && typeof collapsed === 'object') {
+      if (typeof collapsed.user === 'boolean') state.comfyuiLib.collapsedUser = collapsed.user;
+      if (typeof collapsed.builtin === 'boolean') state.comfyuiLib.collapsedBuiltin = collapsed.builtin;
+    }
+  } catch {}
   try { state.mcpServers = JSON.parse(await rb.db.getSetting('mcp_servers') || '[]'); }
   catch { state.mcpServers = []; }
   if (!Array.isArray(state.mcpServers)) state.mcpServers = [];
@@ -633,12 +662,140 @@ async function loadThread(id) {
   await refreshSidebar();
 }
 
+// ComfyUI generation results shown in chat (v0.8.0) are stored
+// as ordinary assistant messages whose content is this marker
+// plus a JSON payload (workflow, prompt, outputs, import state).
+// The marker keeps them plain text in the database — they survive
+// a thread reload — while renderMessages turns them back into
+// thumbnails plus an Import / Discard action row.
+const COMFYUI_CHAT_MARKER = '__COMFYUI_RESULT__';
+
+function parseComfyuiChatResult(content) {
+  const raw = String(content || '');
+  if (raw.indexOf(COMFYUI_CHAT_MARKER) !== 0) return null;
+  try {
+    const p = JSON.parse(raw.slice(COMFYUI_CHAT_MARKER.length));
+    return (p && typeof p === 'object' && Array.isArray(p.outputs)) ? p : null;
+  } catch { return null; }
+}
+
 function renderMessages() {
   const el = document.getElementById('chat-messages');
-  el.innerHTML = state.messages.map(m => `
+  el.innerHTML = state.messages.map((m, i) => {
+    const rich = comfyuiChatResultHtml(m, i);
+    if (rich) return rich;
+    return `
     <div class="msg msg-${m.role}">${escHtml(m.content)}</div>
-  `).join('');
+  `;
+  }).join('');
   el.scrollTop = el.scrollHeight;
+}
+
+// Render one ComfyUI generation result as a rich chat message:
+// workflow name + prompt, the outputs as thumbnails (same
+// file:// local-path mechanism the Generate panel uses — no new
+// image pipeline), and an Import / Discard action row. Returns
+// null when the message is not a result envelope, so ordinary
+// messages render as before.
+function comfyuiChatResultHtml(m, index) {
+  const p = parseComfyuiChatResult(m.content);
+  if (!p) return null;
+  const promptLine = p.prompt ? ' — &ldquo;' + escHtml(String(p.prompt).slice(0, 200)) + '&rdquo;' : '';
+  const media = p.outputs.map(o => {
+    const name = escHtml(o.filename || 'output');
+    if (!o.localPath) return `<div style="color:var(--text3);font-size:11px;padding:8px 0;">Thumbnail unavailable — ${name} (import to download it again)</div>`;
+    const src = comfyuiFileUrl(o.localPath);
+    if (/\.(mp4|webm|mov)$/i.test(o.filename || '')) return `<video controls preload="metadata" src="${src}" style="max-width:100%;border-radius:8px;display:block;"></video>`;
+    if (/\.(mp3|wav|ogg|flac)$/i.test(o.filename || '')) return `<audio controls src="${src}" style="width:100%;"></audio>`;
+    return `<img src="${src}" alt="${name}" style="max-width:100%;border-radius:8px;display:block;" />`;
+  }).join('');
+  let actions = '';
+  if (p.discarded) {
+    actions = `<div style="font-size:12px;color:var(--text3);">Discarded — the outputs were not imported.</div>`;
+  } else if (p.imported) {
+    actions = `<div style="font-size:12px;color:var(--teal);">✓ Imported to ${escHtml(p.dir || '')}</div>`;
+  } else {
+    const dir = 'Assets/Generated/' + comfyuiSlug(p.workflowName) + '/';
+    actions = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-teal" onclick="importComfyuiChatResult(${index})">Import to ${escHtml(dir)}</button>
+      <button class="btn btn-secondary" onclick="discardComfyuiChatResult(${index})">Discard</button>
+      <span style="font-size:11px;color:var(--text3);">Snapshotted first, so revert can delete them.</span>
+    </div>`;
+  }
+  return `<div class="msg msg-assistant cf-chat-result">
+    <div style="font-size:12px;margin-bottom:8px;"><strong>Generated with ${escHtml(p.workflowName || 'ComfyUI')}</strong>${promptLine}</div>
+    <div style="display:flex;flex-direction:column;gap:8px;">${media}</div>
+    <div style="margin-top:10px;">${actions}</div>
+  </div>`;
+}
+
+// Append a generation result to the chat transcript as a result
+// envelope (see COMFYUI_CHAT_MARKER). `alreadyImported` is the
+// importComfyuiOutputs result when the Agent loop already
+// imported the outputs itself — then the row shows "Imported"
+// instead of offering the import again.
+async function appendComfyuiChatResult(wf, outputs, inputs, alreadyImported) {
+  if (!wf || !outputs || !outputs.length) return -1;
+  const promptText = (inputs && typeof inputs.positive === 'string' && inputs.positive) ? inputs.positive : '';
+  const p = {
+    v: 1,
+    workflowId: wf.id,
+    workflowName: wf.name,
+    prompt: promptText,
+    inputs: inputs || {},
+    outputs: outputs.map(o => ({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', localPath: o.localPath || null })),
+    imported: !!(alreadyImported && alreadyImported.imported && alreadyImported.imported.length),
+    dir: (alreadyImported && alreadyImported.dir) || '',
+    discarded: false,
+  };
+  const content = COMFYUI_CHAT_MARKER + JSON.stringify(p);
+  let id = null;
+  if (state.activeThreadId != null) {
+    try { id = await rb.db.insert('messages', { thread_id: state.activeThreadId, role: 'assistant', content }); } catch {}
+  }
+  const msg = { role: 'assistant', content: content };
+  if (id != null) msg.id = Number(id);
+  state.messages.push(msg);
+  renderMessages();
+  return state.messages.length - 1;
+}
+
+// Write a changed result payload back to the message, in memory
+// and in the database when the message has an id.
+async function saveComfyuiChatResult(index, p) {
+  const m = state.messages[index];
+  if (!m) return;
+  m.content = COMFYUI_CHAT_MARKER + JSON.stringify(p);
+  if (m.id != null) { try { await rb.db.update('messages', m.id, { content: m.content }); } catch {} }
+}
+
+async function importComfyuiChatResult(index) {
+  const m = state.messages[index];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p || p.imported || p.discarded) return;
+  const wf = findComfyuiWorkflow(p.workflowId) || findComfyuiWorkflow(p.workflowName);
+  if (!wf) { showToast('⚠ That workflow is no longer in the library — rescan to find it again'); return; }
+  const res = await importComfyuiOutputs(wf, p.outputs, p.inputs || {});
+  if (res.imported.length) {
+    p.imported = true;
+    p.dir = res.dir;
+    await saveComfyuiChatResult(index, p);
+    showToast('✓ Imported ' + res.imported.length + ' file(s) to ' + res.dir);
+  } else {
+    showToast('⚠ ' + (res.errors[0] || 'Import failed'));
+  }
+  renderMessages();
+}
+
+async function discardComfyuiChatResult(index) {
+  const m = state.messages[index];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p || p.discarded) return;
+  p.discarded = true;
+  await saveComfyuiChatResult(index, p);
+  renderMessages();
 }
 
 async function sendChat() {
@@ -1276,9 +1433,15 @@ async function processAgentActions(actions) {
       if (loopState) setLoopStatus(roundLabel() + 'generating with ComfyUI (' + wf.name + ')…');
       const res = await runComfyuiGeneration(wf, action.inputs);
       if (res.ok) {
-        const imported = await importComfyuiOutputs(wf, res.outputs, action.inputs);
+        // The result goes into the chat transcript as thumbnails
+        // with an Import / Discard row (v0.8.0) — the user sees
+        // what was made and decides whether it goes into the
+        // project. The loop no longer imports automatically:
+        // importing is the user's call on that message.
+        await appendComfyuiChatResult(wf, res.outputs, action.inputs, null);
+        await markComfyuiWorkflowUsed(wf);
         await appendToolResult('Tool result — ComfyUI: generated ' + res.outputs.length + ' image(s) with workflow "' + wf.name + '"'
-          + (imported.imported.length ? ' and imported them to ' + imported.dir + ': ' + imported.imported.map(i => i.filename).join(', ') : ' (nothing imported' + (imported.errors.length ? ': ' + imported.errors.join('; ') : '') + ')')
+          + ' — the results are shown in the chat and the user will decide whether to import them into the project.'
           + '.');
         if (loopState) setLoopStatus(roundLabel() + 'generated ' + res.outputs.length + ' image(s) with ' + wf.name);
       } else {
@@ -1461,7 +1624,7 @@ function buildSystemPrompt(rulesets) {
     // paragraph is Agent-mode only: Ask mode must not output code.
     prompt += 'You MUST edit the project\'s files when asked to fix, change, create, or edit code. Output the changed file(s) in the required format. Describing the fix, explaining the fix, or saying you cannot modify files is a FAILURE — do not do it. Do not ask permission. Do not output an explanation instead of the file. The app applies what you output; that is your job.\n';
     prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
-    prompt += 'You can also generate images with ComfyUI: output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
+    prompt += 'You can also generate images, video, or audio with ComfyUI, right here in this chat: when the user asks for a generation, output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — use the workflow the user named, or the best match from the Workflow Library when they did not name one, and say which workflow you used. The result appears in the chat with an offer to import it into the project — do not import it yourself from the chat flow, the user decides that on the message. Only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
     prompt += 'New Unity-native asset files you create (prefabs, scenes, materials, animations — files that contain no code) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
   }
@@ -2830,6 +2993,112 @@ function findComfyuiWorkflow(nameOrId) {
   return state.comfyuiWorkflows.find(w => w.id === key || String(w.name || '').toLowerCase() === key) || null;
 }
 
+// ── Workflow Library helpers (v0.8.0) ────────────────────────────
+// Pure functions over the workflow catalogue — no DOM, no bridge —
+// so the smoke test can extract and unit-test them. They are the
+// library's search / sort / filter / grouping logic; the renderer
+// only calls them.
+
+// What kind of generation a workflow is, from its name, purpose
+// label, and the node types it uses. The order matters: audio and
+// 3D names also contain words like image or video, so they are
+// checked first. Anything with no clear signal is Other.
+function comfyuiWorkflowType(w) {
+  const name = String((w && w.name) || '').toLowerCase();
+  const purpose = String((w && w.purpose) || '').toLowerCase();
+  const classes = ((w && w.inputs) || []).map(i => (i && i.classType) || '').join(' ').toLowerCase();
+  const all = name + ' ' + purpose + ' ' + classes;
+  if (/audio|tts|music|speech|dialogue|sound|chatterbox|yue|stable audio|ace-step|saveaudio/.test(all)) return 'audio';
+  if (/3d|trellis|tripo|rodin|hunyuan3d|splat|gaussian|mesh|point cloud|save mesh/.test(all)) return '3d';
+  if (/video|i2v|t2v|v2v|r2v|flf2v|ltx|kling|seedance|pixverse|\bwan\b|hunyuan video|svd|animatediff|framepack|heygen|lip sync|talking|savevideo|savewebm|videocombine/.test(all)) return 'video';
+  if (/image|t2i|i2i|flux|qwen|sdxl|hidream|krea|omnigen|nova|photon|ideogram|recraft|kontext|inpaint|upscale|controlnet|checkpoint|text to image|image to image|saveimage|previewimage/.test(all)) return 'image';
+  return 'other';
+}
+
+// Filter the catalogue by the library's current view state.
+// filters is query, type, source, availableOnly, pinnedOnly,
+// hideApi, showHidden. Hidden workflows are excluded unless
+// showHidden is on; api_ templates are excluded only when the
+// user asked to hide them. The query matches name and purpose.
+function filterComfyuiWorkflows(workflows, f) {
+  const list = Array.isArray(workflows) ? workflows : [];
+  const q = String((f && f.query) || '').trim().toLowerCase();
+  const type = (f && f.type) || 'all';
+  const source = (f && f.source) || 'all';
+  const out = [];
+  for (const w of list) {
+    if (!w) continue;
+    if (source !== 'all' && (w.source || 'user') !== source) continue;
+    if (f && f.availableOnly && !w.available) continue;
+    if (f && f.pinnedOnly && !w.pinned) continue;
+    if (w.hidden && !(f && f.showHidden)) continue;
+    if (f && f.hideApi && String(w.name || '').toLowerCase().indexOf('api_') === 0) continue;
+    if (type !== 'all' && comfyuiWorkflowType(w) !== type) continue;
+    if (q) {
+      const hay = (String(w.name || '') + ' ' + String(w.purpose || '')).toLowerCase();
+      if (hay.indexOf(q) === -1) continue;
+    }
+    out.push(w);
+  }
+  return out;
+}
+
+// Sort one library section. Pinned workflows always come first,
+// then the chosen key: name A to Z, recently used first (never
+// used last), or type in Image, Video, Audio, 3D, Other order.
+// Name breaks every tie, so the order is stable.
+function sortComfyuiWorkflows(workflows, sort) {
+  const list = (Array.isArray(workflows) ? workflows : []).slice();
+  const typeOrder = { image: 0, video: 1, audio: 2, '3d': 3, other: 4 };
+  const nameOf = (w) => String((w && w.name) || '').toLowerCase();
+  const typeOf = (w) => {
+    const t = typeOrder[comfyuiWorkflowType(w)];
+    return t == null ? 4 : t;
+  };
+  list.sort((a, b) => {
+    const pa = a && a.pinned ? 0 : 1;
+    const pb = b && b.pinned ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    if (sort === 'recent') {
+      const ra = (a && typeof a.lastUsedAt === 'number') ? a.lastUsedAt : 0;
+      const rb = (b && typeof b.lastUsedAt === 'number') ? b.lastUsedAt : 0;
+      if (rb !== ra) return rb - ra;
+    } else if (sort === 'type') {
+      const ta = typeOf(a);
+      const tb = typeOf(b);
+      if (ta !== tb) return ta - tb;
+    }
+    if (nameOf(a) < nameOf(b)) return -1;
+    if (nameOf(a) > nameOf(b)) return 1;
+    return 0;
+  });
+  return list;
+}
+
+// Group import-problem lines by their reason, so a hundred
+// failures collapse into a handful of groups with counts.
+// Each line is "file.json: reason"; the group key is the reason
+// with the per-file node id normalised out, because the same
+// missing node reported at different node numbers is the same
+// problem. Lines with no ".json:" prefix are grouped by their
+// whole text. Groups come back most-common first.
+function groupComfyuiErrors(errors) {
+  const groups = [];
+  const byKey = {};
+  for (const raw of (Array.isArray(errors) ? errors : [])) {
+    const line = String(raw || '');
+    const m = line.match(/^(.+\.json): (.*)$/);
+    let reason = m ? m[2] : line;
+    reason = reason.replace(/\(node \d+\)/g, '(node N)').replace(/\(id \d+\)/g, '(id N)');
+    let g = byKey[reason];
+    if (!g) { g = { reason: reason, count: 0, files: [] }; byKey[reason] = g; groups.push(g); }
+    g.count++;
+    g.files.push(line);
+  }
+  groups.sort((a, b) => b.count - a.count);
+  return groups;
+}
+
 async function persistComfyuiWorkflows() {
   await rb.db.setSetting('comfyui_workflows', JSON.stringify(state.comfyuiWorkflows));
   await rb.db.setSetting('comfyui_workflows_dir', state.comfyuiWorkflowsDir || '');
@@ -3052,58 +3321,63 @@ function simpleFormFromInputs(inputs) {
 function simpleComfyuiFormHtml(wf) {
   const form = (wf.simpleForm && Array.isArray(wf.simpleForm.prompts)) ? wf.simpleForm : simpleFormFromInputs(wf.inputs);
   const val = (key, fallback) => state.comfyuiGenInputs[key] !== undefined ? state.comfyuiGenInputs[key] : fallback;
-  let html = '';
+  // Two columns (v0.8.0): prompts on the left, sampler and size
+  // settings on the right — the old single column buried the
+  // settings under the prompt boxes. The CSS stacks them on
+  // narrow windows.
+  let promptHtml = '';
+  let settingsHtml = '';
   const pos = form.prompts.find(p => p.role === 'positive');
   const neg = form.prompts.find(p => p.role === 'negative');
   const unroled = form.prompts.filter(p => !p.role);
   if (pos) {
-    html += `<label class="field-label">Prompt
+    promptHtml += `<label class="field-label">Prompt
       <textarea id="comfyui-simple-positive" oninput="onComfyuiInputChange('positive', this)" style="min-height:72px;">${escHtml(String(val('positive', pos.value == null ? '' : pos.value)))}</textarea>
     </label>`;
   }
   if (neg) {
-    html += `<label class="field-label">Negative prompt
+    promptHtml += `<label class="field-label">Negative prompt
       <textarea id="comfyui-simple-negative" oninput="onComfyuiInputChange('negative', this)" style="min-height:56px;">${escHtml(String(val('negative', neg.value == null ? '' : neg.value)))}</textarea>
     </label>`;
   }
   if (!pos && !neg && unroled.length === 1) {
     const u = unroled[0];
-    html += `<label class="field-label">Prompt
+    promptHtml += `<label class="field-label">Prompt
       <textarea id="comfyui-simple-${escHtml(u.key)}" oninput="onComfyuiInputChange('${escHtml(u.key)}', this)" style="min-height:72px;">${escHtml(String(val(u.key, u.value == null ? '' : u.value)))}</textarea>
     </label>`;
   }
   if (!pos && !neg && unroled.length >= 2) {
-    html += `<p style="color:var(--amber);font-size:12px;">This workflow has two text inputs, but its wiring does not say which is the positive prompt and which is the negative — labelled Prompt 1 and Prompt 2. If the first generation comes out wrong, swap them.</p>`;
+    promptHtml += `<p style="color:var(--amber);font-size:12px;">This workflow has two text inputs, but its wiring does not say which is the positive prompt and which is the negative — labelled Prompt 1 and Prompt 2. If the first generation comes out wrong, swap them.</p>`;
     unroled.slice(0, 2).forEach((u, i) => {
-      html += `<label class="field-label">Prompt ${i + 1}
+      promptHtml += `<label class="field-label">Prompt ${i + 1}
         <textarea id="comfyui-simple-${escHtml(u.key)}" oninput="onComfyuiInputChange('${escHtml(u.key)}', this)" style="min-height:56px;">${escHtml(String(val(u.key, u.value == null ? '' : u.value)))}</textarea>
       </label>`;
     });
   }
   if (!form.hasPrompt) {
-    html += `<p style="color:var(--text2);font-size:12px;">This workflow has no text-prompt input CodeFox can fill in — use the advanced inputs below, or pick a workflow with a prompt.</p>`;
+    promptHtml += `<p style="color:var(--text2);font-size:12px;">This workflow has no text-prompt input CodeFox can fill in — use the advanced inputs below, or pick a workflow with a prompt.</p>`;
   }
   // Sampler settings — only KSampler nodes, only the inputs that
   // node actually exposes.
   for (const s of (form.samplers || [])) {
-    html += `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">`;
+    settingsHtml += `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">`;
     for (const f of s.fields) {
       const cur = val(f.key, f.value);
       if (f.inputName === 'seed') {
-        html += `<label class="field-label" style="flex:1;min-width:180px;">Seed
+        settingsHtml += `<label class="field-label" style="flex:1;min-width:180px;">Seed
           <span style="display:flex;gap:8px;"><input id="comfyui-simple-${escHtml(f.key)}" type="number" value="${escHtml(String(cur == null ? '' : cur))}" oninput="onComfyuiInputChange('${escHtml(f.key)}', this)" style="flex:1;" /><button class="btn btn-secondary" onclick="randomiseComfyuiSeedFor('${escHtml(f.key)}', 'comfyui-simple-${escHtml(f.key)}')">Random</button></span>
         </label>`;
       } else {
-        html += `<label class="field-label" style="flex:0 0 110px;">${escHtml(f.inputName === 'cfg' ? 'CFG' : f.inputName[0].toUpperCase() + f.inputName.slice(1))}
+        settingsHtml += `<label class="field-label" style="flex:0 0 110px;">${escHtml(f.inputName === 'cfg' ? 'CFG' : f.inputName[0].toUpperCase() + f.inputName.slice(1))}
           <input id="comfyui-simple-${escHtml(f.key)}" type="number" value="${escHtml(String(cur == null ? '' : cur))}" oninput="onComfyuiInputChange('${escHtml(f.key)}', this)" />
         </label>`;
       }
     }
-    html += `</div>`;
+    settingsHtml += `</div>`;
   }
   // Size presets — only when the workflow has a latent-size node.
   for (const s of (form.sizes || [])) {
-    html += `<div><span style="font-size:12px;color:var(--text2);">Size</span>
+    settingsHtml += `<div><span style="font-size:12px;color:var(--text2);">Size</span>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
         <button class="btn btn-secondary" onclick="setComfyuiSize('${escHtml(s.nodeId)}', 1024, 1024)">Square 1024×1024</button>
         <button class="btn btn-secondary" onclick="setComfyuiSize('${escHtml(s.nodeId)}', 832, 1216)">Portrait 832×1216</button>
@@ -3112,7 +3386,7 @@ function simpleComfyuiFormHtml(wf) {
         <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2);">H <input id="comfyui-simple-${escHtml(s.nodeId)}.height" type="number" value="${escHtml(String(val(s.nodeId + '.height', s.height == null ? '' : s.height)))}" oninput="onComfyuiInputChange('${escHtml(s.nodeId)}.height', this)" style="width:84px;" /></label>
       </div></div>`;
   }
-  return html;
+  return `<div class="cf-two-col"><div style="display:flex;flex-direction:column;gap:10px;">${promptHtml}</div><div style="display:flex;flex-direction:column;gap:10px;">${settingsHtml}</div></div>`;
 }
 
 async function onComfyuiUrlSave() {
@@ -3150,7 +3424,7 @@ async function toggleComfyuiApproved(id, checked) {
   if (!wf) return;
   wf.approved = !!checked;
   await persistComfyuiWorkflows();
-  renderComfyUIView();
+  renderComfyuiLibrary();
   showToast(wf.approved
     ? '✓ "' + wf.name + '" approved for autonomous execution — the Agent loop may run it without asking'
     : '"' + wf.name + '" is no longer approved — the Agent loop will ask before running it');
@@ -3166,8 +3440,84 @@ async function approveAllComfyuiWorkflows(source) {
   if (!list.length) return;
   for (const w of list) w.approved = true;
   await persistComfyuiWorkflows();
-  renderComfyUIView();
+  renderComfyuiLibrary();
   showToast('✓ Approved ' + list.length + ' ' + (source === 'builtin' ? 'built-in template' : 'workflow') + (list.length !== 1 ? 's' : '') + ' for autonomous execution — the Agent loop may run them without asking');
+}
+
+// ── Workflow Library view state (v0.8.0) ─────────────────────────
+// The library re-renders only its own list container, never the
+// whole ComfyUI view — otherwise typing in the search box would
+// lose focus on every keystroke. The search input, sort select
+// and filter chips live outside that container; renderComfyUI-
+// Library rebuilds the rows and the counts inside it.
+async function persistComfyuiLib() {
+  await rb.db.setSetting('comfyui_lib_hide_api', state.comfyuiLib.hideApi ? '1' : '0');
+  await rb.db.setSetting('comfyui_lib_collapsed', JSON.stringify({ user: state.comfyuiLib.collapsedUser, builtin: state.comfyuiLib.collapsedBuiltin }));
+}
+
+function setComfyuiLibFilter(patch) {
+  Object.assign(state.comfyuiLib, patch || {});
+  renderComfyuiLibrary();
+}
+
+function onComfyuiSearchInput(el) {
+  state.comfyuiLib.query = el.value;
+  renderComfyuiLibrary();
+}
+
+function onComfyuiSortChange(el) {
+  state.comfyuiLib.sort = el.value;
+  renderComfyuiLibrary();
+}
+
+async function toggleComfyuiSection(source) {
+  if (source === 'builtin') state.comfyuiLib.collapsedBuiltin = !state.comfyuiLib.collapsedBuiltin;
+  else state.comfyuiLib.collapsedUser = !state.comfyuiLib.collapsedUser;
+  await persistComfyuiLib();
+  renderComfyuiLibrary();
+}
+
+async function toggleComfyuiHideApi(checked) {
+  state.comfyuiLib.hideApi = !!checked;
+  await persistComfyuiLib();
+  renderComfyuiLibrary();
+}
+
+async function toggleComfyuiPinned(id) {
+  const wf = state.comfyuiWorkflows.find(w => w.id === id);
+  if (!wf) return;
+  wf.pinned = !wf.pinned;
+  await persistComfyuiWorkflows();
+  renderComfyuiLibrary();
+}
+
+async function toggleComfyuiHidden(id) {
+  const wf = state.comfyuiWorkflows.find(w => w.id === id);
+  if (!wf) return;
+  wf.hidden = !wf.hidden;
+  await persistComfyuiWorkflows();
+  renderComfyuiLibrary();
+}
+
+function clearComfyuiLibFilters() {
+  state.comfyuiLib.query = '';
+  state.comfyuiLib.type = 'all';
+  state.comfyuiLib.source = 'all';
+  state.comfyuiLib.availableOnly = false;
+  state.comfyuiLib.pinnedOnly = false;
+  state.comfyuiLib.showHidden = false;
+  const q = document.getElementById('comfyui-lib-search');
+  if (q) q.value = '';
+  renderComfyuiLibrary();
+}
+
+// Record that a workflow actually generated something, for the
+// "Recently used" sort. Called after a successful generation
+// from the panel and from the Agent loop alike.
+async function markComfyuiWorkflowUsed(wf) {
+  if (!wf) return;
+  wf.lastUsedAt = Date.now();
+  await persistComfyuiWorkflows();
 }
 
 function selectComfyuiWorkflow(id) {
@@ -3181,8 +3531,9 @@ function selectComfyuiWorkflow(id) {
 // the caller's inputs, poll /queue + /history every 2 seconds until
 // it completes (10-minute cap), then download each output to the
 // local temp cache for thumbnails. Importing into the project is a
-// separate step (importComfyuiOutputs) — the Agent loop does it
-// automatically, the panel asks with Import buttons.
+// separate step (importComfyuiOutputs) — the panel asks with Import
+// buttons, and the Agent loop shows the results in chat with an
+// Import / Discard row instead of importing on its own.
 async function runComfyuiGeneration(wf, inputs, onProgress) {
   const sub = await rb.comfyui.submit({ file: wf.file, inputs: inputs || {}, url: state.comfyuiUrl });
   if (!sub.ok) return { ok: false, error: sub.error || 'Submit failed' };
@@ -3263,8 +3614,38 @@ async function runComfyuiFromPanel() {
     return;
   }
   state.comfyuiOutputs = res.outputs;
+  await markComfyuiWorkflowUsed(wf);
   renderComfyUIView();
   showToast('✓ Generated ' + res.outputs.length + ' image(s) — use Import to copy them into the project');
+}
+
+// "Generate in chat" (v0.8.0): leave the panel for the chat
+// window with a drafted message naming the selected workflow,
+// so the user just types the prompt and sends. Agent mode then
+// runs the generation and shows the result in chat with an
+// Import / Discard row. No new command syntax — the draft plus
+// the Agent loop's ```comfyui block is the mechanism.
+async function generateComfyuiInChat() {
+  const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
+  if (!wf) { showToast('Pick a workflow first'); return; }
+  if (state.activeThreadId == null) {
+    try {
+      const id = parseInt(await rb.db.insert('threads', { name: 'ComfyUI — ' + wf.name, project_id: state.activeProjectId }), 10);
+      await loadThread(id);
+      await refreshSidebar();
+    } catch (e) {
+      showToast('⚠ Could not start a conversation: ' + String((e && e.message) || e));
+      return;
+    }
+  } else {
+    let title = 'Conversation';
+    try { const t = await rb.db.get('threads', state.activeThreadId); if (t && t.name) title = t.name; } catch {}
+    setMode('chat', title);
+  }
+  const typed = state.comfyuiGenInputs.positive;
+  const prompt = (typed != null && String(typed).trim()) ? String(typed).trim() : '';
+  insertPrompt('Generate with ComfyUI workflow "' + wf.name + '"' + (prompt ? ': ' + prompt : ': '));
+  showToast('Drafted in chat — describe what you want, send it in Agent mode, and the result appears here with an Import offer');
 }
 
 // Copy generated outputs into the active project under
@@ -3379,6 +3760,162 @@ function showComfyuiBar(wf, inputs, settle) {
 }
 
 // ── ComfyUI centre view ───────────────────────────────────────────
+// The workflow picker in the Generate panel (v0.8.0): a text
+// input over the library, not a scroll through hundreds of rows.
+// Typing filters the library by name; the first eight matches
+// appear below, and a click (mousedown, so it lands before the
+// input's blur hides the list) selects one. Enter picks the
+// exact name, or the first match.
+function onComfyuiPickerInput(el) {
+  const box = document.getElementById('comfyui-picker-results');
+  if (!box) return;
+  const q = el.value;
+  const matches = sortComfyuiWorkflows(filterComfyuiWorkflows(state.comfyuiWorkflows, { query: q, type: 'all', source: 'all' }), 'name').slice(0, 8);
+  if (!matches.length) {
+    box.innerHTML = '<div class="cf-picker-item" style="cursor:default;color:var(--text3);">No workflow matches &ldquo;' + escHtml(q) + '&rdquo;</div>';
+    box.classList.remove('hidden');
+    return;
+  }
+  box.innerHTML = matches.map(w => `<div class="cf-picker-item" onmousedown="selectComfyuiWorkflow('${w.id}')">
+    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(w.name)}</span>
+    <span class="cf-type-tag">${escHtml(comfyuiWorkflowType(w))}</span>
+    <span style="font-size:11px;color:var(--text3);flex-shrink:0;">${w.source === 'builtin' ? 'Built-in' : 'Yours'}</span>
+    ${w.available ? '' : '<span style="font-size:11px;color:var(--amber);flex-shrink:0;">Unavailable</span>'}
+  </div>`).join('');
+  box.classList.remove('hidden');
+}
+
+function hideComfyuiPickerResults() {
+  const box = document.getElementById('comfyui-picker-results');
+  if (box) box.classList.add('hidden');
+}
+
+function onComfyuiPickerKey(el, ev) {
+  if (ev.key === 'Escape') { hideComfyuiPickerResults(); return; }
+  if (ev.key !== 'Enter') return;
+  const exact = findComfyuiWorkflow(el.value);
+  if (exact) { selectComfyuiWorkflow(exact.id); return; }
+  const matches = sortComfyuiWorkflows(filterComfyuiWorkflows(state.comfyuiWorkflows, { query: el.value, type: 'all', source: 'all' }), 'name');
+  if (matches.length) selectComfyuiWorkflow(matches[0].id);
+}
+
+// Import problems, grouped by reason with counts (v0.8.0).
+// One collapsed summary line — "N import problems in M groups" —
+// with each group expandable to its per-file lines, so a hundred
+// failures stop being a wall of text. The grouping comes from
+// groupComfyuiErrors, computed from the actual error strings.
+function comfyuiErrorGroupsHtml(errors) {
+  const list = Array.isArray(errors) ? errors : [];
+  if (!list.length) return '';
+  const groups = groupComfyuiErrors(list);
+  const groupsHtml = groups.map(g => `<details style="margin-top:4px;">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text2);">${escHtml(g.reason)} — ${g.count} workflow${g.count !== 1 ? 's' : ''}</summary>
+      <div style="font-size:11px;color:var(--text3);font-family:var(--mono);line-height:1.7;margin-top:4px;word-break:break-all;">${g.files.map(f => escHtml(f)).join('<br>')}</div>
+    </details>`).join('');
+  return `<details style="margin-top:8px;">
+    <summary style="cursor:pointer;font-size:12px;color:var(--amber);">${list.length} import problem${list.length !== 1 ? 's' : ''} in ${groups.length} group${groups.length !== 1 ? 's' : ''} — show</summary>
+    <div style="margin-top:6px;">${groupsHtml}</div>
+  </details>`;
+}
+
+// One workflow, one line (v0.8.0): pin, name, type tag,
+// availability dot, input count, Approved, Hide, Generate.
+// The old row was a tall card with a purpose input and a file
+// path on every workflow — multiplied by hundreds of templates
+// it was the wall of text Rob's head hurt looking at. The
+// purpose label now lives on the Generate panel, for the
+// selected workflow only.
+function workflowRowHtml(w) {
+  const isSel = state.comfyuiSelectedId === w.id;
+  const type = comfyuiWorkflowType(w);
+  const availTitle = w.available ? 'Available' : 'Unavailable — ' + (w.availableReason || (w.missing || []).join('; ') || 'missing dependencies');
+  return `<div class="cf-lib-row${isSel ? ' selected' : ''}${w.hidden ? ' hidden-row' : ''}" title="${escHtml(w.file || '')}">
+    <button class="cf-icon-btn${w.pinned ? ' on' : ''}" onclick="toggleComfyuiPinned('${w.id}')" title="${w.pinned ? 'Pinned — click to unpin' : 'Pin this workflow so it sorts first'}">${w.pinned ? '★' : '☆'}</button>
+    <span class="cf-lib-name" onclick="selectComfyuiWorkflow('${w.id}')">${escHtml(w.name)}</span>
+    <span class="cf-type-tag">${escHtml(type)}</span>
+    <span class="cf-dot ${w.available ? 'ok' : 'bad'}" title="${escHtml(availTitle)}"></span>
+    <span style="font-size:11px;color:var(--text3);flex-shrink:0;">${(w.inputs || []).length} inputs</span>
+    <label style="display:flex;align-items:center;gap:4px;color:var(--text2);font-size:11px;cursor:pointer;flex-shrink:0;" title="Only approved workflows run from the Agent loop without asking">
+      <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
+    </label>
+    <button class="cf-icon-btn" onclick="toggleComfyuiHidden('${w.id}')" title="${w.hidden ? 'Hidden — click to unhide' : 'Hide this workflow from the library'}">${w.hidden ? '↩ Unhide' : '✕'}</button>
+    <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
+  </div>`;
+}
+
+// Rebuild only the Workflow Library list (chips, sections, rows).
+// Called on every filter keystroke and every pin/hide/approve
+// toggle — the search input and sort select live outside this
+// container, so re-rendering it never steals focus. Counts on
+// the chips are computed from the whole loaded library, never
+// from the filtered view, so they never lie.
+function renderComfyuiLibrary() {
+  const host = document.getElementById('comfyui-library-list');
+  if (!host) return;
+  const lib = state.comfyuiLib;
+  const all = state.comfyuiWorkflows || [];
+  if (!all.length) {
+    const scan = state.comfyuiScan;
+    const tplDirs = (scan && (scan.templateDirs || (scan.scan && scan.scan.templateDirs))) || [];
+    const tplCount = tplDirs.reduce((a, t) => a + (t.count || 0), 0);
+    const builtinLine = tplCount > 0
+      ? 'The scan found ' + tplCount + ' built-in template file(s), but none imported — see the import problems at the bottom of this view.'
+      : (scan && scan.ok
+        ? 'The scan looked for them in the Desktop program folder, the uv cache, and custom-node example folders and found none on disk — they are bundled inside the Desktop app, so save one from inside Desktop (below) and it appears here.'
+        : 'Press Rescan below and CodeFox looks for them in the Desktop program folder, the uv cache, and custom-node example folders.');
+    host.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;line-height:1.7;">
+      <strong style="color:var(--text2);">No workflows yet — here's how they get in:</strong><br>
+      1. <strong style="color:var(--text2);">Built-in templates</strong> — ComfyUI Desktop ships templates (text-to-image, video, audio…). ${builtinLine}<br>
+      2. <strong style="color:var(--text2);">Your own workflows</strong> — in ComfyUI Desktop, open a workflow and save it (Ctrl+S) or export it as JSON — it lands in your workflows folder${state.comfyuiWorkflowsDir ? ` (<span style="font-family:var(--mono);font-size:11px;">${escHtml(state.comfyuiWorkflowsDir)}</span>)` : ''} and appears here after Rescan.<br>
+      <button class="btn btn-teal" onclick="scanComfyui()" style="margin-top:8px;">Rescan for workflows</button>
+    </div>`;
+    return;
+  }
+  const typeCounts = { all: all.length, image: 0, video: 0, audio: 0, '3d': 0, other: 0 };
+  for (const w of all) { const t = comfyuiWorkflowType(w); if (typeCounts[t] != null) typeCounts[t]++; }
+  const sourceCounts = { all: all.length, user: 0, builtin: 0 };
+  for (const w of all) { if ((w.source || 'user') === 'builtin') sourceCounts.builtin++; else sourceCounts.user++; }
+  const hiddenCount = all.filter(w => w.hidden).length;
+  const typeChip = (type, label) => `<button class="chip-tab${lib.type === type ? ' active' : ''}" onclick="setComfyuiLibFilter({type:'${type}'})">${label} (${typeCounts[type]})</button>`;
+  const sourceChip = (source, label) => `<button class="chip-tab${lib.source === source ? ' active' : ''}" onclick="setComfyuiLibFilter({source:'${source}'})">${label} (${sourceCounts[source]})</button>`;
+  const toggleChip = (active, label, onclick) => `<button class="chip-tab${active ? ' active' : ''}" onclick="${onclick}">${label}</button>`;
+  const chipsHtml = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+    ${typeChip('all', 'All')}${typeChip('image', 'Image')}${typeChip('video', 'Video')}${typeChip('audio', 'Audio')}${typeChip('3d', '3D')}${typeChip('other', 'Other')}
+    <span style="width:10px;"></span>
+    ${sourceChip('all', 'All sources')}${sourceChip('user', 'Yours')}${sourceChip('builtin', 'Built-in')}
+    <span style="width:10px;"></span>
+    ${toggleChip(lib.availableOnly, 'Available only', "setComfyuiLibFilter({availableOnly:!state.comfyuiLib.availableOnly})")}
+    ${toggleChip(lib.pinnedOnly, 'Pinned only', "setComfyuiLibFilter({pinnedOnly:!state.comfyuiLib.pinnedOnly})")}
+    ${toggleChip(lib.hideApi, 'Hide API templates', "toggleComfyuiHideApi(!state.comfyuiLib.hideApi)")}
+    ${hiddenCount ? toggleChip(lib.showHidden, 'Show hidden (' + hiddenCount + ')', "setComfyuiLibFilter({showHidden:!state.comfyuiLib.showHidden})") : ''}
+  </div>`;
+  const filtered = filterComfyuiWorkflows(all, lib);
+  const userTotal = all.filter(w => (w.source || 'user') === 'user').length;
+  const builtinTotal = all.filter(w => w.source === 'builtin').length;
+  const userList = sortComfyuiWorkflows(filtered.filter(w => (w.source || 'user') === 'user'), lib.sort);
+  const builtinList = sortComfyuiWorkflows(filtered.filter(w => w.source === 'builtin'), lib.sort);
+  const sectionHtml = (source, list, total, collapsed, label, note) => {
+    const searching = !!lib.query.trim();
+    const open = searching ? list.length > 0 : !collapsed;
+    const head = `<div class="cf-section-head" onclick="toggleComfyuiSection('${source}')">
+      <span>${open ? '▾' : '▸'}</span><span>${label} (${list.length}${list.length !== total ? ' of ' + total : ''})</span>
+      ${note ? `<span style="font-weight:400;color:var(--text3);">${note}</span>` : ''}
+      <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:auto;" onclick="event.stopPropagation();approveAllComfyuiWorkflows('${source}')" title="Approve every workflow in this section for autonomous execution — the Agent loop may run them without asking. New workflows are still unapproved until you approve them.">Approve all</button>
+    </div>`;
+    if (!open) return head;
+    if (!list.length) return head + '<div style="font-size:12px;color:var(--text3);padding:2px 0 8px;">' + (total === 0 ? 'No workflows in this section yet.' : 'Nothing in this section matches the current filters.') + '</div>';
+    return head + list.map(workflowRowHtml).join('');
+  };
+  if (!filtered.length) {
+    host.innerHTML = chipsHtml + `<div style="font-size:12px;color:var(--text3);padding:8px 0;">No workflows match these filters.</div>
+      <button class="btn btn-secondary" onclick="clearComfyuiLibFilters()">Clear search and filters</button>`;
+    return;
+  }
+  host.innerHTML = chipsHtml
+    + sectionHtml('user', userList, userTotal, lib.collapsedUser, 'Your workflows', '')
+    + sectionHtml('builtin', builtinList, builtinTotal, lib.collapsedBuiltin, 'Built-in templates', 'from ComfyUI Desktop — read-only files, CodeFox never writes into them');
+}
+
 async function renderComfyUIView() {
   const el = document.getElementById('comfyui-mode');
   if (!el) return;
@@ -3453,8 +3990,7 @@ async function renderComfyUIView() {
       ${s.dir ? `<p style="font-size:12px;color:var(--teal);">Workflows folder found: <span style="font-family:var(--mono);font-size:11px;">${escHtml(s.dir)}</span> — ${filesFound == null ? '' : filesFound + ' .json file(s) found, '}${userCount} workflow(s) imported.</p>` : '<p style="font-size:12px;color:var(--amber);">No workflows folder found in the usual locations — pick one with Browse below.</p>'}
       ${exeLine}
       ${tplLine}
-      <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rootRows}</div>
-      ${(s.errors || []).length ? `<p style="font-size:11px;color:var(--amber);">Import problems:<br>${s.errors.map(e => '• ' + escHtml(e)).join('<br>')}</p>` : ''}`;
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rootRows}</div>`;
   })();
 
   const inputFieldHtml = (inp) => {
@@ -3481,73 +4017,33 @@ async function renderComfyUIView() {
     </label>`;
   };
 
-  const workflowRowHtml = (w) => {
-    const isSel = selected && selected.id === w.id;
-    const isBuiltin = w.source === 'builtin';
-    return `<div class="conn-row" style="align-items:flex-start;${isSel ? 'border-color:var(--accent);' : ''}">
-      <span class="conn-ico">◈</span>
-      <span class="conn-row-info" style="flex:1;">
-        <span class="conn-name">${escHtml(w.name)}</span>
-        ${isBuiltin ? ' <span style="font-size:10px;color:var(--teal);border:1px solid var(--teal);border-radius:4px;padding:1px 5px;vertical-align:middle;">Built-in template</span>' : ''}
-        <span style="font-size:11px;color:${w.available ? 'var(--teal)' : 'var(--amber)'};"> ${w.available ? 'Available' : 'Unavailable — ' + escHtml(w.availableReason || (w.missing || []).join('; '))}</span><br>
-        ${isBuiltin && w.description ? `<span style="font-size:12px;color:var(--text2);">${escHtml(w.description)}</span><br>` : ''}
-        <span style="font-size:12px;color:var(--text2);">Purpose: </span>
-        <input value="${escHtml(w.purpose || '')}" onchange="setComfyuiPurpose('${w.id}', this)" style="width:260px;padding:3px 8px;font-size:12px;" />
-        <br><span style="font-size:11px;color:var(--text3);">${escHtml((w.inputs || []).length)} configurable input(s) · ${escHtml((w.outputs || []).length)} output node(s)${(w.missing || []).length ? ' · Missing: ' + escHtml(w.missing.join('; ')) : ''}</span>
-        <br><span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(w.file)}</span>
-      </span>
-      <span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
-        <label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:12px;cursor:pointer;" title="Only approved workflows run from the Agent loop without asking">
-          <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
-        </label>
-        <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
-      </span>
-    </div>`;
-  };
-  // The library is capped in height and scrolls, so the Generate
-  // form for the selected workflow stays just below it instead of
-  // buried under a long list.
-  const libraryErrorsHtml = (state.comfyuiWorkflowErrors || []).length
-    ? `<p style="font-size:11px;color:var(--amber);margin-top:8px;">Import problems:<br>${state.comfyuiWorkflowErrors.map(e => '• ' + escHtml(e)).join('<br>')}</p>` : '';
-  const emptyLibraryHtml = (() => {
-    const scan = state.comfyuiScan;
-    const tplDirs = (scan && (scan.templateDirs || (scan.scan && scan.scan.templateDirs))) || [];
-    const tplCount = tplDirs.reduce((a, t) => a + (t.count || 0), 0);
-    const builtinLine = tplCount > 0
-      ? 'The scan found ' + tplCount + ' built-in template file(s), but none imported — see the import problems below.'
-      : (scan && scan.ok
-        ? 'The scan looked for them in the Desktop program folder, the uv cache, and custom-node example folders and found none on disk — they are bundled inside the Desktop app, so save one from inside Desktop (below) and it appears here.'
-        : 'Press Rescan below and CodeFox looks for them in the Desktop program folder, the uv cache, and custom-node example folders.');
-    return `<div style="color:var(--text3);font-size:12px;padding:6px 0 12px;line-height:1.7;">
-      <strong style="color:var(--text2);">No workflows yet — here's how they get in:</strong><br>
-      1. <strong style="color:var(--text2);">Built-in templates</strong> — ComfyUI Desktop ships templates (text-to-image, video, audio…). ${builtinLine}<br>
-      2. <strong style="color:var(--text2);">Your own workflows</strong> — in ComfyUI Desktop, open a workflow and save it (Ctrl+S) or export it as JSON — it lands in your workflows folder${state.comfyuiWorkflowsDir ? ` (<span style="font-family:var(--mono);font-size:11px;">${escHtml(state.comfyuiWorkflowsDir)}</span>)` : ''} and appears here after Rescan.<br>
-      <button class="btn btn-teal" onclick="scanComfyui()" style="margin-top:8px;">Rescan for workflows</button>
-    </div>`;
-  })();
-  const userWfs = state.comfyuiWorkflows.filter(w => (w.source || 'user') === 'user');
-  const builtinWfs = state.comfyuiWorkflows.filter(w => w.source === 'builtin');
-  const libraryHtml = state.comfyuiWorkflows.length
-    ? `<div style="max-height:340px;overflow:auto;padding-right:4px;">
-        ${userWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:4px 0 6px;">Your workflows (${userWfs.length}) <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="approveAllComfyuiWorkflows('user')" title="Approve every workflow in this section for autonomous execution — the Agent loop may run them without asking. New workflows are still unapproved until you approve them.">Approve all</button></div>` + userWfs.map(workflowRowHtml).join('') : ''}
-        ${builtinWfs.length ? `<div style="font-size:11px;color:var(--text3);margin:10px 0 6px;">Built-in templates (${builtinWfs.length}) — from ComfyUI Desktop, read-only files (CodeFox never writes into them) <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:8px;" onclick="approveAllComfyuiWorkflows('builtin')" title="Approve every built-in template in this section for autonomous execution — the Agent loop may run them without asking. New templates are still unapproved until you approve them.">Approve all</button></div>` + builtinWfs.map(workflowRowHtml).join('') : ''}
-      </div>
-      ${libraryErrorsHtml}`
-    : emptyLibraryHtml + libraryErrorsHtml;
-
+  // (The library list itself is built by renderComfyuiLibrary,
+  // into #comfyui-library-list below — the search box must not
+  // lose focus when the list re-renders.)
   const generateHtml = selected
     ? `<h3 class="settings-subhead">Generate — ${escHtml(selected.name)}</h3>
       ${selected.available ? '' : `<p style="color:var(--amber);font-size:12px;">Unavailable: ${escHtml(selected.availableReason || (selected.missing || []).join('; '))}</p>`}
-      <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
-        ${simpleComfyuiFormHtml(selected)}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+        <div class="cf-picker-wrap" style="flex:1;min-width:220px;">
+          <input id="comfyui-picker" value="${escHtml(selected.name)}" placeholder="Type to search workflows…" oninput="onComfyuiPickerInput(this)" onfocus="onComfyuiPickerInput(this)" onblur="setTimeout(hideComfyuiPickerResults, 150)" onkeydown="onComfyuiPickerKey(this, event)" style="width:100%;" autocomplete="off" />
+          <div id="comfyui-picker-results" class="cf-picker-results hidden"></div>
+        </div>
+        <span style="font-size:11px;color:var(--text3);">${escHtml((selected.inputs || []).length)} inputs · ${escHtml((selected.outputs || []).length)} outputs${(selected.missing || []).length ? ' · Missing: ' + escHtml(selected.missing.join('; ')) : ''}</span>
       </div>
-      <h3 class="settings-subhead" style="margin-top:16px;">Advanced — all inputs</h3>
-      <p style="color:var(--text3);font-size:11px;">Every input this workflow exposes, including the ones above. Same values, same Run button.</p>
-      <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
-        ${(selected.inputs || []).map(inputFieldHtml).join('')}
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+      <div style="margin-bottom:10px;"><label style="font-size:12px;color:var(--text2);">Purpose:
+        <input value="${escHtml(selected.purpose || '')}" onchange="setComfyuiPurpose('${selected.id}', this)" style="width:300px;padding:3px 8px;font-size:12px;" />
+      </label></div>
+      ${simpleComfyuiFormHtml(selected)}
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;">Advanced — all inputs</summary>
+        <p style="color:var(--text3);font-size:11px;margin-top:6px;">Every input this workflow exposes, including the ones above. Same values, same Run button.</p>
+        <div style="display:flex;flex-direction:column;gap:10px;max-width:560px;">
+          ${(selected.inputs || []).map(inputFieldHtml).join('')}
+        </div>
+      </details>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap;">
         <button class="btn btn-teal" onclick="runComfyuiFromPanel()" ${selected.available && !gen ? '' : 'disabled'}>${gen ? 'Generating…' : 'Run'}</button>
+        <button class="btn btn-secondary" onclick="generateComfyuiInChat()" ${selected.available ? '' : 'disabled'} title="Switch to the chat window with a message drafted for this workflow — send it in Agent mode and the result appears in chat">Generate in chat →</button>
         ${gen ? `<button class="btn btn-danger" onclick="stopComfyuiGeneration()">Cancel</button>` : ''}
         <span id="comfyui-progress" style="font-size:12px;color:var(--text2);">${gen ? escHtml(gen.status || 'Working…') : ''}</span>
       </div>
@@ -3575,9 +4071,18 @@ async function renderComfyUIView() {
       </div>`).join('')
     : '<div style="color:var(--text3);font-size:12px;">No generations in ComfyUI history yet — or ComfyUI is not running.</div>';
 
+  // Layout (v0.8.0), top to bottom: Connection, Generate, Library,
+  // History, then Scan results and import problems last and
+  // collapsed — the old order put the error log and the library
+  // above the Generate form, so the thing you actually use was
+  // buried under the things you only read when something breaks.
+  const errGroups = groupComfyuiErrors(state.comfyuiWorkflowErrors || []);
+  const errSummary = (state.comfyuiWorkflowErrors || []).length
+    ? ` · ${(state.comfyuiWorkflowErrors || []).length} import problem${(state.comfyuiWorkflowErrors || []).length !== 1 ? 's' : ''} in ${errGroups.length} group${errGroups.length !== 1 ? 's' : ''}`
+    : '';
   el.innerHTML = `
     <h2 style="font-size:15px;font-weight:600;margin-bottom:4px;">ComfyUI</h2>
-    <p style="color:var(--text3);font-size:12px;margin-bottom:16px;">Generate images with your local ComfyUI, and bring the results into the project. ComfyUI handles generation; CodeFox handles the workflow. Monitoring is by polling — there is no WebSocket client.</p>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px;">Generate images, video, and audio with your local ComfyUI, and bring the results into the project. ComfyUI handles generation; CodeFox handles the workflow.</p>
     <h3 class="settings-subhead">Connection</h3>
     <div class="conn-row">
       <span class="conn-ico">◈</span>
@@ -3590,25 +4095,33 @@ async function renderComfyUIView() {
       </span>
       <button class="btn btn-secondary" onclick="openComfyui()" title="${state.comfyuiDesktopExe ? 'Opens the ComfyUI Desktop app' : 'No Desktop app found by the scan — opens the ComfyUI web UI in your browser'}">Open ComfyUI ↗</button>
     </div>
-    <h3 class="settings-subhead">Find ComfyUI</h3>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-      <button class="btn btn-teal" onclick="scanComfyui()">Scan for ComfyUI</button>
-      <span style="font-size:11px;color:var(--text3);">Checks the usual install folders and the server, and imports any workflows it finds. Browse below still works by hand.</span>
-    </div>
-    ${scanHtml}
-    <h3 class="settings-subhead">Discovered capabilities</h3>
     ${capabilitiesHtml}
+    ${generateHtml}
     <h3 class="settings-subhead">Workflow Library</h3>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
-      <input id="comfyui-workflows-dir" value="${escHtml(state.comfyuiWorkflowsDir || '')}" placeholder="Folder with your ComfyUI workflow JSON files" style="flex:1;" readonly />
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+      <input id="comfyui-lib-search" placeholder="Search workflows by name…" value="${escHtml(state.comfyuiLib.query)}" oninput="onComfyuiSearchInput(this)" style="flex:2;min-width:180px;" />
+      <select id="comfyui-lib-sort" onchange="onComfyuiSortChange(this)" style="flex:0 0 170px;">
+        <option value="name"${state.comfyuiLib.sort === 'name' ? ' selected' : ''}>Sort: Name A–Z</option>
+        <option value="recent"${state.comfyuiLib.sort === 'recent' ? ' selected' : ''}>Sort: Recently used</option>
+        <option value="type"${state.comfyuiLib.sort === 'type' ? ' selected' : ''}>Sort: Type</option>
+      </select>
+      <input id="comfyui-workflows-dir" value="${escHtml(state.comfyuiWorkflowsDir || '')}" placeholder="Folder with your ComfyUI workflow JSON files" style="flex:2;min-width:180px;" readonly />
       <button class="btn btn-secondary" onclick="browseComfyuiWorkflowsDir()">Browse</button>
       <button class="btn btn-secondary" onclick="refreshComfyuiWorkflows().then(() => renderComfyUIView())">Rescan</button>
+      <button class="btn btn-teal" onclick="scanComfyui()">Scan for ComfyUI</button>
     </div>
-    ${libraryHtml}
-    ${generateHtml}
-    <h3 class="settings-subhead">History</h3>
-    <p class="settings-note">Last 20 generations from ComfyUI /history.</p>
-    ${historyHtml}`;
+    <div id="comfyui-library-list"></div>
+    <details style="margin-top:16px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;">History (${state.comfyuiHistory.length} generation${state.comfyuiHistory.length !== 1 ? 's' : ''})</summary>
+      <p class="settings-note">Last 20 generations from ComfyUI /history.</p>
+      ${historyHtml}
+    </details>
+    <details style="margin-top:16px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;">Scan results${errSummary}</summary>
+      ${scanHtml}
+      ${comfyuiErrorGroupsHtml(state.comfyuiWorkflowErrors)}
+    </details>`;
+  renderComfyuiLibrary();
 }
 
 // ── Rules section ─────────────────────────────────────────────────

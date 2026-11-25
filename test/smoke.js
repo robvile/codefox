@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.7.2.
+// 2. package.json version is 0.8.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.7.2', pkg.version === '0.7.2', 'got ' + pkg.version);
-check('sidebar footer shows 0.7.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.7.2 — Local'));
+check('package.json version is 0.8.0', pkg.version === '0.8.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.8.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -795,7 +795,7 @@ check('package.json build.files includes comfyui.js',
 check('ComfyUI view + sidebar item exist in index.html/app.js',
   indexHtml.includes('nav-comfyui') && indexHtml.includes('comfyui-mode') && indexHtml.includes('showComfyUI()')
   && appJs.includes('function showComfyUI') && appJs.includes('function renderComfyUIView')
-  && appJs.includes('Workflow Library') && appJs.includes('Discovered capabilities'));
+  && appJs.includes('Workflow Library') && appJs.includes('All nodes in /object_info'));
 check('ComfyUI view has connection card, Generate panel, history, import',
   appJs.includes('comfyui-url') && appJs.includes('runComfyuiFromPanel') && appJs.includes('comfyuiHistory')
   && appJs.includes('Assets/Generated/') && appJs.includes('importComfyuiOutputs'));
@@ -1530,10 +1530,205 @@ check('the old "switch the node back on" advice is gone from shipped code and do
   !fs.readFileSync(path.join(root, 'comfyui.js'), 'utf8').includes(UNBYPASS) && !appJs.includes(UNBYPASS) && !mainJs.includes(UNBYPASS)
   && !readme.includes(UNBYPASS) && !fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes(UNBYPASS));
 check('ComfyUI view has an Approve all button per library section',
-  appJs.includes('function approveAllComfyuiWorkflows') && appJs.includes("approveAllComfyuiWorkflows('user')")
-  && appJs.includes("approveAllComfyuiWorkflows('builtin')") && appJs.includes('Approve all'));
+  appJs.includes('function approveAllComfyuiWorkflows') && appJs.includes("sectionHtml('user'")
+  && appJs.includes("sectionHtml('builtin'") && appJs.includes("approveAllComfyuiWorkflows('${source}')")
+  && appJs.includes('Approve all'));
 check('CHANGELOG has the 0.7.2 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.7.2 — 2026-11-24'));
+
+// 25. v0.8.0 — "ComfyUI you can actually look at": searchable /
+// filterable / hideable library with pins and collapsible
+// sections, two-column Generate form with a searchable picker,
+// generation results rendered in chat with an Import / Discard
+// row, and import problems grouped by reason. No converter
+// behaviour changed in this release.
+const typeSrc = extractFunction(appJs, 'comfyuiWorkflowType');
+const filterSrc = extractFunction(appJs, 'filterComfyuiWorkflows');
+const sortSrc = extractFunction(appJs, 'sortComfyuiWorkflows');
+const groupSrc = extractFunction(appJs, 'groupComfyuiErrors');
+check('library helpers are extractable for testing',
+  !!typeSrc && !!filterSrc && !!sortSrc && !!groupSrc);
+let comfyuiWorkflowType, filterComfyuiWorkflows, sortComfyuiWorkflows, groupComfyuiErrors;
+try {
+  comfyuiWorkflowType = new Function(typeSrc + '\nreturn comfyuiWorkflowType;')();
+  filterComfyuiWorkflows = new Function('comfyuiWorkflowType', filterSrc + '\nreturn filterComfyuiWorkflows;')(comfyuiWorkflowType);
+  sortComfyuiWorkflows = new Function('comfyuiWorkflowType', sortSrc + '\nreturn sortComfyuiWorkflows;')(comfyuiWorkflowType);
+  groupComfyuiErrors = new Function(groupSrc + '\nreturn groupComfyuiErrors;')();
+} catch (e) {
+  check('library helpers construct in Node', false, String(e && e.message));
+}
+if (comfyuiWorkflowType) {
+  const typeCases = [
+    ['image_qwen_image', 'image'], ['flux_kontext_dev_basic', 'image'],
+    ['video_ltx2_i2v', 'video'], ['api_kling_o3_i2v', 'video'],
+    ['audio_yue_text2music', 'audio'], ['audio-chatterbox_tts', 'audio'],
+    ['3d_pixel3d_trellis', '3d'], ['api_tripo3_0_image_to_model', '3d'],
+    ['something_random', 'other'],
+  ];
+  check('workflow type derivation (name-based)',
+    typeCases.every(([name, want]) => comfyuiWorkflowType({ name }) === want),
+    typeCases.filter(([name, want]) => comfyuiWorkflowType({ name }) !== want).map(([n]) => n).join(','));
+  check('workflow type derivation (node-class based)',
+    comfyuiWorkflowType({ name: 'x', inputs: [{ classType: 'SaveVideo' }] }) === 'video'
+    && comfyuiWorkflowType({ name: 'x', inputs: [{ classType: 'SaveAudio' }] }) === 'audio'
+    && comfyuiWorkflowType({ name: 'x', inputs: [{ classType: 'KSampler' }] }) === 'other');
+}
+if (filterComfyuiWorkflows) {
+  const lib = [
+    { id: 'a', name: 'image_qwen_image', source: 'builtin', available: true, pinned: true, hidden: false, inputs: [] },
+    { id: 'b', name: 'video_ltx2_i2v', source: 'builtin', available: true, pinned: false, hidden: false, inputs: [] },
+    { id: 'c', name: 'api_kling_o3_i2v', source: 'builtin', available: false, pinned: false, hidden: false, inputs: [] },
+    { id: 'd', name: 'my_flux_t2i', source: 'user', available: true, pinned: false, hidden: true, inputs: [] },
+    { id: 'e', name: 'audio_yue_text2music', source: 'user', available: true, pinned: false, hidden: false, inputs: [] },
+    { id: 'f', name: '3d_pixel3d_trellis', source: 'builtin', available: true, pinned: false, hidden: false, inputs: [] },
+  ];
+  const ids = (list) => list.map(w => w.id).sort().join(',');
+  check('library search matches name across sections (hidden excluded by default)',
+    ids(filterComfyuiWorkflows(lib, { query: 'qwen' })) === 'a'
+    && ids(filterComfyuiWorkflows(lib, { query: 'flux' })) === ''
+    && ids(filterComfyuiWorkflows(lib, { query: 'flux', showHidden: true })) === 'd');
+  check('library type filter (video) and source filter (user)',
+    ids(filterComfyuiWorkflows(lib, { type: 'video' })) === 'b,c'
+    && ids(filterComfyuiWorkflows(lib, { source: 'user' })) === 'e');
+  check('library available-only and pinned-only filters',
+    ids(filterComfyuiWorkflows(lib, { availableOnly: true })) === 'a,b,e,f'
+    && ids(filterComfyuiWorkflows(lib, { pinnedOnly: true })) === 'a');
+  check('library Hide API templates hides api_ names only',
+    ids(filterComfyuiWorkflows(lib, { hideApi: true })) === 'a,b,e,f'
+    && ids(filterComfyuiWorkflows(lib, { hideApi: false })) === 'a,b,c,e,f');
+}
+if (sortComfyuiWorkflows) {
+  const sLib = [
+    { id: 'a', name: 'zebra', pinned: false, lastUsedAt: 100 },
+    { id: 'b', name: 'apple', pinned: true, lastUsedAt: 0 },
+    { id: 'c', name: 'mango', pinned: false, lastUsedAt: 300 },
+    { id: 'd', name: 'banana', pinned: false, lastUsedAt: 200 },
+  ];
+  check('library sort: pinned first, then name A-Z',
+    sortComfyuiWorkflows(sLib, 'name').map(w => w.id).join(',') === 'b,d,c,a');
+  check('library sort: recently used first (pinned still first, never-used last)',
+    sortComfyuiWorkflows(sLib, 'recent').map(w => w.id).join(',') === 'b,c,d,a');
+  const tLib = [
+    { id: 'a', name: 'video_ltx2_i2v' },
+    { id: 'b', name: 'audio_yue_text2music' },
+    { id: 'c', name: 'image_qwen_image' },
+    { id: 'd', name: '3d_pixel3d_trellis' },
+  ];
+  check('library sort: type order Image, Video, Audio, 3D',
+    sortComfyuiWorkflows(tLib, 'type').map(w => w.id).join(',') === 'c,a,b,d');
+}
+if (groupComfyuiErrors) {
+  const errs = [
+    'a.json: Node type not installed: PrimitiveNode (node 99)',
+    'b.json: Node type not installed: PrimitiveNode (node 45)',
+    'c.json: Node type not installed: LumaImageModifyNode (node 2)',
+    'd.json: Bypassed node "LoadImage" (id 90) is not supported',
+    'e.json: Bypassed node "LoadImage" (id 14) is not supported',
+    'Workflows folder not found: C:\\Nope',
+  ];
+  const groups = groupComfyuiErrors(errs);
+  check('import problems group by reason (same node, different node id = one group), most-common first',
+    groups.length === 4 && groups[0].count === 2 && /PrimitiveNode/.test(groups[0].reason)
+    && groups[1].count === 2 && /LoadImage/.test(groups[1].reason)
+    && groups.some(g => /LumaImageModifyNode/.test(g.reason) && g.count === 1)
+    && groups.some(g => /Workflows folder not found/.test(g.reason) && g.count === 1));
+  check('import problems grouping is empty-safe',
+    Array.isArray(groupComfyuiErrors([])) && groupComfyuiErrors([]).length === 0
+    && Array.isArray(groupComfyuiErrors(null)) && groupComfyuiErrors(null).length === 0);
+}
+// Pin / hide / last-used survive a rescan, like purpose and
+// approval already did (real importWorkflowsFromFiles, temp dir).
+{
+  const tmpLib = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-lib-'));
+  try {
+    fs.writeFileSync(path.join(tmpLib, 'my_flux.json'), JSON.stringify(uiPlainWorkflow));
+    const stored = [{
+      id: comfy.slugifyWorkflowId('my_flux'), name: 'my_flux', purpose: 'Mine',
+      approved: true, pinned: true, hidden: true, lastUsedAt: 12345,
+    }];
+    const re = comfy.importWorkflowsFromFiles([path.join(tmpLib, 'my_flux.json')], uiObjectInfo, stored, { source: 'user' });
+    check('rescan preserves pin / hide / last-used / purpose / approval',
+      re.ok === true && re.workflows.length === 1 && re.workflows[0].pinned === true
+      && re.workflows[0].hidden === true && re.workflows[0].lastUsedAt === 12345
+      && re.workflows[0].purpose === 'Mine' && re.workflows[0].approved === true);
+  } finally { fs.rmSync(tmpLib, { recursive: true, force: true }); }
+}
+// Chat results: the envelope marker parses, and the rich renderer
+// (the real comfyuiChatResultHtml from app.js) shows thumbnails
+// plus an Import / Discard row, then Imported / Discarded states.
+const markerMatch = /const COMFYUI_CHAT_MARKER = '([^']+)'/.exec(appJs);
+const parseSrc = extractFunction(appJs, 'parseComfyuiChatResult');
+const chatHtmlSrc = extractFunction(appJs, 'comfyuiChatResultHtml');
+const escSrc = extractFunction(appJs, 'escHtml');
+check('chat-result envelope marker and renderer are extractable',
+  !!markerMatch && !!parseSrc && !!chatHtmlSrc && !!escSrc);
+if (markerMatch && parseSrc && chatHtmlSrc && escSrc) {
+  try {
+    const marker = markerMatch[1];
+    const escHtml = new Function(escSrc + '\nreturn escHtml;')();
+    const renderChatResult = new Function('escHtml', 'comfyuiFileUrl', 'comfyuiSlug',
+      'const COMFYUI_CHAT_MARKER = ' + JSON.stringify(marker) + ';\n'
+      + parseSrc + '\n' + chatHtmlSrc + '\nreturn comfyuiChatResultHtml;')(
+      escHtml, (p) => 'file:///' + String(p || '').replace(/\\/g, '/'), (n) => 'slug');
+    const msg = { role: 'assistant', content: marker + JSON.stringify({
+      v: 1, workflowId: 'w1', workflowName: 'my_flux_t2i', prompt: 'a red car',
+      inputs: { positive: 'a red car' },
+      outputs: [{ filename: 'x.png', subfolder: '', type: 'output', localPath: 'C:\\tmp\\x.png' }],
+      imported: false, dir: '', discarded: false,
+    }) };
+    const html = renderChatResult(msg, 3);
+    check('chat result renders thumbnails + Import / Discard row',
+      typeof html === 'string' && html.includes('<img') && html.includes('file:///C:/tmp/x.png')
+      && html.includes('Import to Assets/Generated/slug/') && html.includes('Discard')
+      && html.includes('my_flux_t2i') && html.includes('a red car')
+      && html.includes('importComfyuiChatResult(3)') && html.includes('discardComfyuiChatResult(3)'));
+    const importedMsg = { role: 'assistant', content: marker + JSON.stringify({
+      v: 1, workflowId: 'w1', workflowName: 'my_flux_t2i', prompt: '', inputs: {},
+      outputs: [{ filename: 'x.png', subfolder: '', type: 'output', localPath: null }],
+      imported: true, dir: 'Assets/Generated/my-flux-t2i/', discarded: false,
+    }) };
+    const htmlImported = renderChatResult(importedMsg, 0);
+    check('chat result shows Imported state and no Import button after import',
+      htmlImported.includes('Imported to Assets/Generated/my-flux-t2i/')
+      && !htmlImported.includes('importComfyuiChatResult('));
+    const discardedMsg = { role: 'assistant', content: marker + JSON.stringify({
+      v: 1, workflowId: 'w1', workflowName: 'my_flux_t2i', prompt: '', inputs: {},
+      outputs: [{ filename: 'x.png', subfolder: '', type: 'output', localPath: null }],
+      imported: false, dir: '', discarded: true,
+    }) };
+    check('chat result shows Discarded state',
+      renderChatResult(discardedMsg, 0).includes('Discarded'));
+    const parse = new Function('const COMFYUI_CHAT_MARKER = ' + JSON.stringify(marker) + ';\n' + parseSrc + '\nreturn parseComfyuiChatResult;')();
+    check('chat-result envelope parses, plain text does not',
+      parse(msg.content) && parse(msg.content).workflowName === 'my_flux_t2i'
+      && parse('hello') === null && parse(marker + '{bad json') === null);
+  } catch (e) {
+    check('chat-result renderer runs in Node', false, String(e && e.message));
+  }
+}
+check('ComfyUI view has library search, sort, filter chips, pin/hide, and a searchable picker',
+  appJs.includes('comfyui-lib-search') && appJs.includes('comfyui-lib-sort')
+  && appJs.includes('Hide API templates') && appJs.includes('Show hidden')
+  && appJs.includes('toggleComfyuiPinned') && appJs.includes('toggleComfyuiHidden')
+  && appJs.includes('comfyui-picker') && appJs.includes('comfyui-picker-results')
+  && appJs.includes('onComfyuiPickerInput') && appJs.includes('renderComfyuiLibrary'));
+check('Generate panel has two columns and a Generate in chat button',
+  appJs.includes('cf-two-col') && appJs.includes('generateComfyuiInChat') && appJs.includes('Generate in chat'));
+check('Agent loop shows chat results and no longer auto-imports; system prompt says results appear in chat',
+  appJs.includes('await appendComfyuiChatResult(wf, res.outputs, action.inputs, null)')
+  && !appJs.includes('importComfyuiOutputs(wf, res.outputs, action.inputs)')
+  && appJs.includes('The result appears in the chat with an offer to import it into the project'));
+check('ComfyUI view layout is Connection, Generate, Library, History, Scan results — no flat error wall',
+  appJs.includes('Scan results') && appJs.includes('comfyuiErrorGroupsHtml')
+  && !appJs.includes('Import problems:<br>'));
+check('index.html has the v0.8.0 ComfyUI CSS (two-column form, compact rows, picker, chat result)',
+  indexHtml.includes('cf-two-col') && indexHtml.includes('cf-lib-row')
+  && indexHtml.includes('cf-picker-results') && indexHtml.includes('cf-chat-result'));
+check('README documents library search/filter/pin/hide and chat generation',
+  readme.includes('Hide API templates') && readme.includes('Recently used')
+  && readme.includes('Generate in chat') && readme.includes('Import to `Assets/Generated/<workflow>/`'));
+check('CHANGELOG has the 0.8.0 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.0 — 2026-11-24'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');
@@ -1599,7 +1794,7 @@ const mockServer = http.createServer((req, res) => {
     const fnText = appJs.slice(fnStart, fnEnd);
     const fnBody = fnText.slice(fnText.indexOf('{') + 1, -1);
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    const approveAll = new AsyncFunction('source', 'state', 'persistComfyuiWorkflows', 'renderComfyUIView', 'showToast', fnBody);
+    const approveAll = new AsyncFunction('source', 'state', 'persistComfyuiWorkflows', 'renderComfyuiLibrary', 'showToast', fnBody);
     const mockState = { comfyuiWorkflows: [
       { id: 'u1', source: 'user', approved: false },
       { id: 'u2', source: 'user', approved: true },
