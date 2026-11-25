@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 — 2026-11-24
+
+- **Diagnostics: the app now says on screen when its bridge to the main process is down.** On startup it checks the bridge first (`app:ping`, answered by the main process with its version) and, if the bridge is missing or does not answer within 2 seconds, shows a persistent red or amber banner at the top of the window naming the failure ("bridge missing" or "bridge timeout"). The banner is pure DOM, needs no bridge, settings, or database, and survives view switches. The Developer tools button also fails visibly now: if the bridge is down it shows a toast saying so instead of only logging to a console that cannot be opened.
+- **The dead-buttons cause is still unconfirmed — this release makes the failure visible instead of guessing a fix.** A Node harness that stubs `electron` and loads the real `preload.js` shows it loads cleanly and exposes the full `rb` object, so the preload does not throw in plain Node; whatever breaks the bridge in the packaged app is not visible statically. The next report from the banner names it: "bridge missing" means the preload never exposed the bridge, "bridge timeout" means it did but the main process is not answering.
+- **Version.** package.json is now 0.6.3; the sidebar footer reads "CodeFox 0.6.3 — Local · No account needed".
+
 ## 0.6.2 — 2026-11-24
 
 - **Diagnostics: a "Developer tools" button in Settings → Advanced.** It opens the developer console — the same panel as Ctrl+Shift+I — without needing a keyboard shortcut, for users whose shortcut is intercepted by other software. This is diagnostic only; it changes no app behaviour.

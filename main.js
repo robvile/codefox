@@ -1182,6 +1182,13 @@ ipcMain.handle('app:openDevTools', () => {
   return true;
 });
 
+// ── Diagnostics: bridge ping (v0.6.3) ────────────────────────────
+// The renderer calls this first thing in init() to prove the bridge
+// is alive. app.getVersion() reads the version from package.json.
+// If this has no handler or never answers, the renderer shows a
+// banner on screen instead of failing silently.
+ipcMain.handle('app:ping', () => ({ ok: true, version: app.getVersion() }));
+
 // ── MCP guided-setup checks (v0.6.0) ────────────────────────────
 // These are CodeFox's own checks, not user commands: they run even
 // when the shell tool is off, via child_process directly, never via

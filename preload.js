@@ -115,7 +115,10 @@ contextBridge.exposeInMainWorld('rb', {
   // Diagnostics (v0.6.2) — Settings → Advanced has a "Developer
   // tools" button for this; the same panel as Ctrl+Shift+I, for
   // users whose keyboard shortcut is intercepted by other software.
+  // ping (v0.6.3) is the bridge self-check init() runs first: if
+  // the main process does not answer it, the app says so on screen.
   app: {
     openDevTools: () => ipcRenderer.invoke('app:openDevTools'),
+    ping: () => ipcRenderer.invoke('app:ping'),
   },
 });

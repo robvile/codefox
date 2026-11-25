@@ -300,6 +300,17 @@
   @keyframes bounce { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }
 
   .hidden { display: none !important; }
+
+  /* ── Bridge self-check banner (v0.6.3) ──────────────────────────
+     Fixed to the viewport, a direct child of <body> (outside #app),
+     so no view switch or pane re-render can remove it. Shown only
+     when the renderer cannot reach the main process — the failure
+     that used to be silent. Pure DOM/CSS; needs no bridge, settings,
+     or database. */
+  #bridge-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 9999; padding: 10px 16px; font-size: 13px; font-weight: 600; text-align: center; color: #fff; }
+  #bridge-banner.bridge-missing { background: #7f1d1d; }
+  #bridge-banner.bridge-timeout { background: #92400e; }
+
   #apply-bar { box-shadow: 0 -2px 12px rgba(0,0,0,0.3); }
 
   /* ── Mode selector + tools row ── */
@@ -332,6 +343,7 @@
 </style>
 </head>
 <body>
+<div id="bridge-banner" class="hidden"></div>
 <div id="app">
   <div id="titlebar">
     <button class="topbar-btn" onclick="toggleSidebar()" title="Toggle sidebar">☰</button>
@@ -390,7 +402,7 @@
         <div class="nav-item" id="nav-comfyui" onclick="showComfyUI()"><span class="nav-ico">◈</span>ComfyUI</div>
       </div>
 
-      <div id="sidebar-footer">CodeFox 0.6.2 — Local · No account needed</div>
+      <div id="sidebar-footer">CodeFox 0.6.3 — Local · No account needed</div>
     </div>
 
     <!-- CENTER -->

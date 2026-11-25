@@ -221,7 +221,53 @@ async function retryOllama() {
 async function initOllama() { return initLLM(); }
 
 // ── Init ─────────────────────────────────────────────────────────
+// ── Bridge self-check (v0.6.3) ────────────────────────────────────
+// The v0.6.0 report — every button that needs the main process went
+// dead at once (project dropdown, creating a conversation, LM Studio
+// verify / refresh, even the Developer tools button) — took three
+// releases to chase because the failure was silent: every dead
+// handler awaits an rb.* call, and a missing bridge just never
+// answers. So init() now proves the bridge is alive FIRST, and if
+// it is not, the app says so in a banner on screen (pure DOM, needs
+// no bridge, settings, or database) instead of failing silently.
+// The banner lives in #bridge-banner, a direct child of <body>
+// outside #app, so no view switch or pane re-render removes it.
+// On failure init() returns early: without the bridge no init step
+// can succeed, and proceeding would hang at the first rb await.
+function showBridgeBanner(msg, kind) {
+  const banner = document.getElementById('bridge-banner');
+  if (!banner) return;
+  banner.textContent = msg;
+  banner.classList.remove('hidden');
+  banner.classList.add(kind);
+}
+
+async function checkBridge() {
+  if (typeof window.rb === 'undefined' || !window.rb || !window.rb.app || typeof window.rb.app.ping !== 'function') {
+    console.error('[bridge] window.rb is missing — preload did not expose the bridge');
+    showBridgeBanner('CodeFox cannot reach its main process (bridge missing) — buttons that save, load, or connect will not respond. Please report this exact message.', 'bridge-missing');
+    return false;
+  }
+  try {
+    const res = await Promise.race([
+      window.rb.app.ping(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('ping timed out after 2s')), 2000)),
+    ]);
+    if (res && res.ok) {
+      console.log('[bridge] ping ok, main process version ' + res.version);
+      return true;
+    }
+    throw new Error('ping returned not-ok');
+  } catch (e) {
+    console.error('[bridge] main process is not answering:', e);
+    showBridgeBanner('CodeFox loaded, but the main process is not answering (bridge timeout) — buttons that save, load, or connect will not respond. Please report this exact message.', 'bridge-timeout');
+    return false;
+  }
+}
+
 async function init() {
+  // Bridge self-check first — see checkBridge above.
+  if (!(await checkBridge())) return;
   // Projects first — the DB migration in main.js guarantees at least one.
   state.projects = await rb.project.list();
   const activeId = await rb.db.getSetting('active_project_id');
@@ -3499,12 +3545,16 @@ async function restoreExcludedDefaults() {
 
 // Diagnostics (v0.6.2) — opens the developer console, the same
 // panel as Ctrl+Shift+I, for users whose keyboard shortcut is
-// intercepted by other software. If this call itself fails (the
-// bridge to the main process is down), there is nothing visible
-// left to report it with, so the error goes to the console.
+// intercepted by other software. (v0.6.3) If this call itself fails
+// the bridge is down, so the failure must be visible on screen —
+// showToast is pure DOM and needs no bridge — instead of only
+// logging to a console the user cannot open.
 async function openDevTools() {
   try { await rb.app.openDevTools(); }
-  catch (e) { console.error('Could not open Developer tools:', e); }
+  catch (e) {
+    console.error('Could not open Developer tools:', e);
+    showToast('Developer tools could not be opened — the app bridge is not responding.');
+  }
 }
 
 async function runManualCommand() {
