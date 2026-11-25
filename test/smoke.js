@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.5.3.
+// 2. package.json version is 0.6.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.6.0', pkg.version === '0.6.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.6.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.0 — Local'));
+check('package.json version is 0.6.1', pkg.version === '0.6.1', 'got ' + pkg.version);
+check('sidebar footer shows 0.6.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.6.1 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -210,6 +210,25 @@ check('unity-bridge-source.js exists', fs.existsSync(path.join(root, 'unity-brid
 const bridgeSrc = require(path.join(root, 'unity-bridge-source.js'));
 const bridgeCs = fs.readFileSync(path.join(root, 'unity-companion', 'CodeFoxBridge.cs'), 'utf8');
 check('embedded bridge source matches CodeFoxBridge.cs', bridgeSrc.BRIDGE_SOURCE === bridgeCs);
+
+// 11b. v0.6.1: the generated bridge file is untracked, so builds can
+// never leave a tracked file dirty and block the next `git pull`.
+const gitignore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+check('.gitignore lists unity-bridge-source.js', gitignore.split('\n').some(l => l.trim() === 'unity-bridge-source.js'));
+check('package.json prestart regenerates the bridge', typeof pkg.scripts.prestart === 'string' && pkg.scripts.prestart.includes('scripts/embed-bridge.js'));
+check('package.json postinstall regenerates bridge + icons',
+  typeof pkg.scripts.postinstall === 'string'
+  && pkg.scripts.postinstall.includes('scripts/embed-bridge.js')
+  && pkg.scripts.postinstall.includes('scripts/prepare-icons.js'));
+try {
+  const tracked = execFileSync('git', ['ls-files', 'unity-bridge-source.js'], { cwd: root, encoding: 'utf8', stdio: 'pipe' }).trim();
+  check('unity-bridge-source.js is not tracked in git', tracked === '', 'git ls-files returned ' + JSON.stringify(tracked));
+} catch (e) {
+  // No git available, or this copy is not a git checkout (e.g. a
+  // packaged copy): the check cannot run here, so skip it rather
+  // than failing the whole suite on the environment.
+  console.log('SKIP — git ls-files check (no git repo available here)');
+}
 
 // 12. Manifest add/remove round-trip against a temp directory.
 const upm = require(path.join(root, 'upm-manifest.js'));

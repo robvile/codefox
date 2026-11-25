@@ -1,11 +1,13 @@
-// scripts/embed-bridge.js — embed the Unity bridge source (v0.5.0).
+// scripts/embed-bridge.js — embed the Unity bridge source (v0.5.0, v0.6.1).
 //
 // Reads unity-companion/CodeFoxBridge.cs and writes
-// unity-bridge-source.js, a checked-in generated file that exports the
-// bridge source as a string. The app installs the bridge from the
-// bundled file when the install has it, and from this embedded copy
-// when it does not — so a missing bundled file can never break the
-// install again. Runs before every build (see package.json).
+// unity-bridge-source.js, a GENERATED file (gitignored, like the icons)
+// that exports the bridge source as a string. The app installs the
+// bridge from the bundled file when the install has it, and from this
+// embedded copy when it does not — so a missing bundled file can never
+// break the install again. Runs before every build (see package.json),
+// on `npm install` (postinstall) and on `npm start` (prestart), so a
+// fresh clone always has the file without it being tracked in git.
 //
 // Run: node scripts/embed-bridge.js
 
