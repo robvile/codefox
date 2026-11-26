@@ -1240,6 +1240,14 @@ function isRefusal(text) {
 // identical string for the Node-side refusal functions; the smoke
 // test asserts the two are equal.
 const UNITY_CREATE_PREFAB_EXAMPLE = '```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```';
+
+// v0.16.0 — scene write actions: the app dry-runs them, shows
+// the diff on the approval bar, and only then runs the real call.
+// Scene path actions: their path-ish args are resolved against
+// the session's path changes (moved paths rewritten, deleted
+// paths answered locally) before anything runs.
+const SCENE_WRITE_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'set_parent', 'delete_gameobject'];
+const SCENE_PATH_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'delete_gameobject', 'set_parent', 'read_component_values', 'click_ui', 'list_hierarchy'];
 const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block — or, for a small change to an existing file, a ```file str_replace block with the exact old text and the new text (view the file first if you are not sure of the exact text). Do not describe the fix instead of making it.';
 
 // No-actions enforcement (v0.5.2). The refusal retry above only
@@ -2264,6 +2272,10 @@ async function runAgentTurn(systemPrompt, threadId) {
   loopState = {
     active: true, stopRequested: false, stopNoted: false,
     round: 0, maxRounds, threadId, systemPrompt,
+    // v0.16.0: one undo group per agent turn for scene writes —
+    // the bridge groups every scene write of this turn under
+    // this id, so one Ctrl+Z reverts the whole turn.
+    turnId: 'turn-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36),
     waitingApproval: false, pendingResolve: null, refusalRetries: 0, enforcementRetried: false,
     // v0.9.3: whether the previous round ran actions, and whether
     // any of them failed — the no-actions branch uses these to tell
@@ -2653,8 +2665,73 @@ async function processAgentActions(actions) {
           continue;
         }
       }
+      // v0.16.0: paths move and die. Resolve the command's
+      // path-ish args against the session's path changes first:
+      // a moved path is rewritten to its current location, a
+      // deleted path is answered locally without hitting Unity.
+      // Asset paths (createPrefab / modifyPrefab / deleteAsset)
+      // are not scene paths — they are never resolved.
+      let rewrittenNote = '';
+      if (SCENE_PATH_ACTIONS.indexOf(label) !== -1) {
+        const pathResolution = resolveSceneCommandPaths(action.command);
+        if (pathResolution.dead) {
+          await appendToolResult('Tool result — Unity command "' + label + '" not run: \'' + pathResolution.deadPath + '\' was deleted earlier in this session — it no longer exists.');
+          failed++;
+          outcomes++;
+          continue;
+        }
+        for (const r of pathResolution.rewrittenPaths) {
+          action.command[r.key] = r.path;
+          rewrittenNote += ' (Note: \'' + r.from + '\' was moved to \'' + r.path + '\' earlier — the command ran on the new path.)';
+        }
+      }
+      // v0.16.0: scene writes dry-run first. The bridge never
+      // trusts a flag from the model: the app runs the preview,
+      // shows the diff on the approval bar, and only then repeats
+      // the identical call with dryRun:false. A decline is not a
+      // failure — the user said no.
+      let commandToRun = action.command;
+      if (SCENE_WRITE_ACTIONS.indexOf(label) !== -1) {
+        const previewCmd = Object.assign({}, action.command, { dryRun: true, turnId: loopState ? loopState.turnId : '', label: label });
+        if (loopState) setLoopStatus(roundLabel() + 'previewing Unity command (' + label + ')…');
+        const preview = await rb.unity.runCommand({ projectPath: state.projectPath, command: previewCmd });
+        if (!preview || !preview.ok) {
+          await appendToolResult('Tool result — Unity command "' + label + '" preview failed: ' + ((preview && (preview.error || preview.message)) || 'unknown error'));
+          failed++;
+          outcomes++;
+          continue;
+        }
+        const outcome = await waitForLoopDecision((settle) => showSceneApprovalBar({ label: scenePreviewLabel(label, action.command, preview.data) }, {
+          approved: () => settle({ decision: 'approved' }),
+          declined: () => settle({ decision: 'declined' }),
+        }));
+        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+        if (outcome.decision !== 'approved') {
+          await appendToolResult('User declined: ' + sceneDeclineText(label, action.command, preview.data));
+          outcomes++;
+          continue;
+        }
+        // The real call: the identical command with dryRun:false,
+        // plus the staleness guards from the preview — the
+        // before-values for set_property, the lost-object list
+        // for delete_gameobject. If anything changed since the
+        // preview, the bridge refuses and the model re-previews.
+        const realCmd = Object.assign({}, action.command, { dryRun: false, turnId: loopState ? loopState.turnId : '', label: label });
+        if (label === 'set_property' && preview.data && preview.data.changes) {
+          realCmd.changes = (action.command.changes || []).map((ch, i) => {
+            const before = preview.data.changes[i] && preview.data.changes[i].before;
+            const next = Object.assign({}, ch);
+            if (before !== undefined) next.expectedBefore = before;
+            return next;
+          });
+        }
+        if (label === 'delete_gameobject' && preview.data && preview.data.lostObjects) {
+          realCmd.expectedLostObjects = preview.data.lostObjects.map(o => o.path);
+        }
+        commandToRun = realCmd;
+      }
       if (loopState) setLoopStatus(roundLabel() + 'running Unity command (' + label + ')…');
-      const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: action.command });
+      const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: commandToRun });
       if (res && res.ok) {
         // v0.10.0: the bridge answered — and a prefab command
         // changed a .prefab, which the post-turn build check
@@ -2668,8 +2745,14 @@ async function processAgentActions(actions) {
             noteTurnChange([action.command.path]);
           }
         }
+        // v0.16.0: a move, rename or delete changes the paths
+        // later calls use. Record them and rewrite the earlier
+        // tool results in the context before appending this one.
+        if (res.data && res.data.pathChanges && res.data.pathChanges.length) {
+          applyPathChanges(res.data.pathChanges);
+        }
         let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
-          + (res.path ? ' (' + res.path + ')' : '');
+          + (res.path ? ' (' + res.path + ')' : '') + rewrittenNote;
         // v0.12.0: readConsole comes back as earliest-first entries
         // with a cursor for the next read — format them for the
         // model instead of dumping raw JSON. (The log-triage build
@@ -3009,6 +3092,177 @@ function showGitRestoreBar(plan, cb) {
   document.body.appendChild(bar);
 }
 
+// ── Scene path changes (v0.16.0) ────────────────────────────
+// After a move, rename or delete, paths change. Every structural
+// action returns pathChanges [{from, to}] (to null = deleted),
+// and the app owns the consequences — the model must not be
+// expected to notice on its own. Two rules, one convention:
+// later commands are rewritten to the new path (or answered
+// locally when the path was deleted — see
+// resolveSceneCommandPaths), and earlier tool results in the
+// context are rewritten the same way (tool outputs only, never
+// user messages). The map lives on state for the session;
+// switching projects clears it.
+
+// Rewrite one scene path by boundary-aware prefix replacement.
+// changes apply in the order given (chronological — a move
+// followed by a delete of the same object chains correctly).
+// Returns {path} when the path survives (rewritten or not), or
+// {path, dead: true} when the path (or an ancestor) was deleted.
+// "Level/Enemy" never matches "Level/EnemyBoss": the from must
+// be the whole path or be followed by '/'.
+function rewriteScenePath(path, changes) {
+  if (!path || !changes || !changes.length) return { path: path };
+  let result = String(path);
+  for (const c of changes) {
+    const from = String((c && c.from) || '');
+    if (!from) continue;
+    if (result === from || result.indexOf(from + '/') === 0) {
+      if (c.to == null) return { path: result, dead: true };
+      result = String(c.to) + result.slice(from.length);
+    }
+  }
+  return { path: result };
+}
+
+// Rewrite scene paths inside a tool-result message (tool outputs
+// only). A path token is the from-string followed by '/', the end
+// of the string, or a non-path character — and NOT followed by a
+// file extension ("Level/Enemy.prefab" is a file, not the scene
+// object). A deleted path is marked "(deleted)" instead of being
+// silently dropped, so the model can see it died.
+function rewriteToolResultPaths(text, changes) {
+  if (!text || !changes || !changes.length) return text;
+  let out = String(text);
+  for (const c of changes) {
+    const from = String((c && c.from) || '');
+    if (!from) continue;
+    const esc = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('(^|[^A-Za-z0-9_./-])' + esc + '(?=/|$|[^A-Za-z0-9_./-]|\\.(?![A-Za-z]))', 'g');
+    if (c.to == null) {
+      out = out.replace(re, function (m, pre) { return pre + from + ' (deleted)'; });
+    } else {
+      const to = String(c.to);
+      out = out.replace(re, function (m, pre) { return pre + to; });
+    }
+  }
+  return out;
+}
+
+// Record path changes from a structural action: extend the
+// session map, and rewrite the earlier tool results in the
+// context (tool outputs only — user messages are never touched).
+// The in-memory messages are what the next round sees; the
+// database copy keeps the original text.
+function applyPathChanges(changes) {
+  if (!changes || !changes.length) return;
+  if (!state.pathChanges) state.pathChanges = [];
+  for (const c of changes) {
+    if (!c || !c.from) continue;
+    state.pathChanges.push({ from: String(c.from), to: c.to == null ? null : String(c.to) });
+  }
+  for (const m of state.messages) {
+    if (m.role === 'user' && typeof m.content === 'string' && m.content.indexOf('Tool result') === 0) {
+      m.content = rewriteToolResultPaths(m.content, changes);
+    }
+  }
+}
+
+// Resolve the path-ish args of one unity-command against the
+// session's path changes. Returns {rewrittenPaths: [{key, path,
+// from}], dead: bool, deadPath: string}. Keys checked: path,
+// parent, newParent, root. A command with no path-ish args (or
+// no recorded changes) resolves to nothing.
+function resolveSceneCommandPaths(command) {
+  const out = { rewrittenPaths: [], dead: false, deadPath: '' };
+  if (!command || typeof command !== 'object') return out;
+  for (const key of ['path', 'parent', 'newParent', 'root']) {
+    const v = command[key];
+    if (typeof v !== 'string' || !v) continue;
+    const r = rewriteScenePath(v, state.pathChanges || []);
+    if (r.dead) { out.dead = true; out.deadPath = v; return out; }
+    if (r.path !== v) out.rewrittenPaths.push({ key: key, path: r.path, from: v });
+  }
+  return out;
+}
+
+function shortValue(v) {
+  if (v == null) return 'null';
+  const s = typeof v === 'string' ? '"' + v + '"' : JSON.stringify(v);
+  return s.length > 24 ? s.slice(0, 24) + '…' : s;
+}
+
+// One line for the scene approval bar, from the preview data.
+function scenePreviewLabel(label, command, data) {
+  const d = data || {};
+  if (label === 'set_property') {
+    const changes = (d.changes || []).map(c => (c.property || '?') + ' ' + shortValue(c.before) + ' → ' + shortValue(c.after));
+    return 'Apply to ' + (command.path || '?') + ' / ' + (d.component || command.component || '?') + ': ' + (changes.join(', ') || 'no changes') + '?';
+  }
+  if (label === 'create_gameobject') {
+    return 'Create \'' + (d.path || command.name || '?') + '\'' + (d.renamed ? ' (renamed)' : '') + ' with ' + ((d.components || []).length) + ' component(s)?';
+  }
+  if (label === 'add_component') {
+    return 'Add \'' + (d.type || command.type || '?') + '\' to \'' + (command.path || '?') + '\'' + ((d.alsoAdded || []).length ? ' (also adds: ' + d.alsoAdded.join(', ') + ')' : '') + '?';
+  }
+  if (label === 'set_parent') {
+    return 'Move \'' + (command.path || '?') + '\' → \'' + (d.newPath || command.newParent || '?') + '\' (' + (d.descendantCount || 0) + ' descendant(s))?';
+  }
+  if (label === 'delete_gameobject') {
+    const refs = (d.inboundReferences || []).length;
+    return 'Delete \'' + (command.path || '?') + '\' — ' + (d.lostCount || 0) + ' object(s)' + (refs ? ', ' + refs + ' broken reference(s)' : ', no broken references') + (d.scanComplete === false ? ' (reference scan incomplete)' : '') + '?';
+  }
+  return 'Apply this scene change?';
+}
+
+// The tool-result line when the user declines a scene preview.
+function sceneDeclineText(label, command, data) {
+  if (label === 'set_property') return 'set_property on ' + (command.path || '?') + ' / ' + (command.component || '?') + ' (no changes made).';
+  if (label === 'create_gameobject') return 'create_gameobject \'' + (command.name || '?') + '\' (nothing created).';
+  if (label === 'add_component') return 'add_component \'' + (command.type || '?') + '\' to ' + (command.path || '?') + ' (nothing added).';
+  if (label === 'set_parent') return 'set_parent ' + (command.path || '?') + ' → ' + (command.newParent || '?') + ' (nothing moved).';
+  if (label === 'delete_gameobject') return 'delete_gameobject ' + (command.path || '?') + ' (nothing deleted).';
+  return 'scene change (nothing changed).';
+}
+
+// Scene write approval bar (v0.16.0): the app dry-runs a scene
+// write, shows the diff, and the user approves before the real
+// call runs. Same shape as the git restore bar.
+function showSceneApprovalBar(plan, cb) {
+  const existing = document.getElementById('scene-approval-bar');
+  if (existing) existing.remove();
+  const callbacks = cb || {};
+  const bar = document.createElement('div');
+  bar.id = 'scene-approval-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;';
+  label.textContent = plan.label || 'Apply this scene change?';
+  bar.appendChild(label);
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-primary';
+  confirmBtn.textContent = 'Apply';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Dismiss';
+  let decided = false;
+  confirmBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.approved) callbacks.approved();
+  };
+  dismissBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.declined) callbacks.declined();
+  };
+  bar.appendChild(confirmBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+}
+
 // Ask / Plan path for package blocks: no loop, so queue the bars one
 // at a time and append each result as a system message.
 function handlePackageBlocks(text) {
@@ -3127,11 +3381,22 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += '- read_component_values — read live state from a scene object: {"action": "read_component_values", "path": "Player", "component": "Rigidbody"} returns the Inspector-visible values; {"action": "read_component_values", "path": "Player"} lists the components and children instead. Add "members": ["linearVelocity", "position"] to read runtime values that are not serialized (a Rigidbody\'s velocity, a Transform\'s world position) — name them explicitly. The result is bounded (40 properties by default; ask for specific ones with "properties": ["m_Mass"] when you need more). A timed set_play_mode run destroys the scene objects when it exits, so you CANNOT read values after a timed run — either read the run\'s console report, or enter Play Mode without a duration, wait, read, then stop. The model can read state but cannot provide input — probing covers spawning, falling, AI and timers only (inject_input below closes that gap for keyboard and gamepad). On Unity 6 the Rigidbody member is "linearVelocity"; on older versions it is "velocity" — if a member is unknown the error lists similar names.\n';
       prompt += '- inject_input — play the game with scripted input: {"action": "inject_input", "steps": [{"key": "D", "action": "hold", "seconds": 1.5}, {"key": "Space", "action": "tap"}, {"wait": 0.5}]}. Keys are the new Input System Key names (Space, W, A, S, D, LeftShift, Enter); a tap holds for 3 frames, a hold for the seconds given. Gamepad steps use "gamepadButton": "South" (or North, East, West, Start, Select, shoulders) and "leftStick": [x, y]. At most 50 steps, 30 seconds total. The game must already be in Play Mode (enter it without a duration first) — input cannot be injected while the editor is in Edit Mode, and a project on the legacy input system only (UnityEngine.Input) cannot receive injected input at all: the action fails plainly and suggests opt-in hooks instead. The run checks first that input is actually landing (a key press that never registers means Unity is not focused or the device is disabled) and releases every key when it finishes, is cancelled, or Play Mode ends.\n';
       prompt += '- click_ui — click a UI Button while the game runs: {"action": "click_ui", "path": "Canvas/MainMenu/PlayButton"}.\n';
+      prompt += '- set_property — set Inspector values on a scene object: {"action": "set_property", "path": "Player", "component": "PlayerController", "changes": [{"property": "moveSpeed", "value": 8}]}. Property names are Unity\'s serialized names (Transform m_LocalPosition, Rigidbody m_Mass, your own scripts use the field name) — read them with read_component_values first, never guess. Values: numbers, strings, booleans, [x, y] / [x, y, z] vectors, euler degrees for rotations, "#RRGGBB" or [r, g, b, a] for colors, enum names ("Walk") or indexes, asset paths ("Assets/Sprites/hero.png") or scene paths for object references. One call can set up to 20 properties, all or nothing — one typo fails the whole call and nothing changes. Set a property on the GameObject itself with component "GameObject" (m_Name, m_IsActive, m_TagString, m_Layer) — renaming emits a path change, so later calls must use the new path. Scene objects only, never prefab assets — use modifyPrefab for those. Changes in Play Mode vanish when it stops: pass allowPlayMode: true to experiment anyway.\n';
+      prompt += '- create_gameobject — create a scene object: {"action": "create_gameobject", "name": "Boss", "parent": "Level/Enemies", "primitive": "Cube", "position": [0, 1, 0], "components": ["Rigidbody"]}. Names are made unique among siblings and the result tells you the final path — use that path, never guess it. Takes no property values: configure with set_property afterwards, in the same turn, so one Ctrl+Z reverts the whole thing.\n';
+      prompt += '- add_component — add a component: {"action": "add_component", "path": "Player", "type": "Rigidbody"}. Types resolve through Unity\'s type list — a script you just wrote is not there until the project compiles, so run recompile_and_report_errors first. [RequireComponent] dependencies are added automatically and reported as alsoAdded.\n';
+      prompt += '- delete_gameobject — delete a scene object and its subtree: {"action": "delete_gameobject", "path": "Level/Enemies/Boss"}. The preview lists everything lost (objects, components) and every other scene object that points at it (a Button\'s OnClick, a serialized field) — those show as "Missing" after the delete. Prefab-instance children cannot be deleted (delete the whole instance, edit the prefab, or disable it instead).\n';
+      prompt += '- set_parent — move a scene object: {"action": "set_parent", "path": "Level/Enemies/Boss", "newParent": "Level/Bosses", "keepWorldPosition": true}. Moving changes every path under the object — the app rewrites your queued calls and earlier results, and answers calls to deleted paths itself, so use the paths from the latest tool results. Cycles are refused; a name clash at the destination is refused unless renameOnConflict: true. keepWorldPosition: false keeps the local values instead of the world pose.\n';
+      prompt += '- list_hierarchy — print the scene tree as text: {"action": "list_hierarchy"} (60 nodes, depth 2 by default): name, (off) for inactive objects, [components] (non-Transform, max 4), (+N children) where branches are cut, ×N for collapsed groups of same-named siblings, !dup where two siblings share a name. Filter with "nameContains": "Enemy" or "hasComponent": "Rigidbody" for a flat list of matching paths instead of the tree. Start here when you do not know the scene — never guess a path.\n';
+      prompt += '- create_material — create a .mat asset: {"action": "create_material", "name": "HeroMat", "shader": "Standard", "color": [1, 0.5, 0, 1]} (default folder Assets/Materials). "texture": "Assets/Textures/hero.png" sets the main texture; "metallic" and "smoothness" set those floats when the shader has them.\n';
+      prompt += '- list_assets — list asset files: {"action": "list_assets", "type": "texture"} ("texture", "material", "prefab", "scene", "audio", "script", "sprite", "animation", "font", "shader") under Assets/ (100 at most).\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
       prompt += '## Play testing\n';
       prompt += 'The loop without vision: edit, recompile, set_play_mode for 10 seconds, read the run report (errorCount, firstErrors, startCursor), readConsole since the cursor for details, fix, repeat. The model only sees what the game logs — Debug.Log and LogError are its eyes — so add DELIBERATE log lines when you need to observe something (for example "[Test] Player reached checkpoint 2"), run, and check for them.\n';
       prompt += 'Two patterns: (1) console-based test — a timed run, then read the report; (2) state probing — enter Play Mode WITHOUT a duration, wait, read values with read_component_values, then stop with {"action": "set_play_mode", "enabled": false}. To wait inside a turn, output a ```wait block with JSON {"seconds": 5} (at most 30 seconds — a bare number works too). It is just a sleep in the loop; no bridge call is involved.\n';
       prompt += 'Rule: stop Play Mode before finishing, unless the user asked to leave it running. Never edit code while the game is running — edits in Play Mode trigger recompiles that disrupt the run, so stop the game first, then touch code. Play Mode changes are lost when it stops.\n';
+      prompt += '## Scene tools\n';
+      prompt += 'Scene writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject) are previewed by the app and approved by the user — output the command and carry on; the preview and approval happen without you, and a decline means the change did not happen. Every scene write of one turn shares one Ctrl+Z in Unity: create an object and configure it in the same turn and the whole thing reverts at once.\n';
+      prompt += 'Read before you write: read_component_values returns the exact serialized names set_property needs — view them first, never guess a property name. After a move, rename, or delete, paths change: every structural action returns pathChanges, and the app rewrites your queued calls and earlier tool results to the new paths. Always use the paths from the latest tool results — a path from an earlier result may be stale. A path that was deleted is answered directly ("was deleted earlier in this session") — do not re-try it.\n';
       prompt += '## Reading and editing files\n';
       prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
       prompt += '- view — read a file in line ranges, with line numbers: {"action": "view", "path": "Assets/Scripts/Player.cs", "start": 40, "end": 80}. Omit start/end to read from the top. At most 200 lines come back at once, and the result says so when it was cut short — view the next range if you need it.\n';
@@ -6918,6 +7183,8 @@ async function switchProject(id) {
   state.activeProjectId = Number(proj.id);
   state.activeProject = proj;
   state.projectPath = proj.path || '';
+  // v0.16.0: scene paths belong to the project they came from.
+  state.pathChanges = [];
   state.projectScan = null;
   state.activeThreadId = null;
   state.activeItemId = null;

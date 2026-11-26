@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.15.0.
+// 2. package.json version is 0.16.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.15.0', pkg.version === '0.15.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.15.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.15.0 — Local'));
+check('package.json version is 0.16.0', pkg.version === '0.16.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.16.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.16.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.13.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.13.0') && bridgeCs.includes('BridgeVersion = "0.13.0"'));
-check('embedded bridge has the 0.13.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.13.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.13.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.13.0');
+check('bridge .cs has the 0.14.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.14.0') && bridgeCs.includes('BridgeVersion = "0.14.0"'));
+check('embedded bridge has the 0.14.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.14.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.14.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.14.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.13.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.13.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.13.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.14.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.14.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.14.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2892,15 +2892,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.13.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
-  bridgeCs.includes('// CodeFoxBridge version: 0.13.0')
-  && bridgeCs.includes('BridgeVersion = "0.13.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.13.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.13.0')
+check('bridge version pins are 0.14.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
+  bridgeCs.includes('// CodeFoxBridge version: 0.14.0')
+  && bridgeCs.includes('BridgeVersion = "0.14.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.14.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.14.0')
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.15.0')
+  && readme.includes('readConsole') && readme.includes('version-0.16.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3165,8 +3165,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge is now 0.13.0 (play-test loop in 0.15.0)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.13.0';"));
+check('bridge is now 0.14.0 (scene tools in 0.16.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.14.0';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3230,7 +3230,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.15.0', readme.includes('version-0.15.0'));
+check('README badge reads 0.16.0', readme.includes('version-0.16.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3494,6 +3494,174 @@ if (promptSrc) {
         }
       }
       return false;
+    })());
+}
+
+// 40. v0.16.0 — scene tools: set_property (lead), create_gameobject,
+// add_component, delete_gameobject, set_parent, GameObject
+// pseudo-component, list_hierarchy, create_material, list_assets,
+// MutationScope + ComponentTypeResolver + the app-side pathChanges
+// rewriting and the dry-run approval bar. The bridge .cs is
+// structural (it can only truly run in Rob's Unity — the first
+// compile, the prefab delete/move rules on a real instance,
+// SetTransformParent pose preservation, CreatePrimitive materials
+// under URP/HDRP, GetUniqueNameForSibling(null) for scene roots,
+// the reference-scan cost on a big scene, and CollapseUndoOperations
+// merging across ticks are all proven there); the app-side path
+// rewriting, preview labels, and prompt text are plain Node and
+// are tested directly.
+check('bridge .cs registers all eight new scene actions', [
+  '"set_property"', '"create_gameobject"', '"add_component"', '"delete_gameobject"',
+  '"set_parent"', '"list_hierarchy"', '"create_material"', '"list_assets"',
+].every(a => bridgeCs.includes('{ ' + a + ',')));
+check('bridge .cs has the scene helpers and handlers, no Newtonsoft', [
+  'static class MutationScope', 'static class ComponentTypeResolver', 'static class SceneHelpers',
+  'static class SetPropertyHandler', 'static class CreateGameObjectHandler', 'static class AddComponentHandler',
+  'static class DeleteGameObjectHandler', 'static class SetParentHandler', 'static class ListHierarchyHandler',
+  'static class CreateMaterialHandler', 'static class ListAssetsHandler',
+].every(n => bridgeCs.includes(n)) && !bridgeCs.includes('Newtonsoft') && !bridgeCs.includes('using Newtonsoft'));
+check('bridge .cs scene actions use the shared mutation scope and the GameObject pseudo-component', [
+  'MutationScope.PlayModeError', 'MutationScope.BeginUndoGroup', 'MutationScope.Commit',
+  'MutationScope.PlayModeWarning', 'ComponentTypeResolver.TryResolve', 'ComponentLocator.GetPath',
+  '"GameObject"', 'expectedBefore', 'expectedLostObjects', 'renameOnConflict', 'keepWorldPosition',
+].every(n => bridgeCs.includes(n)));
+check('bridge .cs set_property stages on SerializedObject (all-or-nothing) and guards the GameObject rules', [
+  'ApplyModifiedProperties()', 'Preview: ', 'IsPersistent', 'm_Script',
+  'DescribeStaged', 'Nothing was changed', 'expectedBefore', 'allowPlayMode',
+].every(n => bridgeCs.includes(n)));
+check('bridge .cs delete preview scans inbound references under a time budget and list_hierarchy collapses siblings', [
+  'InboundReference', 'inboundReferences', 'scanComplete', 'lostObjects', 'lostCount',
+  'GroupByBaseName', 'CollapseThreshold', 'collapsedCount', 'hiddenChildren', '!dup',
+  'shownSet', 'maxNodes', 'MaxFindResults',
+].every(n => bridgeCs.includes(n)));
+check('app.js has the scene path-change machinery and the dry-run approval flow', [
+  'rewriteScenePath', 'rewriteToolResultPaths', 'applyPathChanges', 'resolveSceneCommandPaths',
+  'showSceneApprovalBar', 'scenePreviewLabel', 'sceneDeclineText', 'SCENE_WRITE_ACTIONS', 'SCENE_PATH_ACTIONS',
+  "turnId: 'turn-'", 'expectedBefore', 'expectedLostObjects', 'state.pathChanges = []',
+].every(n => appJs.includes(n)));
+check('app.js unity-command branch resolves paths, dry-runs scene writes, and records pathChanges', [
+  'resolveSceneCommandPaths(action.command)', "pathResolution.dead", 'was deleted earlier in this session',
+  "dryRun: true", "dryRun: false", 'showSceneApprovalBar({ label: scenePreviewLabel',
+  'applyPathChanges(res.data.pathChanges)', 'rewrittenNote',
+].every(n => appJs.includes(n)));
+check('README has the Scene tools section + CHANGELOG has the 0.16.0 entry',
+  readme.includes('### Scene tools') && readme.includes('set_property') && readme.includes('list_hierarchy')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.16.0 — 2026-11-26')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Scene tools — edit the open scene directly'));
+const rewritePathSrc = extractFunction(appJs, 'rewriteScenePath');
+const rewriteResultsSrc = extractFunction(appJs, 'rewriteToolResultPaths');
+const resolveCmdSrc = extractFunction(appJs, 'resolveSceneCommandPaths');
+const applyChangesSrc = extractFunction(appJs, 'applyPathChanges');
+const previewLabelSrc = extractFunction(appJs, 'scenePreviewLabel');
+const shortValueSrc = extractFunction(appJs, 'shortValue');
+const declineTextSrc = extractFunction(appJs, 'sceneDeclineText');
+check('scene path helpers are extractable for testing',
+  !!rewritePathSrc && !!rewriteResultsSrc && !!resolveCmdSrc && !!applyChangesSrc && !!previewLabelSrc && !!shortValueSrc && !!declineTextSrc);
+if (rewritePathSrc && rewriteResultsSrc && resolveCmdSrc && applyChangesSrc && previewLabelSrc && shortValueSrc && declineTextSrc) {
+  const rewriteScenePath = new Function(rewritePathSrc + '\nreturn rewriteScenePath;')();
+  const rewriteToolResultPaths = new Function(rewriteResultsSrc + '\nreturn rewriteToolResultPaths;')();
+  const scenePreviewLabel = new Function(shortValueSrc + '\n' + previewLabelSrc + '\nreturn scenePreviewLabel;')();
+  const sceneDeclineText = new Function(declineTextSrc + '\nreturn sceneDeclineText;')();
+  const changes16 = [
+    { from: 'Level/Enemies/Boss', to: 'Level/Bosses/Boss' },
+    { from: 'Player', to: null },
+  ];
+  check('rewriteScenePath: prefix rewrite, boundary (Level/Enemy never matches Level/EnemyBoss), dead path, chained moves',
+    rewriteScenePath('Level/Enemies/Boss', changes16).path === 'Level/Bosses/Boss'
+    && rewriteScenePath('Level/Enemies/Boss/Weapon', changes16).path === 'Level/Bosses/Boss/Weapon'
+    && rewriteScenePath('Level/EnemyBoss', [{ from: 'Level/Enemy', to: 'Level/Foe' }]).path === 'Level/EnemyBoss'
+    && rewriteScenePath('Player', changes16).dead === true
+    && rewriteScenePath('Player/Weapon', changes16).dead === true
+    && rewriteScenePath('Canvas/Panel', changes16).path === 'Canvas/Panel'
+    && rewriteScenePath('A/B', [{ from: 'A', to: 'B' }, { from: 'B', to: 'C' }]).path === 'C/B');
+  check('rewriteToolResultPaths: rewrites tool text, marks deleted paths, leaves asset files alone',
+    rewriteToolResultPaths('read Player: speed 5', changes16) === 'read Player (deleted): speed 5'
+    && rewriteToolResultPaths('see Level/Enemies/Boss', changes16) === 'see Level/Bosses/Boss'
+    && rewriteToolResultPaths('opened Level/Enemy.prefab', [{ from: 'Level/Enemy', to: 'Level/Foe' }]) === 'opened Level/Enemy.prefab'
+    && rewriteToolResultPaths('Level/Enemies/Boss/Weapon', changes16) === 'Level/Bosses/Boss/Weapon');
+  check('resolveSceneCommandPaths: rewrites path args, reports dead paths, ignores non-scene commands',
+    (() => {
+      const resolveWith = new Function('state', rewritePathSrc + '\n' + resolveCmdSrc + '\nreturn resolveSceneCommandPaths;')({ pathChanges: changes16 });
+      const moved = resolveWith({ action: 'read_component_values', path: 'Level/Enemies/Boss' });
+      const moved2 = resolveWith({ action: 'set_parent', path: 'Level/Enemies/Boss', newParent: 'Level' });
+      const dead = resolveWith({ action: 'set_property', path: 'Player', component: 'X' });
+      const none = resolveWith({ action: 'createPrefab', name: 'Foo' });
+      return moved.rewrittenPaths.length === 1 && moved.rewrittenPaths[0].path === 'Level/Bosses/Boss'
+        && moved2.rewrittenPaths.length === 1 && moved2.rewrittenPaths[0].key === 'path'
+        && dead.dead === true && dead.deadPath === 'Player'
+        && none.rewrittenPaths.length === 0 && none.dead === false;
+    })());
+  check('applyPathChanges: extends the map and rewrites earlier tool results, never user messages',
+    (() => {
+      const st = {
+        pathChanges: [],
+        messages: [
+          { role: 'user', content: 'Tool result — Unity command "read_component_values": Player speed 5' },
+          { role: 'user', content: 'delete the Player object' },
+          { role: 'assistant', content: 'Player is at speed 5' },
+        ],
+      };
+      const apply = new Function('state', rewriteResultsSrc + '\n' + applyChangesSrc + '\nreturn applyPathChanges;')(st);
+      apply([{ from: 'Player', to: null }]);
+      return st.pathChanges.length === 1 && st.pathChanges[0].to === null
+        && st.messages[0].content.includes('Player (deleted)')
+        && st.messages[1].content === 'delete the Player object'
+        && st.messages[2].content === 'Player is at speed 5';
+    })());
+  check('scene preview labels name the action, the path, and the diff; decline text says nothing changed',
+    scenePreviewLabel('set_property', { path: 'Player', component: 'PlayerController' }, { changes: [{ property: 'moveSpeed', before: 5, after: 8 }] }).includes('moveSpeed 5 → 8')
+    && scenePreviewLabel('delete_gameobject', { path: 'Level/Enemies/Boss' }, { lostCount: 4, inboundReferences: [{ path: 'Canvas/Button' }] }).includes('4 object(s)') && scenePreviewLabel('delete_gameobject', { path: 'X' }, { lostCount: 1, inboundReferences: [] }).includes('no broken references')
+    && scenePreviewLabel('create_gameobject', { name: 'Boss' }, { path: 'Level/Boss', renamed: true }).includes('(renamed)')
+    && scenePreviewLabel('set_parent', { path: 'A' }, { newPath: 'B/C', descendantCount: 3 }).includes('3 descendant(s)')
+    && sceneDeclineText('delete_gameobject', { path: 'Level/Enemies/Boss' }, {}).includes('nothing deleted')
+    && sceneDeclineText('set_property', { path: 'Player', component: 'PlayerController' }, {}).includes('no changes made'));
+}
+if (promptSrc) {
+  const buildPrompt16 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt16 = buildPrompt16(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the scene actions and the Scene tools section',
+    agentPrompt16.includes('## Scene tools')
+    && agentPrompt16.includes('"action": "set_property"')
+    && agentPrompt16.includes('"action": "create_gameobject"')
+    && agentPrompt16.includes('"action": "add_component"')
+    && agentPrompt16.includes('"action": "delete_gameobject"')
+    && agentPrompt16.includes('"action": "set_parent"')
+    && agentPrompt16.includes('"action": "list_hierarchy"')
+    && agentPrompt16.includes('"action": "create_material"')
+    && agentPrompt16.includes('"action": "list_assets"'));
+  check('agent prompt teaches read-before-write, one Ctrl+Z per turn, and the pathChanges convention',
+    agentPrompt16.includes('read_component_values returns the exact serialized names set_property needs')
+    && agentPrompt16.includes('one Ctrl+Z')
+    && agentPrompt16.includes('pathChanges')
+    && agentPrompt16.includes('Always use the paths from the latest tool results')
+    && agentPrompt16.includes('was deleted earlier in this session'));
+  check('the scene examples in the built prompt are valid JSON',
+    (() => {
+      const section = agentPrompt16.slice(agentPrompt16.indexOf('## Unity — prefabs'), agentPrompt16.indexOf('## Reading and editing files'));
+      const actions = ['set_property', 'create_gameobject', 'add_component', 'delete_gameobject', 'set_parent', 'list_hierarchy', 'create_material', 'list_assets'];
+      for (const a of actions) {
+        const start = section.indexOf('{"action": "' + a + '"');
+        if (start < 0) return false;
+        let depth = 0;
+        let closed = false;
+        for (let i = start; i < section.length; i++) {
+          if (section[i] === '{') depth++;
+          else if (section[i] === '}') {
+            depth--;
+            if (depth === 0) {
+              try { JSON.parse(section.slice(start, i + 1)); } catch { return false; }
+              closed = true;
+              break;
+            }
+          }
+        }
+        if (!closed) return false;
+      }
+      return true;
     })());
 }
 

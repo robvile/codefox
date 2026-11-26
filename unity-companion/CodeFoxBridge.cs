@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.13.0
+// CodeFoxBridge version: 0.14.0
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -128,6 +128,54 @@
 //     injected input; the action fails plainly and says so.
 //   { "action": "click_ui", "path": "Canvas/MainMenu/PlayButton" }
 //     — click a UI Button (or any click handler) while the game runs.
+// Scene tools (v0.14.0) — edit the scene itself, with the same
+// undo trail the user controls: one Ctrl+Z per agent turn covers
+// every scene write of that turn, and every structural change
+// reports pathChanges so the app can rewrite later calls to the
+// new paths. Write actions dry-run first — the app shows the
+// preview and the user approves before anything is applied:
+//   { "action": "set_property", "path": "Player", "component": "PlayerController", "changes": [{"property": "moveSpeed", "value": 8}] }
+//     — set Inspector values, all or nothing (one bad change fails
+//     the whole call, nothing half-modified). Property names are
+//     Unity's serialized names (Transform m_LocalPosition,
+//     Rigidbody m_Mass, your own scripts use the field name) —
+//     read them with read_component_values first, never guess.
+//     component "GameObject" targets the object itself (m_Name,
+//     m_IsActive, m_TagString, m_Layer); a rename emits
+//     pathChanges. Scene objects only, never prefab assets.
+//     expectedBefore rejects the apply when a property changed
+//     since the preview.
+//   { "action": "create_gameobject", "name": "Boss", "parent": "Level/Enemies", "primitive": "Cube", "position": [0, 1, 0], "components": ["Rigidbody"] }
+//     — create an object; names are made unique among siblings
+//     and the result tells you the final path. Takes no property
+//     values — configure with set_property afterwards, in the
+//     same turn, so one Ctrl+Z reverts the whole thing.
+//   { "action": "add_component", "path": "Player", "type": "Rigidbody" }
+//     — add a component; types resolve through TypeCache, and a
+//     script you just wrote is not there until the project
+//     compiles. [RequireComponent] dependencies are added
+//     automatically and reported as alsoAdded.
+//   { "action": "delete_gameobject", "path": "Level/Enemies/Boss" }
+//     — delete an object and its subtree. The preview lists what
+//     is lost and every other scene object that points at it
+//     (those show as "Missing" after the delete); the real call
+//     refuses when the subtree changed since the preview.
+//     Prefab-instance children cannot be deleted.
+//   { "action": "set_parent", "path": "Level/Enemies/Boss", "newParent": "Level/Bosses", "keepWorldPosition": true }
+//     — move an object; every path under it changes, reported as
+//     pathChanges. Cycles are refused; a name clash at the
+//     destination is refused unless renameOnConflict is true.
+//   { "action": "list_hierarchy" }
+//     — print the scene tree as text (60 nodes, depth 2 by
+//     default): name, (off) for inactive objects, [components],
+//     (+N children) where branches are cut, ×N for collapsed
+//     groups of same-named siblings, !dup where two siblings
+//     share a name. "nameContains" / "hasComponent" return a flat
+//     list of matching paths instead.
+//   { "action": "create_material", "name": "HeroMat", "shader": "Standard", "color": [1, 0.5, 0, 1] }
+//     — create a .mat asset (default folder Assets/Materials).
+//   { "action": "list_assets", "type": "texture" }
+//     — list asset files under Assets/ by type.
 // Props take strings, numbers, bools, [x,y(,z)] vectors, [r,g,b(,a)]
 // colours (or "#rrggbb"), enum names, and asset paths (Assets/…) for
 // Sprite / Material / Texture2D / Font / AudioClip. An unknown type,
@@ -138,6 +186,8 @@
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.Compilation;
+using UnityEditor.SceneManagement;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
@@ -158,12 +208,16 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
-    // 0.13.0 is the first bridge with the play-test loop
+    // 0.14.0 is the first bridge with the scene tools
+    // (set_property, create_gameobject, add_component,
+    // delete_gameobject, set_parent, list_hierarchy,
+    // create_material, list_assets). 0.13.0 is the first bridge
+    // with the play-test loop
     // (set_play_mode, read_component_values, inject_input,
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.13.0";
+    public const string BridgeVersion = "0.14.0";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -628,6 +682,14 @@ public static class CodeFoxBridge
                 { "recompile_and_report_errors", (json, args) => CompileReport.Begin(json, args) },
                 { "set_play_mode", (json, args) => PlayMode.Begin(json, args) },
                 { "read_component_values", (json, args) => ReadComponentValuesHandler.Handle(json, args) },
+                { "set_property", (json, args) => SetPropertyHandler.Handle(json, args) },
+                { "create_gameobject", (json, args) => CreateGameObjectHandler.Handle(json, args) },
+                { "add_component", (json, args) => AddComponentHandler.Handle(json, args) },
+                { "delete_gameobject", (json, args) => DeleteGameObjectHandler.Handle(json, args) },
+                { "set_parent", (json, args) => SetParentHandler.Handle(json, args) },
+                { "list_hierarchy", (json, args) => ListHierarchyHandler.Handle(json, args) },
+                { "create_material", (json, args) => CreateMaterialHandler.Handle(json, args) },
+                { "list_assets", (json, args) => ListAssetsHandler.Handle(json, args) },
                 { "click_ui", (json, args) => ClickUI(json, args) },
 #if ENABLE_INPUT_SYSTEM
                 { "inject_input", (json, args) => InjectInputHandler.Begin(json, args) },
@@ -3692,6 +3754,1744 @@ public static class CodeFoxBridge
         }
     }
 #endif
+
+    // ── Shared mutation helpers ──────────────────────────────
+    // Three scene write actions share the same shape — a Play
+    // Mode guard, one undo group per agent turn, and a scene-dirty
+    // mark at the end — so they live in one helper instead of
+    // three copies that drift apart. A "turn" is one agent turn
+    // (the app passes turnId); the first mutation of the turn
+    // opens the group and later calls in the same turn merge into
+    // it, so one Ctrl+Z reverts the whole turn.
+    private static class MutationScope
+    {
+        private const string TurnIdKey = "CodeFox.Mutation.TurnId";
+        private const string GroupKey = "CodeFox.Mutation.Group";
+        public const string PlayModeWarning = "Play Mode: these changes will be lost when Play Mode stops.";
+
+        // Returns an error message when the call must not run, or
+        // null when it may. A dry run never changes anything, so
+        // it is always allowed — the preview is the point. A real
+        // call while the game runs needs allowPlayMode.
+        public static string PlayModeError(Dictionary<string, object> args, bool dryRun)
+        {
+            if (dryRun) return null;
+            if (!EditorApplication.isPlayingOrWillChangePlaymode) return null;
+            if (JBool(args, "allowPlayMode", false)) return null;
+            return "Stop Play Mode first — changes made while the game is running are lost when it stops. Pass \"allowPlayMode\": true to experiment anyway.";
+        }
+
+        public static int BeginUndoGroup(Dictionary<string, object> args, string defaultLabel)
+        {
+            string turnId = JStr(args, "turnId", "");
+            string label = JStr(args, "label", defaultLabel);
+            if (!string.IsNullOrEmpty(turnId) && SessionState.GetString(TurnIdKey, "") == turnId)
+                return SessionState.GetInt(GroupKey, 0);
+            int group = Undo.GetCurrentGroup();
+            if (group < 0) { Undo.IncrementCurrentGroup(); group = Undo.GetCurrentGroup(); }
+            Undo.SetCurrentGroupName("Agent: " + label);
+            SessionState.SetString(TurnIdKey, string.IsNullOrEmpty(turnId) ? Guid.NewGuid().ToString() : turnId);
+            SessionState.SetInt(GroupKey, group);
+            return group;
+        }
+
+        public static void Commit(int undoGroup, Scene scene)
+        {
+            Undo.CollapseUndoOperations(undoGroup);
+            if (!EditorApplication.isPlaying && scene.IsValid())
+                EditorSceneManager.MarkSceneDirty(scene);
+        }
+    }
+
+    // ── Component type resolution ────────────────────────────
+    // TypeCache is the fast, public editor API for "what
+    // components exist". A script the model just wrote is not in
+    // it until the project compiles, so a miss points back at
+    // recompile_and_report_errors instead of guessing. Editor-only
+    // types are filtered out — the model cannot add an editor
+    // component to a game object.
+    private static class ComponentTypeResolver
+    {
+        private static readonly string[] Primitives = { "Cube", "Sphere", "Capsule", "Cylinder", "Plane", "Quad" };
+
+        public static bool TryResolve(string name, out Type type, out string error)
+        {
+            type = null; error = null;
+            if (string.IsNullOrEmpty(name))
+            {
+                error = "'type' is required.";
+                return false;
+            }
+            string n = name.Trim();
+            var fullMatches = new List<Type>();
+            var shortMatches = new List<Type>();
+            foreach (Type t in TypeCache.GetTypesDerivedFrom<Component>())
+            {
+                if (!IsAddableComponent(t)) continue;
+                if (string.Equals(t.FullName, n, StringComparison.OrdinalIgnoreCase)) fullMatches.Add(t);
+                else if (string.Equals(t.Name, n, StringComparison.OrdinalIgnoreCase)) shortMatches.Add(t);
+            }
+            // Full name first — unambiguous when the model gives it.
+            if (fullMatches.Count == 1) { type = fullMatches[0]; return true; }
+            if (fullMatches.Count > 1)
+            {
+                var fullNames = new List<string>();
+                foreach (Type t in fullMatches) fullNames.Add(t.FullName);
+                error = "Ambiguous component type '" + name + "' — use the full name. Matches: " + string.Join(", ", fullNames.ToArray()) + ".";
+                return false;
+            }
+            if (shortMatches.Count == 0)
+            {
+                var similar = SuggestTypeNames(n);
+                error = "Unknown component type '" + name + "'."
+                    + (similar.Count > 0 ? " Similar: " + string.Join(", ", similar.ToArray()) + "." : "")
+                    + " If you just wrote this script, run recompile_and_report_errors first, and make sure the class name matches its file name.";
+                return false;
+            }
+            // Prefer an exact-case short-name match when several
+            // namespaces share a name.
+            foreach (Type t in shortMatches)
+                if (string.Equals(t.Name, n, StringComparison.Ordinal)) { type = t; return true; }
+            if (shortMatches.Count == 1) { type = shortMatches[0]; return true; }
+            var names = new List<string>();
+            foreach (Type t in shortMatches) names.Add(t.FullName);
+            error = "Ambiguous component type '" + name + "' — use the full name. Matches: " + string.Join(", ", names.ToArray()) + ".";
+            return false;
+        }
+
+        private static bool IsAddableComponent(Type t)
+        {
+            if (t == null || !t.IsClass || t.IsAbstract || t.IsGenericTypeDefinition) return false;
+            if (!typeof(Component).IsAssignableFrom(t)) return false;
+            if (t.Namespace != null && (t.Namespace == "UnityEditor" || t.Namespace.StartsWith("UnityEditor.", StringComparison.Ordinal))) return false;
+            if (t.Assembly == typeof(UnityEditor.Editor).Assembly) return false;
+            return true;
+        }
+
+        public static List<string> SuggestTypeNames(string wanted)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Type t in TypeCache.GetTypesDerivedFrom<Component>())
+                if (IsAddableComponent(t)) names.Add(t.Name);
+            var scored = new List<KeyValuePair<string, int>>();
+            foreach (string name in names)
+            {
+                int d;
+                if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0) d = 0;
+                else d = Levenshtein(wanted.ToLowerInvariant(), name.ToLowerInvariant());
+                if (d <= 2) scored.Add(new KeyValuePair<string, int>(name, d));
+            }
+            scored.Sort((a, b) => a.Value != b.Value ? a.Value.CompareTo(b.Value) : string.Compare(a.Key, b.Key, StringComparison.Ordinal));
+            var result = new List<string>();
+            foreach (var kv in scored) { if (result.Count >= 8) break; result.Add(kv.Key); }
+            return result;
+        }
+
+        private static int Levenshtein(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a)) return string.IsNullOrEmpty(b) ? 0 : b.Length;
+            if (string.IsNullOrEmpty(b)) return a.Length;
+            int[] prev = new int[b.Length + 1];
+            int[] cur = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = j;
+            for (int i = 1; i <= a.Length; i++)
+            {
+                cur[0] = i;
+                for (int j = 1; j <= b.Length; j++)
+                {
+                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                }
+                int[] tmp = prev; prev = cur; cur = tmp;
+            }
+            return prev[b.Length];
+        }
+
+        public static bool IsPrimitive(string name, out PrimitiveType primitive)
+        {
+            primitive = PrimitiveType.Cube;
+            if (string.IsNullOrEmpty(name)) return false;
+            try { primitive = (PrimitiveType)Enum.Parse(typeof(PrimitiveType), name.Trim(), true); return true; }
+            catch { return false; }
+        }
+
+        public static string PrimitiveOptions()
+        {
+            return string.Join(", ", Primitives);
+        }
+    }
+
+    // ── Shared scene helpers ─────────────────────────────────
+    // Small helpers the scene actions share: component name
+    // lists, the DisallowMultipleComponent check,
+    // RequireComponent dependents, unique sibling names, subtree
+    // walks, and short value descriptions for messages.
+    private static class SceneHelpers
+    {
+        public static List<string> ComponentNames(GameObject go)
+        {
+            var names = new List<string>();
+            foreach (Component c in go.GetComponents<Component>())
+                if (c != null) names.Add(c.GetType().Name);
+            return names;
+        }
+
+        public static List<string> ComponentNames(List<Type> types)
+        {
+            var names = new List<string>();
+            foreach (Type t in types) names.Add(t.Name);
+            return names;
+        }
+
+        public static bool HasDisallowMultiple(Type t)
+        {
+            return t.IsDefined(typeof(DisallowMultipleComponent), true);
+        }
+
+        // The [RequireComponent] dependents of a type, one level —
+        // what Undo.AddComponent would add on its own.
+        public static List<string> RequiredComponentNames(List<Type> types)
+        {
+            var names = new List<string>();
+            foreach (Type t in types)
+            {
+                foreach (RequireComponent attr in t.GetCustomAttributes(typeof(RequireComponent), true))
+                {
+                    foreach (Type req in new[] { attr.m_Type0, attr.m_Type1, attr.m_Type2 })
+                    {
+                        if (req == null) continue;
+                        if (names.Contains(req.Name)) continue;
+                        names.Add(req.Name);
+                    }
+                }
+            }
+            return names;
+        }
+
+        public static string UniqueSiblingName(Transform parent, string name)
+        {
+            try { return GameObjectUtility.GetUniqueNameForSibling(parent, name); }
+            catch
+            {
+                // GetUniqueNameForSibling is believed to accept a
+                // null parent for scene roots — if it does not,
+                // number by hand the same way.
+                var taken = new HashSet<string>();
+                if (parent == null)
+                {
+                    foreach (GameObject root in ComponentLocator.EnumerateRoots()) taken.Add(root.name);
+                }
+                else
+                {
+                    foreach (Transform child in parent) taken.Add(child.name);
+                }
+                if (!taken.Contains(name)) return name;
+                int i = 1;
+                while (taken.Contains(name + " (" + i + ")")) i++;
+                return name + " (" + i + ")";
+            }
+        }
+
+        public static string DefinedLayers()
+        {
+            var names = new List<string>();
+            for (int i = 0; i < 32; i++)
+            {
+                string n = LayerMask.LayerToName(i);
+                if (!string.IsNullOrEmpty(n)) names.Add(n);
+            }
+            return string.Join(", ", names.ToArray());
+        }
+
+        // The object and every descendant, breadth-first.
+        public static List<GameObject> CollectSubtree(GameObject root)
+        {
+            var collected = new List<GameObject>();
+            var queue = new Queue<Transform>();
+            queue.Enqueue(root.transform);
+            while (queue.Count > 0)
+            {
+                Transform t = queue.Dequeue();
+                collected.Add(t.gameObject);
+                foreach (Transform child in t) queue.Enqueue(child);
+            }
+            return collected;
+        }
+
+        // Instance ids of the objects and their components — a
+        // serialized field points at the component, not the
+        // GameObject, so both belong in the deleted set.
+        public static HashSet<int> DeletedInstanceIds(List<GameObject> subtree)
+        {
+            var ids = new HashSet<int>();
+            foreach (GameObject go in subtree)
+            {
+                ids.Add(go.GetInstanceID());
+                foreach (Component c in go.GetComponents<Component>())
+                    if (c != null) ids.Add(c.GetInstanceID());
+            }
+            return ids;
+        }
+
+        // A short description of a JSON value for messages.
+        public static string DescribeValue(object v)
+        {
+            if (v == null) return "null";
+            return TruncateString(JsonWrite(v) ?? "null", 60);
+        }
+    }
+
+    // ── set_property ─────────────────────────────────────────
+    // Set Inspector values on a scene object, in a batch that is
+    // all-or-nothing: every change is staged on an in-memory
+    // SerializedObject first, and nothing touches the real
+    // component until ApplyModifiedProperties(). One typo in five
+    // changes is a clear error and a clean project, never a
+    // half-modified one. SerializedObject — not reflection — so
+    // the apply records Undo and handles prefab-instance
+    // overrides correctly, and one Ctrl+Z per agent turn covers
+    // the whole turn (see MutationScope). The app never trusts a
+    // flag from the model: it calls dryRun, shows the diff, and
+    // only then repeats the identical call with dryRun:false —
+    // the bridge just does what it is told. dryRun reports REAL
+    // before/after values after normalization, because the
+    // changes are staged in memory first. expectedBefore rejects
+    // the apply when a property changed since the preview (the
+    // user editing in the Inspector while the approval card is
+    // open). component "GameObject" targets the GameObject
+    // itself (m_Name, m_IsActive, m_TagString, m_Layer) — a
+    // rename emits pathChanges, so the app can rewrite later
+    // calls to the new path.
+    private static class SetPropertyHandler
+    {
+        private const int MaxChanges = 20;
+        private static readonly string[] InternalProperties = { "m_Script", "m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset", "m_GameObject", "m_EditorHideFlags", "m_EditorClassIdentifier" };
+
+        private class StagedChange { public string property; public object before; public object value; }
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string path = JStr(args, "path", "");
+            if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+            if (matches.Count != 1)
+                return BridgeResult.Error(matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+            GameObject target = matches[0];
+            if (EditorUtility.IsPersistent(target))
+                return BridgeResult.Error("'" + path + "' is an asset, not a scene object — set_property only works on scene objects. Use modifyPrefab for prefab assets.");
+            string componentName = JStr(args, "component", "");
+            if (string.IsNullOrEmpty(componentName)) return BridgeResult.Error("'component' is required.");
+            UnityEngine.Object serializedTarget;
+            string resolvedComponent;
+            if (string.Equals(componentName, "GameObject", StringComparison.OrdinalIgnoreCase))
+            {
+                serializedTarget = target;
+                resolvedComponent = "GameObject";
+            }
+            else
+            {
+                if (!ComponentLocator.TryResolve(args, out Component component, out string locateError))
+                    return BridgeResult.Error(locateError);
+                serializedTarget = component;
+                resolvedComponent = component.GetType().Name;
+            }
+            List<object> rawChanges = JArr(args, "changes");
+            if (rawChanges == null || rawChanges.Count == 0)
+                return BridgeResult.Error("'changes' is required — a list of {\"property\": ..., \"value\": ...}.");
+            if (rawChanges.Count > MaxChanges)
+                return BridgeResult.Error("At most " + MaxChanges + " changes per call — split the batch.");
+            // Stage everything in memory first. Nothing is applied
+            // until every change validates.
+            var so = new SerializedObject(serializedTarget);
+            so.Update();
+            var staged = new List<StagedChange>();
+            var problems = new List<string>();
+            foreach (object raw in rawChanges)
+            {
+                var change = raw as Dictionary<string, object>;
+                if (change == null) { problems.Add("Each change must be an object {\"property\": ..., \"value\": ...}."); continue; }
+                string property = JStr(change, "property", "");
+                if (string.IsNullOrEmpty(property)) { problems.Add("Each change needs a \"property\" name."); continue; }
+                SerializedProperty p = so.FindProperty(property);
+                if (p == null)
+                {
+                    problems.Add("Unknown property '" + property + "' on " + resolvedComponent + "." + SimilarPropertiesText(so, property));
+                    continue;
+                }
+                if (p.name == "m_Script") { problems.Add("'m_Script' cannot be set — it is the script reference itself."); continue; }
+                if (IsInternalProperty(p.name)) { problems.Add("'" + property + "' is an internal property and cannot be set."); continue; }
+                object before = ReadComponentValuesHandler.ReadProperty(p, 0);
+                object expected = null;
+                bool hasExpected = change.TryGetValue("expectedBefore", out expected) && expected != null;
+                if (hasExpected && !ExpectedMatches(p, before, expected))
+                {
+                    problems.Add("'" + property + "' changed since the preview (expected " + SceneHelpers.DescribeValue(expected) + ", now " + SceneHelpers.DescribeValue(before) + ") — run the preview again.");
+                    continue;
+                }
+                object value = change.ContainsKey("value") ? change["value"] : null;
+                string assignError;
+                if (!TryAssignProperty(p, value, out assignError))
+                {
+                    problems.Add(assignError);
+                    continue;
+                }
+                staged.Add(new StagedChange { property = property, before = before, value = value });
+            }
+            if (problems.Count > 0)
+                return BridgeResult.Error("Nothing was changed — " + problems.Count + " problem(s): " + string.Join(" ", problems.ToArray()));
+            string oldPath = ComponentLocator.GetPath(target.transform);
+            if (dryRun)
+            {
+                var data = new Dictionary<string, object>();
+                data["path"] = oldPath;
+                data["component"] = resolvedComponent;
+                data["changes"] = DescribeStaged(so, staged);
+                data["dryRun"] = true;
+                return BridgeResult.Ok("Preview: " + DescribeChanges(oldPath, resolvedComponent, (List<object>)data["changes"]) + " (nothing changed yet).", null, JsonWrite(data));
+            }
+            Scene scene = target.scene;
+            int undoGroup = MutationScope.BeginUndoGroup(args, "set " + resolvedComponent + " on " + target.name);
+            so.ApplyModifiedProperties();
+            so.Update();
+            // Read-back: confirm what actually landed, and catch a
+            // silently rejected reference.
+            var afterOut = DescribeStaged(so, staged);
+            var readbackProblems = new List<string>();
+            foreach (StagedChange s in staged)
+            {
+                SerializedProperty p = so.FindProperty(s.property);
+                if (p != null && p.propertyType == SerializedPropertyType.ObjectReference && s.value != null)
+                {
+                    object after = ReadComponentValuesHandler.ReadProperty(p, 0);
+                    if (after == null)
+                        readbackProblems.Add("'" + s.property + "': Unity rejected the reference — the assigned object is not compatible with this property.");
+                }
+            }
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = ComponentLocator.GetPath(target.transform);
+            resultData["component"] = resolvedComponent;
+            resultData["changes"] = afterOut;
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            var pathChanges = new List<object>();
+            string newPath = ComponentLocator.GetPath(target.transform);
+            if (newPath != oldPath)
+            {
+                var pc = new Dictionary<string, object>();
+                pc["from"] = oldPath;
+                pc["to"] = newPath;
+                pathChanges.Add(pc);
+            }
+            resultData["pathChanges"] = pathChanges;
+            string message = DescribeChanges(newPath, resolvedComponent, afterOut);
+            if (readbackProblems.Count > 0)
+                message += " — " + string.Join(" ", readbackProblems.ToArray());
+            return BridgeResult.Ok(message, null, JsonWrite(resultData));
+        }
+
+        private static List<object> DescribeStaged(SerializedObject so, List<StagedChange> staged)
+        {
+            var out_ = new List<object>();
+            foreach (StagedChange s in staged)
+            {
+                SerializedProperty p = so.FindProperty(s.property);
+                var d = new Dictionary<string, object>();
+                d["property"] = s.property;
+                d["before"] = s.before;
+                d["after"] = p != null ? ReadComponentValuesHandler.ReadProperty(p, 0) : null;
+                out_.Add(d);
+            }
+            return out_;
+        }
+
+        private static string DescribeChanges(string path, string component, List<object> changes)
+        {
+            var parts = new List<string>();
+            foreach (object raw in changes)
+            {
+                var d = raw as Dictionary<string, object>;
+                if (d == null) continue;
+                parts.Add(JStr(d, "property", "?") + " " + SceneHelpers.DescribeValue(d["before"]) + " → " + SceneHelpers.DescribeValue(d["after"]));
+            }
+            return path + " / " + component + ": " + string.Join(", ", parts.ToArray());
+        }
+
+        private static bool IsInternalProperty(string name)
+        {
+            foreach (string n in InternalProperties) if (n == name) return true;
+            return false;
+        }
+
+        private static string SimilarPropertiesText(SerializedObject so, string wanted)
+        {
+            var names = new List<string>();
+            SerializedProperty it = so.GetIterator();
+            if (it.NextVisible(true))
+            {
+                do { if (!IsInternalProperty(it.name)) names.Add(it.name); }
+                while (it.NextVisible(false));
+            }
+            var scored = new List<KeyValuePair<string, int>>();
+            foreach (string name in names)
+            {
+                int d;
+                if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0) d = 0;
+                else d = LevenshteinDistance(name.ToLowerInvariant(), wanted.ToLowerInvariant());
+                if (d <= 2) scored.Add(new KeyValuePair<string, int>(name, d));
+            }
+            scored.Sort((a, b) => a.Value != b.Value ? a.Value.CompareTo(b.Value) : string.Compare(a.Key, b.Key, StringComparison.Ordinal));
+            var result = new List<string>();
+            foreach (var kv in scored) { if (result.Count >= 8) break; result.Add(kv.Key); }
+            return result.Count > 0 ? " Similar: " + string.Join(", ", result.ToArray()) + "." : "";
+        }
+
+        private static int LevenshteinDistance(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a)) return string.IsNullOrEmpty(b) ? 0 : b.Length;
+            if (string.IsNullOrEmpty(b)) return a.Length;
+            int[] prev = new int[b.Length + 1];
+            int[] cur = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = j;
+            for (int i = 1; i <= a.Length; i++)
+            {
+                cur[0] = i;
+                for (int j = 1; j <= b.Length; j++)
+                {
+                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                }
+                int[] tmp = prev; prev = cur; cur = tmp;
+            }
+            return prev[b.Length];
+        }
+
+        // One JSON value as N numbers (a JSON array of numbers).
+        // Internal so create_gameobject and create_material share it.
+        internal static bool TryReadNumbers(object v, int count, out float[] nums)
+        {
+            nums = null;
+            var list = v as List<object>;
+            if (list == null || list.Count != count) return false;
+            var result = new float[count];
+            for (int i = 0; i < count; i++)
+            {
+                if (list[i] is double) result[i] = (float)(double)list[i];
+                else if (list[i] is string)
+                {
+                    float f;
+                    if (!float.TryParse((string)list[i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return false;
+                    result[i] = f;
+                }
+                else return false;
+            }
+            nums = result;
+            return true;
+        }
+
+        // A colour as "#RRGGBB" (or "#RRGGBBAA") or [r, g, b] /
+        // [r, g, b, a]. Internal so create_material shares it.
+        internal static bool TryParseColor(object value, out Color color)
+        {
+            color = Color.white;
+            if (value is string)
+            {
+                string s = ((string)value).Trim();
+                if (s.StartsWith("#")) s = s.Substring(1);
+                if (s.Length == 6 || s.Length == 8)
+                {
+                    int r, g, b, a = 255;
+                    if (int.TryParse(s.Substring(0, 2), System.Globalization.NumberStyles.HexNumber, null, out r)
+                        && int.TryParse(s.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out g)
+                        && int.TryParse(s.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out b)
+                        && (s.Length == 6 || int.TryParse(s.Substring(6, 2), System.Globalization.NumberStyles.HexNumber, null, out a)))
+                    {
+                        color = new Color(r / 255f, g / 255f, b / 255f, a / 255f);
+                        return true;
+                    }
+                }
+                return false;
+            }
+            float[] nums;
+            if (TryReadNumbers(value, 3, out nums)) { color = new Color(nums[0], nums[1], nums[2], 1f); return true; }
+            if (TryReadNumbers(value, 4, out nums)) { color = new Color(nums[0], nums[1], nums[2], nums[3]); return true; }
+            return false;
+        }
+
+        internal static bool TryAsDouble(object v, out double d)
+        {
+            d = 0;
+            if (v is double) { d = (double)v; return true; }
+            if (v is long) { d = (long)v; return true; }
+            if (v is int) { d = (int)v; return true; }
+            if (v is string)
+            {
+                double f;
+                if (double.TryParse((string)v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) { d = f; return true; }
+            }
+            return false;
+        }
+
+        // Resolve an object reference value: an asset path
+        // ("Assets/…", sub-assets included) or a scene object path.
+        // Null when nothing is found there.
+        internal static UnityEngine.Object ResolveObjectReference(object value)
+        {
+            if (!(value is string)) return null;
+            string s = (string)value;
+            if (string.IsNullOrEmpty(s)) return null;
+            if (s.StartsWith("Assets/", StringComparison.Ordinal))
+            {
+                UnityEngine.Object asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(s);
+                if (asset != null) return asset;
+                UnityEngine.Object[] all = AssetDatabase.LoadAllAssetsAtPath(s);
+                if (all != null)
+                {
+                    foreach (UnityEngine.Object o in all)
+                        if (o != null) return o;
+                }
+                return null;
+            }
+            List<GameObject> matches = ComponentLocator.FindGameObjects(s);
+            if (matches.Count == 1) return matches[0];
+            return null;
+        }
+
+        // Does the current value still match what the preview saw?
+        // Numbers compare with a small tolerance; enums by name or
+        // index; vectors and colours element-wise; object
+        // references by resolving the expected path and comparing
+        // objects. An expected value that cannot be resolved (an
+        // object reference whose path no longer exists) cannot be
+        // checked — it does not block the apply.
+        private static bool ExpectedMatches(SerializedProperty p, object before, object expected)
+        {
+            if (before == null || expected == null) return before == null && expected == null;
+            if (before is double || before is long || before is int)
+            {
+                double b, e;
+                if (!TryAsDouble(before, out b) || !TryAsDouble(expected, out e)) return false;
+                return Math.Abs(b - e) < 0.0001;
+            }
+            if (before is bool) return expected is bool && (bool)before == (bool)expected;
+            if (before is string)
+            {
+                if (p.propertyType == SerializedPropertyType.Enum)
+                {
+                    string name = NormalizeEnumName(p, expected);
+                    if (name == null) return false;
+                    return string.Equals((string)before, name, StringComparison.Ordinal);
+                }
+                if (p.propertyType == SerializedPropertyType.ObjectReference || p.propertyType == SerializedPropertyType.ExposedReference)
+                {
+                    UnityEngine.Object wanted = ResolveObjectReference(expected);
+                    if (wanted == null) return true;
+                    return p.objectReferenceValue == wanted;
+                }
+                return expected is string && string.Equals((string)before, (string)expected, StringComparison.Ordinal);
+            }
+            if (before is List<object>)
+            {
+                var bl = (List<object>)before;
+                var el = expected as List<object>;
+                if (el == null || el.Count != bl.Count) return false;
+                for (int i = 0; i < bl.Count; i++)
+                {
+                    double b, e;
+                    if (!TryAsDouble(bl[i], out b) || !TryAsDouble(el[i], out e)) return false;
+                    if (Math.Abs(b - e) >= 0.0001) return false;
+                }
+                return true;
+            }
+            // Bounds / generic shapes: compare the JSON forms.
+            return JsonWrite(before) == JsonWrite(expected);
+        }
+
+        private static string NormalizeEnumName(SerializedProperty p, object expected)
+        {
+            string[] names = p.enumNames;
+            if (names == null) return null;
+            if (expected is string)
+            {
+                string wanted = (string)expected;
+                for (int i = 0; i < names.Length; i++)
+                    if (string.Equals(names[i], wanted, StringComparison.OrdinalIgnoreCase)) return names[i];
+                return null;
+            }
+            double d;
+            if (TryAsDouble(expected, out d) && Math.Abs(d - Math.Round(d)) < 0.0001)
+            {
+                int idx = (int)Math.Round(d);
+                if (idx >= 0 && idx < names.Length) return names[idx];
+            }
+            return null;
+        }
+
+        // Is the property's enum a [Flags] enum? The serialized
+        // field name maps to a field on the target type (or, for
+        // built-ins, an internal field) — walk the hierarchy.
+        private static bool IsFlagsEnum(SerializedProperty p)
+        {
+            UnityEngine.Object target = p.serializedObject.targetObject;
+            if (target == null) return false;
+            Type t = target.GetType();
+            string fieldName = p.propertyPath;
+            int dot = fieldName.IndexOf('.');
+            if (dot >= 0) fieldName = fieldName.Substring(0, dot);
+            for (Type cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
+            {
+                FieldInfo f = cur.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (f != null)
+                {
+                    Type ft = f.FieldType;
+                    if (ft.IsEnum) return ft.IsDefined(typeof(FlagsAttribute), false);
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryAssignProperty(SerializedProperty p, object value, out string error)
+        {
+            error = null;
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.Integer:
+                    {
+                        double d;
+                        if (!TryAsDouble(value, out d) || Math.Abs(d - Math.Round(d)) > 0.0001) { error = "'" + p.propertyPath + "' needs a whole number — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.longValue = (long)Math.Round(d);
+                        return true;
+                    }
+                case SerializedPropertyType.Boolean:
+                    {
+                        if (!(value is bool)) { error = "'" + p.propertyPath + "' needs true or false — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.boolValue = (bool)value;
+                        return true;
+                    }
+                case SerializedPropertyType.Float:
+                    {
+                        double d;
+                        if (!TryAsDouble(value, out d)) { error = "'" + p.propertyPath + "' needs a number — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.doubleValue = d;
+                        return true;
+                    }
+                case SerializedPropertyType.String:
+                    {
+                        p.stringValue = value == null ? "" : value.ToString();
+                        return true;
+                    }
+                case SerializedPropertyType.Enum:
+                    {
+                        string[] names = p.enumNames;
+                        if (IsFlagsEnum(p))
+                        {
+                            error = "'" + p.propertyPath + "' is a flags enum — it cannot be set by name or index. Set the underlying integer through a script instead.";
+                            return false;
+                        }
+                        if (value is string)
+                        {
+                            string wanted = (string)value;
+                            for (int i = 0; i < names.Length; i++)
+                                if (string.Equals(names[i], wanted, StringComparison.OrdinalIgnoreCase)) { p.enumValueIndex = i; return true; }
+                            error = "'" + p.propertyPath + "' has no option '" + wanted + "' — valid options: " + string.Join(", ", names) + ".";
+                            return false;
+                        }
+                        double d;
+                        if (TryAsDouble(value, out d) && Math.Abs(d - Math.Round(d)) < 0.0001)
+                        {
+                            int idx = (int)Math.Round(d);
+                            if (idx < 0 || idx >= names.Length) { error = "'" + p.propertyPath + "' has no option at index " + idx + " — valid indexes are 0–" + (names.Length - 1) + " (" + string.Join(", ", names) + ")."; return false; }
+                            p.enumValueIndex = idx;
+                            return true;
+                        }
+                        error = "'" + p.propertyPath + "' needs an enum name or index — got " + SceneHelpers.DescribeValue(value) + ". Valid options: " + string.Join(", ", names) + ".";
+                        return false;
+                    }
+                case SerializedPropertyType.Vector2:
+                case SerializedPropertyType.Vector3:
+                case SerializedPropertyType.Vector4:
+                    {
+                        int n = p.propertyType == SerializedPropertyType.Vector2 ? 2 : p.propertyType == SerializedPropertyType.Vector3 ? 3 : 4;
+                        float[] nums;
+                        if (!TryReadNumbers(value, n, out nums)) { error = "'" + p.propertyPath + "' needs an array of " + n + " numbers — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        if (n == 2) p.vector2Value = new Vector2(nums[0], nums[1]);
+                        else if (n == 3) p.vector3Value = new Vector3(nums[0], nums[1], nums[2]);
+                        else p.vector4Value = new Vector4(nums[0], nums[1], nums[2], nums[3]);
+                        return true;
+                    }
+                case SerializedPropertyType.Vector2Int:
+                case SerializedPropertyType.Vector3Int:
+                    {
+                        int n = p.propertyType == SerializedPropertyType.Vector2Int ? 2 : 3;
+                        float[] nums;
+                        if (!TryReadNumbers(value, n, out nums)) { error = "'" + p.propertyPath + "' needs an array of " + n + " whole numbers — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        if (n == 2) p.vector2IntValue = new Vector2Int((int)nums[0], (int)nums[1]);
+                        else p.vector3IntValue = new Vector3Int((int)nums[0], (int)nums[1], (int)nums[2]);
+                        return true;
+                    }
+                case SerializedPropertyType.Rect:
+                    {
+                        float[] nums;
+                        if (!TryReadNumbers(value, 4, out nums)) { error = "'" + p.propertyPath + "' needs an array of 4 numbers [x, y, width, height] — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.rectValue = new Rect(nums[0], nums[1], nums[2], nums[3]);
+                        return true;
+                    }
+                case SerializedPropertyType.Quaternion:
+                    {
+                        float[] nums;
+                        if (!TryReadNumbers(value, 3, out nums)) { error = "'" + p.propertyPath + "' needs euler angles as [x, y, z] in degrees — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.quaternionValue = Quaternion.Euler(nums[0], nums[1], nums[2]);
+                        return true;
+                    }
+                case SerializedPropertyType.Color:
+                    {
+                        Color c;
+                        if (!TryParseColor(value, out c)) { error = "'" + p.propertyPath + "' needs a color as \"#RRGGBB\" (or \"#RRGGBBAA\") or [r, g, b] / [r, g, b, a] — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.colorValue = c;
+                        return true;
+                    }
+                case SerializedPropertyType.ObjectReference:
+                case SerializedPropertyType.ExposedReference:
+                    {
+                        if (value == null) { p.objectReferenceValue = null; return true; }
+                        if (!(value is string)) { error = "'" + p.propertyPath + "' needs an asset path (\"Assets/…\") or a scene object path — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        string s = (string)value;
+                        UnityEngine.Object obj = ResolveObjectReference(s);
+                        if (obj == null) { error = "'" + p.propertyPath + "': nothing found at '" + s + "' — asset paths start with Assets/, scene paths start with the scene root name."; return false; }
+                        p.objectReferenceValue = obj;
+                        return true;
+                    }
+                case SerializedPropertyType.LayerMask:
+                    {
+                        double d;
+                        if (!TryAsDouble(value, out d)) { error = "'" + p.propertyPath + "' needs a layer mask number — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.intValue = (int)Math.Round(d);
+                        return true;
+                    }
+                case SerializedPropertyType.Character:
+                    {
+                        double d;
+                        if (!TryAsDouble(value, out d)) { error = "'" + p.propertyPath + "' needs a number — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
+                        p.intValue = (int)Math.Round(d);
+                        return true;
+                    }
+                default:
+                    error = "'" + p.propertyPath + "' is a " + p.propertyType + " property — CodeFox cannot set that type yet.";
+                    return false;
+            }
+        }
+    }
+
+    // ── create_gameobject ────────────────────────────────────
+    // Create a scene object. Everything is validated first —
+    // parent, primitive, component types, tag, layer, vectors —
+    // and creation starts only once all of it is valid, so a
+    // typo means "Nothing was created", never a half-built
+    // object. Names are unique among siblings (Unity's
+    // GetUniqueNameForSibling, with a hand-numbered fallback) and
+    // the result reports the final path, so the model never
+    // guesses where the object ended up. Components go on with
+    // Undo.AddComponent, which records Undo AND auto-adds
+    // [RequireComponent] dependencies — reported as alsoAdded, so
+    // the model learns why it got two components for one request.
+    // Create takes NO property values: set_property stays the
+    // only place for property validation and dry-run, so a bad
+    // value cannot leave a half-configured object behind.
+    private static class CreateGameObjectHandler
+    {
+        private const int MaxComponents = 10;
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string name = JStr(args, "name", "").Trim();
+            if (string.IsNullOrEmpty(name)) return BridgeResult.Error("'name' is required.");
+            if (name.IndexOf('/') >= 0) return BridgeResult.Error("A name cannot contain '/' — it would corrupt the hierarchy path.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            string parentPath = JStr(args, "parent", "");
+            GameObject parentGO = null;
+            Transform parentT = null;
+            if (!string.IsNullOrEmpty(parentPath))
+            {
+                List<GameObject> pm = ComponentLocator.FindGameObjects(parentPath);
+                if (pm.Count != 1)
+                    return BridgeResult.Error(pm.Count == 0
+                        ? "No GameObject at '" + parentPath + "' — the parent must exist."
+                        : pm.Count + " objects match '" + parentPath + "'. Use a more specific path.");
+                parentGO = pm[0];
+                if (EditorUtility.IsPersistent(parentGO))
+                    return BridgeResult.Error("'" + parentPath + "' is an asset, not a scene object — a new object needs a scene parent.");
+                parentT = parentGO.transform;
+            }
+            string primitiveName = JStr(args, "primitive", "");
+            PrimitiveType primitive = PrimitiveType.Cube;
+            bool hasPrimitive = false;
+            if (!string.IsNullOrEmpty(primitiveName))
+            {
+                if (!ComponentTypeResolver.IsPrimitive(primitiveName, out primitive))
+                    return BridgeResult.Error("Unknown primitive '" + primitiveName + "' — options: " + ComponentTypeResolver.PrimitiveOptions() + ".");
+                hasPrimitive = true;
+            }
+            float[] position = null, rotation = null, scale = null;
+            object posRaw;
+            if (args.TryGetValue("position", out posRaw) && posRaw != null && !SetPropertyHandler.TryReadNumbers(posRaw, 3, out position))
+                return BridgeResult.Error("'position' must be [x, y, z] — got " + SceneHelpers.DescribeValue(posRaw) + ".");
+            object rotRaw;
+            if (args.TryGetValue("rotation", out rotRaw) && rotRaw != null && !SetPropertyHandler.TryReadNumbers(rotRaw, 3, out rotation))
+                return BridgeResult.Error("'rotation' must be [x, y, z] euler degrees — got " + SceneHelpers.DescribeValue(rotRaw) + ".");
+            object scaleRaw;
+            if (args.TryGetValue("scale", out scaleRaw) && scaleRaw != null && !SetPropertyHandler.TryReadNumbers(scaleRaw, 3, out scale))
+                return BridgeResult.Error("'scale' must be [x, y, z] — got " + SceneHelpers.DescribeValue(scaleRaw) + ".");
+            string tag = JStr(args, "tag", "");
+            if (!string.IsNullOrEmpty(tag))
+            {
+                bool known = false;
+                foreach (string t in InternalEditorUtility.tags) if (t == tag) { known = true; break; }
+                if (!known) return BridgeResult.Error("Unknown tag '" + tag + "' — use a tag defined in Project Settings → Tags and Layers.");
+            }
+            string layerName = JStr(args, "layer", "");
+            int layer = -1;
+            if (!string.IsNullOrEmpty(layerName))
+            {
+                layer = LayerMask.NameToLayer(layerName);
+                if (layer < 0) return BridgeResult.Error("Unknown layer '" + layerName + "' — use a layer defined in Project Settings → Tags and Layers (" + SceneHelpers.DefinedLayers() + ").");
+            }
+            bool active = JBool(args, "active", true);
+            List<object> rawComponents = JArr(args, "components");
+            var componentTypes = new List<Type>();
+            if (rawComponents != null)
+            {
+                if (rawComponents.Count > MaxComponents) return BridgeResult.Error("At most " + MaxComponents + " components per call.");
+                foreach (object raw in rawComponents)
+                {
+                    string typeName = raw != null ? raw.ToString() : "";
+                    if (string.IsNullOrEmpty(typeName)) return BridgeResult.Error("Each component must be a type name.");
+                    if (string.Equals(typeName, "Transform", StringComparison.OrdinalIgnoreCase))
+                        return BridgeResult.Error("'Transform' cannot be added — every GameObject already has one.");
+                    Type t;
+                    string resolveError;
+                    if (!ComponentTypeResolver.TryResolve(typeName, out t, out resolveError))
+                        return BridgeResult.Error(resolveError);
+                    componentTypes.Add(t);
+                }
+                // DisallowMultipleComponent duplicates — against
+                // the requested list and against what the primitive
+                // already brings (MeshFilter, MeshRenderer, a
+                // collider).
+                var existing = new List<Type>();
+                existing.Add(typeof(Transform));
+                if (hasPrimitive)
+                {
+                    existing.Add(typeof(MeshFilter));
+                    existing.Add(typeof(MeshRenderer));
+                    if (primitive == PrimitiveType.Cube) existing.Add(typeof(BoxCollider));
+                    else if (primitive == PrimitiveType.Sphere) existing.Add(typeof(SphereCollider));
+                    else if (primitive == PrimitiveType.Capsule || primitive == PrimitiveType.Cylinder) existing.Add(typeof(CapsuleCollider));
+                    else if (primitive == PrimitiveType.Plane || primitive == PrimitiveType.Quad) existing.Add(typeof(MeshCollider));
+                }
+                foreach (Type t in componentTypes)
+                {
+                    if (!SceneHelpers.HasDisallowMultiple(t)) continue;
+                    int count = 0;
+                    foreach (Type e in existing) if (e == t) count++;
+                    foreach (Type c in componentTypes) if (c == t) count++;
+                    if (count > 1) return BridgeResult.Error("'" + t.Name + "' cannot be added twice (DisallowMultipleComponent) — it is already on the new object or listed twice.");
+                }
+            }
+            string finalName = SceneHelpers.UniqueSiblingName(parentT, name);
+            bool renamed = finalName != name;
+            string finalPath = parentT == null ? finalName : ComponentLocator.GetPath(parentT) + "/" + finalName;
+            if (dryRun)
+            {
+                var data = new Dictionary<string, object>();
+                data["path"] = finalPath;
+                data["renamed"] = renamed;
+                data["components"] = SceneHelpers.ComponentNames(componentTypes);
+                data["alsoAdded"] = SceneHelpers.RequiredComponentNames(componentTypes);
+                data["dryRun"] = true;
+                return BridgeResult.Ok("Preview: create '" + finalPath + "'" + (renamed ? " (renamed — '" + name + "' was taken)" : "") + " with " + componentTypes.Count + " component(s) (nothing created yet).", null, JsonWrite(data));
+            }
+            Scene scene = parentT != null ? parentT.gameObject.scene : SceneManager.GetActiveScene();
+            int undoGroup = MutationScope.BeginUndoGroup(args, "create " + finalName);
+            GameObject go = hasPrimitive ? GameObject.CreatePrimitive(primitive) : new GameObject();
+            go.name = finalName;
+            Undo.RegisterCreatedObjectUndo(go, "Agent: create " + finalName);
+            go.transform.SetParent(parentT, false);
+            if (position != null) go.transform.localPosition = new Vector3(position[0], position[1], position[2]);
+            if (rotation != null) go.transform.localEulerAngles = new Vector3(rotation[0], rotation[1], rotation[2]);
+            if (scale != null) go.transform.localScale = new Vector3(scale[0], scale[1], scale[2]);
+            if (!string.IsNullOrEmpty(tag)) go.tag = tag;
+            if (layer >= 0) go.layer = layer;
+            var addedNames = new List<string>();
+            var alsoAdded = new List<string>();
+            foreach (Type t in componentTypes)
+            {
+                var beforeNames = SceneHelpers.ComponentNames(go);
+                Component added = Undo.AddComponent(go, t);
+                if (added == null)
+                {
+                    Undo.DestroyObjectImmediate(go);
+                    return BridgeResult.Error("Could not add '" + t.Name + "' — for example a 2D collider conflicts with a 3D one. Nothing was created.");
+                }
+                addedNames.Add(t.Name);
+                foreach (string n in SceneHelpers.ComponentNames(go))
+                    if (n != t.Name && !beforeNames.Contains(n) && !alsoAdded.Contains(n)) alsoAdded.Add(n);
+            }
+            go.SetActive(active);
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = ComponentLocator.GetPath(go.transform);
+            resultData["renamed"] = renamed;
+            resultData["components"] = addedNames;
+            resultData["alsoAdded"] = alsoAdded;
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            return BridgeResult.Ok("Created '" + ComponentLocator.GetPath(go.transform) + "'" + (renamed ? " (renamed — '" + name + "' was taken)" : "") + " with " + addedNames.Count + " component(s)" + (alsoAdded.Count > 0 ? " (also added: " + string.Join(", ", alsoAdded.ToArray()) + ")" : "") + ".", null, JsonWrite(resultData));
+        }
+    }
+
+    // ── add_component ────────────────────────────────────────
+    // Add one component to a scene object. Undo.AddComponent
+    // records Undo AND auto-adds [RequireComponent] dependencies,
+    // reported as alsoAdded. A script the model just wrote is not
+    // resolvable until the project compiles — the type error says
+    // so instead of guessing.
+    private static class AddComponentHandler
+    {
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string path = JStr(args, "path", "");
+            if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+            if (matches.Count != 1)
+                return BridgeResult.Error(matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+            GameObject target = matches[0];
+            if (EditorUtility.IsPersistent(target))
+                return BridgeResult.Error("'" + path + "' is an asset, not a scene object — add_component only works on scene objects.");
+            string typeName = JStr(args, "type", "");
+            if (string.IsNullOrEmpty(typeName)) return BridgeResult.Error("'type' is required.");
+            if (string.Equals(typeName, "Transform", StringComparison.OrdinalIgnoreCase))
+                return BridgeResult.Error("'Transform' cannot be added — every GameObject already has one.");
+            Type type;
+            string resolveError;
+            if (!ComponentTypeResolver.TryResolve(typeName, out type, out resolveError))
+                return BridgeResult.Error(resolveError);
+            if (SceneHelpers.HasDisallowMultiple(type))
+            {
+                foreach (Component c in target.GetComponents<Component>())
+                    if (c != null && c.GetType() == type)
+                        return BridgeResult.Error("'" + type.Name + "' is already on '" + path + "' and cannot be added twice (DisallowMultipleComponent).");
+            }
+            if (dryRun)
+            {
+                var data = new Dictionary<string, object>();
+                data["path"] = ComponentLocator.GetPath(target.transform);
+                data["type"] = type.FullName;
+                data["alsoAdded"] = SceneHelpers.RequiredComponentNames(new List<Type> { type });
+                data["dryRun"] = true;
+                return BridgeResult.Ok("Preview: add '" + type.Name + "' to '" + path + "' (nothing added yet).", null, JsonWrite(data));
+            }
+            Scene scene = target.scene;
+            int undoGroup = MutationScope.BeginUndoGroup(args, "add " + type.Name + " to " + target.name);
+            var beforeNames = SceneHelpers.ComponentNames(target);
+            Component added = Undo.AddComponent(target, type);
+            if (added == null)
+                return BridgeResult.Error("Could not add '" + type.Name + "' to '" + path + "' — for example a 2D collider conflicts with a 3D one. Nothing was added.");
+            var alsoAdded = new List<string>();
+            foreach (string n in SceneHelpers.ComponentNames(target))
+                if (n != type.Name && !beforeNames.Contains(n) && !alsoAdded.Contains(n)) alsoAdded.Add(n);
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = ComponentLocator.GetPath(target.transform);
+            resultData["component"] = type.Name;
+            resultData["alsoAdded"] = alsoAdded;
+            resultData["components"] = SceneHelpers.ComponentNames(target);
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            return BridgeResult.Ok("Added '" + type.Name + "' to '" + path + "'" + (alsoAdded.Count > 0 ? " (also added: " + string.Join(", ", alsoAdded.ToArray()) + ")" : "") + ". Use read_component_values and set_property to configure it.", null, JsonWrite(resultData));
+        }
+    }
+
+    // ── delete_gameobject ────────────────────────────────────
+    // Delete a scene object and its subtree. The preview shows
+    // what is ACTUALLY lost — the object count and component
+    // types, plus the inbound references (other scene components
+    // pointing at anything being deleted, serialized fields and
+    // UnityEvent targets alike — after the delete those show as
+    // "Missing"). The inbound scan walks every component in every
+    // loaded scene under a 1.5s budget and says so when it runs
+    // out of time, so the count is an honest lower bound.
+    // expectedLostObjects is a staleness guard: the app copies
+    // lostObjects from the preview into the real call, and Unity
+    // refuses when the subtree changed in between. Unity blocks
+    // deleting a non-root child of a prefab instance (except one
+    // the user added) — the error says what to do instead.
+    private static class DeleteGameObjectHandler
+    {
+        private const double ReferenceScanBudgetSeconds = 1.5;
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string path = JStr(args, "path", "");
+            if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+            if (matches.Count != 1)
+                return BridgeResult.Error(matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+            GameObject target = matches[0];
+            if (PrefabUtility.IsPartOfPrefabInstance(target) && !PrefabUtility.IsOutermostPrefabInstanceRoot(target) && !PrefabUtility.IsAddedGameObjectOverride(target))
+                return BridgeResult.Error("'" + path + "' is a child of a prefab instance — Unity does not allow deleting it. Delete the whole instance, edit the prefab asset, or disable the object instead.");
+            var subtree = SceneHelpers.CollectSubtree(target);
+            var lostObjects = new List<object>();
+            foreach (GameObject go in subtree)
+            {
+                var d = new Dictionary<string, object>();
+                d["path"] = ComponentLocator.GetPath(go.transform);
+                d["components"] = SceneHelpers.ComponentNames(go);
+                lostObjects.Add(d);
+            }
+            if (dryRun)
+            {
+                var deletedIds = SceneHelpers.DeletedInstanceIds(subtree);
+                bool scanComplete;
+                var inbound = ScanInboundReferences(deletedIds, out scanComplete);
+                var data = new Dictionary<string, object>();
+                data["path"] = path;
+                data["lostCount"] = subtree.Count;
+                data["lostObjects"] = lostObjects;
+                data["inboundReferences"] = inbound;
+                data["scanComplete"] = scanComplete;
+                data["isPrefabInstance"] = PrefabUtility.IsPartOfPrefabInstance(target);
+                data["dryRun"] = true;
+                string message = "Preview: deleting '" + path + "' removes " + subtree.Count + " object(s)"
+                    + (inbound.Count > 0 ? " and breaks " + inbound.Count + " reference(s) (they will show as Missing)" : " with no inbound references")
+                    + (scanComplete ? "" : " — the reference scan ran out of time, so the count is a lower bound")
+                    + " (nothing deleted yet).";
+                return BridgeResult.Ok(message, null, JsonWrite(data));
+            }
+            List<object> expectedRaw = JArr(args, "expectedLostObjects");
+            if (expectedRaw != null)
+            {
+                var expected = new HashSet<string>();
+                foreach (object v in expectedRaw) if (v != null) expected.Add(v.ToString());
+                var actual = new HashSet<string>();
+                foreach (GameObject go in subtree) actual.Add(ComponentLocator.GetPath(go.transform));
+                if (!expected.SetEquals(actual))
+                    return BridgeResult.Error("The subtree changed since the preview — run the preview again. Expected " + expected.Count + " object(s), found " + actual.Count + ".");
+            }
+            Scene scene = target.scene;
+            int undoGroup = MutationScope.BeginUndoGroup(args, "delete " + target.name);
+            string oldPath = ComponentLocator.GetPath(target.transform);
+            Undo.DestroyObjectImmediate(target);
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = oldPath;
+            resultData["deletedCount"] = subtree.Count;
+            var pathChanges = new List<object>();
+            var pc = new Dictionary<string, object>();
+            pc["from"] = oldPath;
+            pc["to"] = null;
+            pathChanges.Add(pc);
+            resultData["pathChanges"] = pathChanges;
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            return BridgeResult.Ok("Deleted '" + oldPath + "' (" + subtree.Count + " object(s)).", null, JsonWrite(resultData));
+        }
+
+        private static List<Dictionary<string, object>> ScanInboundReferences(HashSet<int> deletedIds, out bool scanComplete)
+        {
+            scanComplete = true;
+            var refs = new List<Dictionary<string, object>>();
+            double start = EditorApplication.timeSinceStartup;
+            foreach (GameObject root in ComponentLocator.EnumerateRoots())
+            {
+                var stack = new Stack<Transform>();
+                stack.Push(root.transform);
+                while (stack.Count > 0)
+                {
+                    Transform t = stack.Pop();
+                    GameObject go = t.gameObject;
+                    foreach (Transform child in t) stack.Push(child);
+                    if (deletedIds.Contains(go.GetInstanceID())) continue;
+                    foreach (Component c in go.GetComponents<Component>())
+                    {
+                        if (c == null) continue;
+                        var so = new SerializedObject(c);
+                        SerializedProperty p = so.GetIterator();
+                        int seen = 0;
+                        while (p.NextVisible(true))
+                        {
+                            if ((++seen & 63) == 0 && EditorApplication.timeSinceStartup - start > ReferenceScanBudgetSeconds)
+                            {
+                                scanComplete = false;
+                                return refs;
+                            }
+                            if (p.propertyType != SerializedPropertyType.ObjectReference && p.propertyType != SerializedPropertyType.ExposedReference) continue;
+                            UnityEngine.Object target = p.objectReferenceValue;
+                            if (target == null) continue;
+                            if (!deletedIds.Contains(target.GetInstanceID())) continue;
+                            var d = new Dictionary<string, object>();
+                            d["from"] = ComponentLocator.GetPath(go.transform) + " / " + c.GetType().Name;
+                            d["property"] = p.propertyPath;
+                            d["target"] = target.name + " (" + target.GetType().Name + ")";
+                            refs.Add(d);
+                        }
+                    }
+                }
+            }
+            return refs;
+        }
+    }
+
+    // ── set_parent ───────────────────────────────────────────
+    // Move a scene object under a new parent (or the scene root).
+    // Three traps: cycles (the new parent cannot be the object
+    // itself or one of its children), name collisions at the
+    // destination (refused unless renameOnConflict is true —
+    // renaming silently changes the object's address, so it is an
+    // explicit choice), and the fact that EVERY path under the
+    // moved object changes — the result reports pathChanges for
+    // the whole subtree, and the app rewrites later calls to the
+    // new paths. A non-root child of a prefab instance cannot be
+    // moved out of its instance. keepWorldPosition:false keeps
+    // the local values instead of the world pose.
+    private static class SetParentHandler
+    {
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string path = JStr(args, "path", "");
+            if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+            if (matches.Count != 1)
+                return BridgeResult.Error(matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+            GameObject target = matches[0];
+            string newParentPath = JStr(args, "newParent", "");
+            GameObject newParentGO = null;
+            Transform newParentT = null;
+            if (!string.IsNullOrEmpty(newParentPath))
+            {
+                List<GameObject> pm = ComponentLocator.FindGameObjects(newParentPath);
+                if (pm.Count != 1)
+                    return BridgeResult.Error(pm.Count == 0
+                        ? "No GameObject at '" + newParentPath + "' — the new parent must exist."
+                        : pm.Count + " objects match '" + newParentPath + "'. Use a more specific path.");
+                newParentGO = pm[0];
+                if (EditorUtility.IsPersistent(newParentGO))
+                    return BridgeResult.Error("'" + newParentPath + "' is an asset, not a scene object — a new parent must be a scene object.");
+                newParentT = newParentGO.transform;
+            }
+            if (PrefabUtility.IsPartOfPrefabInstance(target) && !PrefabUtility.IsOutermostPrefabInstanceRoot(target) && !PrefabUtility.IsAddedGameObjectOverride(target))
+            {
+                // Moving within the same instance root is fine;
+                // moving out (or to the scene root) is not.
+                GameObject instanceRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(target);
+                bool staysInside = newParentT != null && instanceRoot != null && (newParentT.gameObject == instanceRoot || newParentT.IsChildOf(instanceRoot.transform));
+                if (!staysInside)
+                    return BridgeResult.Error("'" + path + "' is a child of a prefab instance — Unity does not allow moving it out. Move the whole instance, edit the prefab asset, or disable the object instead.");
+            }
+            if (newParentT != null && newParentT.IsChildOf(target.transform))
+                return BridgeResult.Error("Cannot move '" + path + "' under its own child '" + newParentPath + "' — that would make a cycle.");
+            if (newParentT == target.transform)
+                return BridgeResult.Error("'" + path + "' is already parented to itself.");
+            bool keepWorldPosition = JBool(args, "keepWorldPosition", true);
+            bool renameOnConflict = JBool(args, "renameOnConflict", false);
+            string finalName = target.name;
+            bool renamed = false;
+            var siblings = new List<Transform>();
+            if (newParentT == null)
+            {
+                foreach (GameObject root in ComponentLocator.EnumerateRoots()) siblings.Add(root.transform);
+            }
+            else
+            {
+                foreach (Transform child in newParentT) siblings.Add(child);
+            }
+            foreach (Transform s in siblings)
+            {
+                if (s == target.transform) continue;
+                if (s.name != target.name) continue;
+                if (!renameOnConflict)
+                    return BridgeResult.Error("A sibling named '" + target.name + "' already exists under '" + (string.IsNullOrEmpty(newParentPath) ? "the scene root" : newParentPath) + "' — pass renameOnConflict: true to rename it instead.");
+                finalName = SceneHelpers.UniqueSiblingName(newParentT, target.name);
+                renamed = finalName != target.name;
+                break;
+            }
+            string oldPath = ComponentLocator.GetPath(target.transform);
+            string newPath = newParentT == null ? finalName : ComponentLocator.GetPath(newParentT) + "/" + finalName;
+            var subtree = SceneHelpers.CollectSubtree(target);
+            var pathChanges = BuildPathChanges(oldPath, newPath, subtree);
+            Vector3 localPos = target.transform.localPosition;
+            string warning = null;
+            if (newParentT != null)
+            {
+                Vector3 ls = newParentT.lossyScale;
+                if (Math.Abs(ls.x - ls.y) > 0.001 || Math.Abs(ls.y - ls.z) > 0.001)
+                    warning = "The new parent has non-uniform scale — the child may appear skewed.";
+            }
+            if (dryRun)
+            {
+                var data = new Dictionary<string, object>();
+                data["path"] = oldPath;
+                data["newPath"] = newPath;
+                data["renamed"] = renamed;
+                data["descendantCount"] = subtree.Count - 1;
+                data["localPosition"] = new List<object> { Math.Round((double)localPos.x, 3), Math.Round((double)localPos.y, 3), Math.Round((double)localPos.z, 3) };
+                data["pathChanges"] = pathChanges;
+                if (warning != null) data["warning"] = warning;
+                data["dryRun"] = true;
+                return BridgeResult.Ok("Preview: move '" + oldPath + "' → '" + newPath + "' (" + (subtree.Count - 1) + " descendant(s))" + (warning != null ? " — " + warning : "") + " (nothing moved yet).", null, JsonWrite(data));
+            }
+            Scene scene = target.scene;
+            int undoGroup = MutationScope.BeginUndoGroup(args, "move " + target.name);
+            if (renamed)
+            {
+                Undo.RecordObject(target, "Agent: rename " + target.name);
+                target.name = finalName;
+            }
+            Undo.SetTransformParent(target.transform, newParentT, keepWorldPosition);
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = ComponentLocator.GetPath(target.transform);
+            resultData["newPath"] = ComponentLocator.GetPath(target.transform);
+            resultData["renamed"] = renamed;
+            resultData["descendantCount"] = subtree.Count - 1;
+            Vector3 lp = target.transform.localPosition;
+            resultData["localPosition"] = new List<object> { Math.Round((double)lp.x, 3), Math.Round((double)lp.y, 3), Math.Round((double)lp.z, 3) };
+            resultData["pathChanges"] = pathChanges;
+            if (warning != null) resultData["warning"] = warning;
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            return BridgeResult.Ok("Moved '" + oldPath + "' → '" + ComponentLocator.GetPath(target.transform) + "' (" + (subtree.Count - 1) + " descendant(s)).", null, JsonWrite(resultData));
+        }
+
+        private static List<object> BuildPathChanges(string oldPath, string newPath, List<GameObject> subtree)
+        {
+            var changes = new List<object>();
+            foreach (GameObject go in subtree)
+            {
+                string from = ComponentLocator.GetPath(go.transform);
+                string to = from == oldPath ? newPath : newPath + from.Substring(oldPath.Length);
+                var d = new Dictionary<string, object>();
+                d["from"] = from;
+                d["to"] = to;
+                changes.Add(d);
+            }
+            return changes;
+        }
+    }
+
+    // ── list_hierarchy ───────────────────────────────────────
+    // Print the scene tree as text, not JSON — about a third of
+    // the tokens. Breadth-first budget: the top of the scene is
+    // complete before deep branches eat the budget, and hidden
+    // counts say how much was cut. Same-named siblings collapse
+    // (Enemy ×10 with the first expanded — the biggest saving);
+    // identical sibling names are flagged !dup, because the other
+    // tools reject ambiguous paths. Tag, layer and positions are
+    // deliberately left out — they belong to
+    // read_component_values. A filter (nameContains /
+    // hasComponent) returns a flat list of matching paths instead
+    // of the tree — the fix for guessing paths.
+    private static class ListHierarchyHandler
+    {
+        private const int DefaultDepth = 2;
+        private const int MaxDepth = 6;
+        private const int DefaultMaxNodes = 60;
+        private const int MaxMaxNodes = 200;
+        private const int MaxFindResults = 30;
+        private const int MaxComponentsPerNode = 4;
+        private const int CollapseThreshold = 4;
+
+        private class NodeEntry { public Transform t; public int depth; }
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string rootPath = JStr(args, "root", "");
+            string nameContains = JStr(args, "nameContains", "");
+            string hasComponent = JStr(args, "hasComponent", "");
+            bool fullPaths = JBool(args, "fullPaths", false);
+            int depth = (int)JNum(args, "depth", DefaultDepth);
+            if (depth < 1) depth = 1;
+            if (depth > MaxDepth) depth = MaxDepth;
+            int maxNodes = (int)JNum(args, "maxNodes", DefaultMaxNodes);
+            if (maxNodes < 1) maxNodes = 1;
+            if (maxNodes > MaxMaxNodes) maxNodes = MaxMaxNodes;
+            var roots = new List<GameObject>();
+            if (!string.IsNullOrEmpty(rootPath))
+            {
+                List<GameObject> matches = ComponentLocator.FindGameObjects(rootPath);
+                if (matches.Count != 1)
+                    return BridgeResult.Error(matches.Count == 0
+                        ? "No GameObject at '" + rootPath + "'. Start with the scene root name."
+                        : matches.Count + " objects match '" + rootPath + "'. Use a more specific path.");
+                roots.Add(matches[0]);
+            }
+            else
+            {
+                roots.AddRange(ComponentLocator.EnumerateRoots());
+            }
+            // Find mode: a flat list of matching paths.
+            if (!string.IsNullOrEmpty(nameContains) || !string.IsNullOrEmpty(hasComponent))
+            {
+                var found = new List<string>();
+                int totalMatches = 0;
+                var queue = new Queue<Transform>();
+                foreach (GameObject r in roots) queue.Enqueue(r.transform);
+                while (queue.Count > 0)
+                {
+                    Transform t = queue.Dequeue();
+                    foreach (Transform child in t) queue.Enqueue(child);
+                    bool match = false;
+                    if (!string.IsNullOrEmpty(nameContains) && t.name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) >= 0) match = true;
+                    if (!string.IsNullOrEmpty(hasComponent))
+                    {
+                        foreach (Component c in t.gameObject.GetComponents<Component>())
+                            if (c != null && string.Equals(c.GetType().Name, hasComponent, StringComparison.OrdinalIgnoreCase)) { match = true; break; }
+                    }
+                    if (!match) continue;
+                    totalMatches++;
+                    if (found.Count < MaxFindResults)
+                        found.Add(fullPaths ? ComponentLocator.GetPath(t) : t.name);
+                }
+                var data = new Dictionary<string, object>();
+                data["matches"] = found;
+                data["totalMatches"] = totalMatches;
+                data["truncated"] = totalMatches > found.Count;
+                string message = totalMatches == 0
+                    ? "No objects match" + (!string.IsNullOrEmpty(nameContains) ? " '" + nameContains + "'" : "") + (!string.IsNullOrEmpty(hasComponent) ? " with component '" + hasComponent + "'" : "") + "."
+                    : totalMatches + " match(es): " + string.Join(", ", found.ToArray()) + (totalMatches > found.Count ? " (showing first " + found.Count + ")" : "");
+                return BridgeResult.Ok(message, null, JsonWrite(data));
+            }
+            // Tree mode. Count once (one full walk), then select
+            // breadth-first up to the budget, then print depth-first
+            // so a collapsed line lands after the sibling it
+            // belongs to.
+            int totalObjects = 0;
+            foreach (GameObject r in roots) totalObjects += CountSubtree(r.transform);
+            var shownSet = new HashSet<int>();
+            var bfs = new Queue<NodeEntry>();
+            foreach (GameObject r in roots) bfs.Enqueue(new NodeEntry { t = r.transform, depth = 0 });
+            while (bfs.Count > 0 && shownSet.Count < maxNodes)
+            {
+                NodeEntry entry = bfs.Dequeue();
+                shownSet.Add(entry.t.gameObject.GetInstanceID());
+                if (entry.depth >= depth) continue;
+                var children = ChildrenOf(entry.t);
+                foreach (var group in GroupByBaseName(children))
+                {
+                    if (group.Count >= CollapseThreshold)
+                    {
+                        // First sibling expanded, the rest as one
+                        // collapsed group — their subtrees are not
+                        // walked, so they never eat the budget.
+                        bfs.Enqueue(new NodeEntry { t = group[0], depth = entry.depth + 1 });
+                    }
+                    else
+                    {
+                        foreach (Transform child in group) bfs.Enqueue(new NodeEntry { t = child, depth = entry.depth + 1 });
+                    }
+                }
+            }
+            var lines = new List<string>();
+            foreach (GameObject r in roots) PrintSubtree(r.transform, 0, depth, fullPaths, shownSet, lines);
+            int shown = shownSet.Count;
+            bool truncated = shown < totalObjects;
+            string tree = string.Join("\n", lines.ToArray());
+            var treeData = new Dictionary<string, object>();
+            treeData["tree"] = tree;
+            treeData["shown"] = shown;
+            treeData["total"] = totalObjects;
+            treeData["hidden"] = totalObjects - shown;
+            treeData["truncated"] = truncated;
+            string treeMessage = "Scene hierarchy — " + shown + " of " + totalObjects + " object(s)" + (truncated ? " (increase maxNodes to see more)" : "") + ":\n" + tree;
+            return BridgeResult.Ok(treeMessage, null, JsonWrite(treeData));
+        }
+
+        private static int CountSubtree(Transform root)
+        {
+            int count = 0;
+            var stack = new Stack<Transform>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                Transform t = stack.Pop();
+                count++;
+                foreach (Transform child in t) stack.Push(child);
+            }
+            return count;
+        }
+
+        private static List<Transform> ChildrenOf(Transform t)
+        {
+            var children = new List<Transform>();
+            foreach (Transform child in t) children.Add(child);
+            return children;
+        }
+
+        // Group siblings by base name, keeping first-appearance
+        // order. "Enemy", "Enemy (1)", "Enemy (2)" share the base
+        // "Enemy"; "Foo (bar)" is not a numbered variant.
+        private static List<List<Transform>> GroupByBaseName(List<Transform> children)
+        {
+            var order = new List<string>();
+            var groups = new Dictionary<string, List<Transform>>();
+            foreach (Transform child in children)
+            {
+                string baseName = BaseName(child.name);
+                List<Transform> group;
+                if (!groups.TryGetValue(baseName, out group))
+                {
+                    group = new List<Transform>();
+                    groups[baseName] = group;
+                    order.Add(baseName);
+                }
+                group.Add(child);
+            }
+            var result = new List<List<Transform>>();
+            foreach (string baseName in order) result.Add(groups[baseName]);
+            return result;
+        }
+
+        private static string BaseName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || !name.EndsWith(")", StringComparison.Ordinal)) return name;
+            int open = name.LastIndexOf(" (", StringComparison.Ordinal);
+            if (open < 0) return name;
+            string num = name.Substring(open + 2, name.Length - open - 3);
+            int n;
+            if (int.TryParse(num, out n)) return name.Substring(0, open);
+            return name;
+        }
+
+        private static void PrintSubtree(Transform t, int depth, int maxDepth, bool fullPaths, HashSet<int> shownSet, List<string> lines)
+        {
+            if (!shownSet.Contains(t.gameObject.GetInstanceID())) return;
+            var children = ChildrenOf(t);
+            var groups = depth < maxDepth ? GroupByBaseName(children) : new List<List<Transform>>();
+            // How many children are hidden — by the depth cap or
+            // by the node budget. Collapsed siblings get their own
+            // ×N line, so they are not counted here.
+            int hiddenChildren = 0;
+            if (depth >= maxDepth) hiddenChildren = children.Count;
+            else
+            {
+                foreach (var group in groups)
+                {
+                    if (group.Count >= CollapseThreshold) continue;
+                    foreach (Transform child in group)
+                        if (!shownSet.Contains(child.gameObject.GetInstanceID())) hiddenChildren++;
+                }
+            }
+            bool isDup = false;
+            if (t.parent != null)
+            {
+                int same = 0;
+                foreach (Transform s in t.parent) if (s.name == t.name) same++;
+                isDup = same > 1;
+            }
+            lines.Add(PrintNode(t, depth, fullPaths, hiddenChildren, isDup));
+            if (depth >= maxDepth) return;
+            foreach (var group in groups)
+            {
+                if (group.Count >= CollapseThreshold)
+                {
+                    PrintSubtree(group[0], depth + 1, maxDepth, fullPaths, shownSet, lines);
+                    // The collapsed line lands right after the
+                    // first expanded sibling it belongs to. If the
+                    // budget ran out before the first sibling was
+                    // shown, the count covers the whole group.
+                    int collapsedCount = group.Count - (shownSet.Contains(group[0].gameObject.GetInstanceID()) ? 1 : 0);
+                    if (collapsedCount > 0)
+                        lines.Add(Indent(depth + 1) + BaseName(group[0].name) + " ×" + collapsedCount);
+                }
+                else
+                {
+                    foreach (Transform child in group)
+                        PrintSubtree(child, depth + 1, maxDepth, fullPaths, shownSet, lines);
+                }
+            }
+        }
+
+        private static string PrintNode(Transform t, int depth, bool fullPaths, int hiddenChildren, bool isDup)
+        {
+            string name = fullPaths ? ComponentLocator.GetPath(t) : t.name;
+            string line = Indent(depth) + name;
+            if (isDup) line += " !dup";
+            if (!t.gameObject.activeSelf) line += " (off)";
+            var comps = new List<string>();
+            foreach (Component c in t.gameObject.GetComponents<Component>())
+            {
+                if (c == null || c is Transform) continue;
+                comps.Add(c.GetType().Name);
+            }
+            if (comps.Count > 0)
+            {
+                var shownComps = comps.Count > MaxComponentsPerNode ? comps.GetRange(0, MaxComponentsPerNode) : comps;
+                line += " [" + string.Join(", ", shownComps.ToArray()) + (comps.Count > MaxComponentsPerNode ? " +" + (comps.Count - MaxComponentsPerNode) : "") + "]";
+            }
+            if (hiddenChildren > 0) line += " (+" + hiddenChildren + " children)";
+            return line;
+        }
+
+        private static string Indent(int depth)
+        {
+            return new string(' ', depth * 2);
+        }
+    }
+
+    // ── create_material ──────────────────────────────────────
+    // Create a .mat asset. Shader, colour, main texture and the
+    // metallic / smoothness floats when the shader has them — a
+    // property the shader does not have is skipped, not an error.
+    // The folder is created when it does not exist yet, and the
+    // asset path is made unique so an existing material is never
+    // overwritten.
+    private static class CreateMaterialHandler
+    {
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string name = JStr(args, "name", "").Trim();
+            if (string.IsNullOrEmpty(name)) return BridgeResult.Error("'name' is required.");
+            if (name.IndexOf('/') >= 0) return BridgeResult.Error("A name cannot contain '/' — pass the folder in \"folder\" instead.");
+            string folder = JStr(args, "folder", "Assets/Materials");
+            if (string.IsNullOrEmpty(folder)) folder = "Assets/Materials";
+            if (!folder.StartsWith("Assets/", StringComparison.Ordinal) && folder != "Assets")
+                return BridgeResult.Error("'folder' must start with Assets/ — got '" + folder + "'.");
+            string shaderName = JStr(args, "shader", "Standard");
+            if (string.IsNullOrEmpty(shaderName)) shaderName = "Standard";
+            Shader shader = Shader.Find(shaderName);
+            if (shader == null)
+                return BridgeResult.Error("Unknown shader '" + shaderName + "' — try Standard, Unlit/Texture, URP/Lit, or HDRP/Lit.");
+            Color color = Color.white;
+            bool hasColor = false;
+            object colorRaw;
+            if (args.TryGetValue("color", out colorRaw) && colorRaw != null)
+            {
+                if (!SetPropertyHandler.TryParseColor(colorRaw, out color))
+                    return BridgeResult.Error("'color' must be \"#RRGGBB\" (or \"#RRGGBBAA\") or [r, g, b] / [r, g, b, a].");
+                hasColor = true;
+            }
+            string texturePath = JStr(args, "texture", "");
+            Texture2D texture = null;
+            if (!string.IsNullOrEmpty(texturePath))
+            {
+                if (!texturePath.StartsWith("Assets/", StringComparison.Ordinal))
+                    return BridgeResult.Error("'texture' must be an asset path starting with Assets/ — got '" + texturePath + "'.");
+                texture = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+                if (texture == null)
+                    return BridgeResult.Error("No texture at '" + texturePath + "'.");
+            }
+            double metallic = JNum(args, "metallic", double.NaN);
+            double smoothness = JNum(args, "smoothness", double.NaN);
+            if (!AssetDatabase.IsValidFolder(folder))
+            {
+                try
+                {
+                    Directory.CreateDirectory(folder);
+                    AssetDatabase.Refresh();
+                }
+                catch (Exception e) { return BridgeResult.Error("Could not create folder '" + folder + "': " + e.Message); }
+                if (!AssetDatabase.IsValidFolder(folder))
+                    return BridgeResult.Error("Folder '" + folder + "' does not exist and could not be created.");
+            }
+            var mat = new Material(shader);
+            if (hasColor && mat.HasProperty("_Color")) mat.color = color;
+            if (texture != null && mat.HasProperty("_MainTex")) mat.mainTexture = texture;
+            if (!double.IsNaN(metallic) && mat.HasProperty("_Metallic")) mat.SetFloat("_Metallic", (float)metallic);
+            if (!double.IsNaN(smoothness) && mat.HasProperty("_Glossiness")) mat.SetFloat("_Glossiness", (float)smoothness);
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath(folder.TrimEnd('/') + "/" + name + ".mat");
+            Undo.RegisterCreatedObjectUndo(mat, "Agent: create material " + name);
+            AssetDatabase.CreateAsset(mat, assetPath);
+            AssetDatabase.SaveAssets();
+            var data = new Dictionary<string, object>();
+            data["path"] = assetPath;
+            data["shader"] = shaderName;
+            return BridgeResult.Ok("Created material '" + assetPath + "' with shader '" + shaderName + "'" + (hasColor ? " and the given color" : "") + ".", assetPath, JsonWrite(data));
+        }
+    }
+
+    // ── list_assets ──────────────────────────────────────────
+    // List asset files under Assets/ by type. "prefab" means a
+    // .prefab file; an unknown type name is tried as a Unity type
+    // directly ("t:<name>") and fails plainly with the known list
+    // when nothing matches.
+    private static class ListAssetsHandler
+    {
+        private const int DefaultMaxResults = 100;
+        private const int MaxMaxResults = 200;
+        private static readonly Dictionary<string, string> TypeFilters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "texture", "t:Texture2D" },
+            { "material", "t:Material" },
+            { "prefab", "t:GameObject" },
+            { "scene", "t:SceneAsset" },
+            { "audio", "t:AudioClip" },
+            { "script", "t:MonoScript" },
+            { "sprite", "t:Sprite" },
+            { "animation", "t:AnimationClip" },
+            { "font", "t:Font" },
+            { "shader", "t:Shader" },
+        };
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string type = JStr(args, "type", "").Trim();
+            string folder = JStr(args, "folder", "Assets");
+            if (string.IsNullOrEmpty(folder)) folder = "Assets";
+            if (!folder.StartsWith("Assets/", StringComparison.Ordinal) && folder != "Assets")
+                return BridgeResult.Error("'folder' must start with Assets/ — got '" + folder + "'.");
+            int maxResults = (int)JNum(args, "maxResults", DefaultMaxResults);
+            if (maxResults < 1) maxResults = 1;
+            if (maxResults > MaxMaxResults) maxResults = MaxMaxResults;
+            string filter = "";
+            if (!string.IsNullOrEmpty(type))
+            {
+                if (!TypeFilters.TryGetValue(type, out filter))
+                    filter = "t:" + type;
+            }
+            string[] guids = AssetDatabase.FindAssets(filter, new[] { folder });
+            var assets = new List<object>();
+            int total = 0;
+            foreach (string guid in guids)
+            {
+                string assetPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (string.IsNullOrEmpty(assetPath)) continue;
+                if (string.Equals(type, "prefab", StringComparison.OrdinalIgnoreCase) && !assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) continue;
+                total++;
+                if (assets.Count >= maxResults) continue;
+                Type mainType = AssetDatabase.GetMainAssetTypeAtPath(assetPath);
+                var d = new Dictionary<string, object>();
+                d["path"] = assetPath;
+                d["type"] = mainType != null ? mainType.Name : "";
+                assets.Add(d);
+            }
+            if (!string.IsNullOrEmpty(type) && total == 0 && !TypeFilters.ContainsKey(type))
+                return BridgeResult.Error("No assets of type '" + type + "' under '" + folder + "'. Known types: " + string.Join(", ", new List<string>(TypeFilters.Keys).ToArray()) + ".");
+            var data = new Dictionary<string, object>();
+            data["assets"] = assets;
+            data["total"] = total;
+            data["truncated"] = total > assets.Count;
+            data["folder"] = folder;
+            data["type"] = type;
+            return BridgeResult.Ok(total + " asset(s) under '" + folder + "'" + (!string.IsNullOrEmpty(type) ? " of type '" + type + "'" : "") + (total > assets.Count ? " (showing first " + assets.Count + ")" : "") + ".", null, JsonWrite(data));
+        }
+    }
 
     // Click a UI element while the game runs: execute the
     // pointer-click handler on the object, the same path a real
