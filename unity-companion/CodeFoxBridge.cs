@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.12.0
+// CodeFoxBridge version: 0.13.0
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -100,6 +100,34 @@
 //   WITH errors does not — the handler survives both, because its
 //   state lives in SessionState and a poll tick finalizes it either
 //   way.
+// Play testing (v0.13.0) — run the game and watch what it does,
+// without a screen to look at. The model only sees what the game
+// logs, so Debug.Log / LogError are its eyes; deliberate log lines
+// ("[Test] Player reached checkpoint 2") turn a run into a test.
+//   { "action": "set_play_mode", "enabled": true, "durationSeconds": 10 }
+//     — enter Play Mode, run 10 seconds, exit, report the console
+//     since the run started (errorCount, errorOccurrences,
+//     warningCount, firstErrors, startCursor for readConsole).
+//     Without a duration it enters and stays — use that only when
+//     live state must be read, and stop it afterwards with
+//     {"enabled": false}. Duration is capped at 120 seconds.
+//     Compile errors block Play Mode: fix them first.
+//   { "action": "read_component_values", "path": "Player", "component": "Rigidbody" }
+//     — Inspector-visible values, live in Play Mode; without
+//     "component" it lists the components and children instead.
+//     "members": ["linearVelocity", "position"] reads runtime
+//     values that are not serialized, by explicit name. A timed
+//     run destroys the scene objects when it exits, so values can
+//     only be read while Play Mode is still running — enter without
+//     a duration, wait, read, stop.
+//   { "action": "inject_input", "steps": [{"key": "D", "action": "hold", "seconds": 1.5},
+//     {"key": "Space", "action": "tap"}, {"wait": 0.5}] }
+//     — scripted keyboard / gamepad input while the game runs,
+//     through the new Input System. At most 50 steps, 30 seconds.
+//     A project on the legacy input system only cannot receive
+//     injected input; the action fails plainly and says so.
+//   { "action": "click_ui", "path": "Canvas/MainMenu/PlayButton" }
+//     — click a UI Button (or any click handler) while the game runs.
 // Props take strings, numbers, bools, [x,y(,z)] vectors, [r,g,b(,a)]
 // colours (or "#rrggbb"), enum names, and asset paths (Assets/…) for
 // Sprite / Material / Texture2D / Font / AudioClip. An unknown type,
@@ -111,11 +139,18 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.Compilation;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
+#endif
 
 [InitializeOnLoad]
 public static class CodeFoxBridge
@@ -123,10 +158,12 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
-    // 0.12.0 is the first bridge that speaks the .bridge/ transport
-    // (protocol 1); the app never sends inbox commands to anything
-    // older — it updates the bridge first.
-    public const string BridgeVersion = "0.12.0";
+    // 0.13.0 is the first bridge with the play-test loop
+    // (set_play_mode, read_component_values, inject_input,
+    // click_ui). 0.12.0 is the first bridge that speaks the
+    // .bridge/ transport (protocol 1); the app never sends inbox
+    // commands to anything older — it updates the bridge first.
+    public const string BridgeVersion = "0.13.0";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -162,6 +199,10 @@ public static class CodeFoxBridge
         EditorApplication.delayCall -= BridgeTransport.RecoverInterruptedRequests;
         EditorApplication.delayCall += BridgeTransport.RecoverInterruptedRequests;
         ConsoleBuffer.Initialize();
+        PlayMode.Initialize();
+#if ENABLE_INPUT_SYSTEM
+        InjectInputHandler.Initialize();
+#endif
         BridgeTransport.WriteHeartbeat();
         Debug.Log("[CodeFox] Bridge active. Watching .bridge/ for commands.");
     }
@@ -275,9 +316,25 @@ public static class CodeFoxBridge
 
             CheckRefreshTrigger();
 
-            // A compile report that finished — on either path
-            // (reload after success, or errors with no reload) — is
-            // finalized by the poll tick, not by reload recovery.
+            // A pending long-running request that finished — a
+            // compile report (on either path: reload after success,
+            // or errors with no reload), a play-mode change, an
+            // input sequence — is finalized by the poll tick, not
+            // by reload recovery. One per tick, in order; each
+            // finalizer owns its state and reports when it is done.
+            TryFinalizePending();
+
+            ProcessInbox();
+            CleanupOutbox(now);
+        }
+
+        // One pending finalizer per tick, in order: a compile
+        // report, a play-mode change, an input sequence. Each owns
+        // its SessionState or static state and reports when it is
+        // done; the transport only writes the result and deletes
+        // the processing file.
+        private static bool TryFinalizePending()
+        {
             BridgeResult finalResult;
             string finalId;
             if (CompileReport.TryFinalize(out finalResult, out finalId))
@@ -285,10 +342,25 @@ public static class CodeFoxBridge
                 WriteOutbox(finalId, finalResult);
                 DeleteProcessing(finalId);
                 MarkActive();
+                return true;
             }
-
-            ProcessInbox();
-            CleanupOutbox(now);
+            if (PlayMode.TryFinalize(out finalResult, out finalId))
+            {
+                WriteOutbox(finalId, finalResult);
+                DeleteProcessing(finalId);
+                MarkActive();
+                return true;
+            }
+#if ENABLE_INPUT_SYSTEM
+            if (InjectInputHandler.TryFinalize(out finalResult, out finalId))
+            {
+                WriteOutbox(finalId, finalResult);
+                DeleteProcessing(finalId);
+                MarkActive();
+                return true;
+            }
+#endif
+            return false;
         }
 
         private static void MarkActive()
@@ -306,7 +378,9 @@ public static class CodeFoxBridge
             string json = "{\"protocol\":" + ProtocolVersion
                 + ",\"timeMs\":" + ms
                 + ",\"isCompiling\":" + (EditorApplication.isCompiling ? "true" : "false")
-                + ",\"isPlaying\":" + (EditorApplication.isPlaying ? "true" : "false") + "}";
+                + ",\"isPlaying\":" + (EditorApplication.isPlaying ? "true" : "false")
+                + ",\"isPlayingOrWillChangePlaymode\":" + (EditorApplication.isPlayingOrWillChangePlaymode ? "true" : "false")
+                + ",\"isPaused\":" + (EditorApplication.isPaused ? "true" : "false") + "}";
             WriteFileAtomic(_heartbeatPath, json);
         }
 
@@ -465,6 +539,7 @@ public static class CodeFoxBridge
                 string id = Path.GetFileNameWithoutExtension(file);
                 if (!IsSafeRequestId(id)) continue;
                 if (CompileReport.IsPending(id)) continue;
+                if (PlayMode.IsPending(id)) continue;
                 string json = null;
                 try { json = File.ReadAllText(file); } catch { }
                 string action = "";
@@ -551,6 +626,19 @@ public static class CodeFoxBridge
                 { "describeComponent", (json, args) => DescribeComponent(json, args) },
                 { "readConsole", (json, args) => ConsoleBuffer.Read(json, args) },
                 { "recompile_and_report_errors", (json, args) => CompileReport.Begin(json, args) },
+                { "set_play_mode", (json, args) => PlayMode.Begin(json, args) },
+                { "read_component_values", (json, args) => ReadComponentValuesHandler.Handle(json, args) },
+                { "click_ui", (json, args) => ClickUI(json, args) },
+#if ENABLE_INPUT_SYSTEM
+                { "inject_input", (json, args) => InjectInputHandler.Begin(json, args) },
+#else
+                // No new Input System in this project: input cannot
+                // be injected from editor code (the legacy
+                // UnityEngine.Input has no fakeable path). Say so
+                // plainly and point at the opt-in hooks instead of
+                // failing with "unknown action".
+                { "inject_input", (json, args) => BridgeResult.Error("This project uses the legacy input system only (UnityEngine.Input) — input cannot be injected from editor code. Add opt-in [AgentCallable] hooks to the game code instead, or enable the new Input System in Project Settings → Player → Active Input Handler.") },
+#endif
             };
 
         public static BridgeResult Dispatch(string action, string json, Dictionary<string, object> args)
@@ -598,6 +686,13 @@ public static class CodeFoxBridge
         {
             string id = BridgeDispatcher.CurrentRequestId;
             if (string.IsNullOrEmpty(id)) return BridgeResult.Error("recompile_and_report_errors needs a request id.");
+            // Unity cannot compile while the game is running, and
+            // entering Play Mode with a compile pending would
+            // disrupt the run — the loop stops the game before
+            // touching code, and the guard makes that a plain error
+            // instead of a silent no-op.
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                return BridgeResult.Error("Stop Play Mode first: set_play_mode {\"enabled\": false} — Unity cannot compile while the game is running.");
             string pending = SessionState.GetString(PendingIdKey, "");
             if (!string.IsNullOrEmpty(pending) && pending != id)
                 return BridgeResult.Error("A compile report is already running (request " + pending + "). Wait for it to finish, then try again.");
@@ -1238,6 +1333,41 @@ public static class CodeFoxBridge
                     + (missed > 0 ? " — " + missed + " older entries were evicted from the buffer; the full log is in Editor.log." : "");
             return BridgeResult.Ok(message, null, sb.ToString());
         }
+
+        // The next sequence number — a cursor a caller can mark
+        // before a run and read from afterwards. Used by the
+        // play-mode report, which records the cursor when the game
+        // starts and summarizes everything logged since.
+        public static long CurrentCursor()
+        {
+            lock (_lock) { return _nextSeq; }
+        }
+
+        // A compact summary of everything logged since a cursor:
+        // how many error entries (and how many times they
+        // recurred), how many warnings, and the first few error
+        // messages. An entry that recurs after the cursor counts —
+        // its sequence number is the latest occurrence.
+        public static void SummarySince(long sinceSeq, out int errorCount, out int errorOccurrences, out int warningCount, out List<string> firstErrors)
+        {
+            errorCount = 0;
+            errorOccurrences = 0;
+            warningCount = 0;
+            firstErrors = new List<string>();
+            Entry[] snapshot;
+            lock (_lock) { snapshot = _entries.ToArray(); }
+            foreach (Entry e in snapshot)
+            {
+                if (e.seq < sinceSeq) continue;
+                if (e.level == 2)
+                {
+                    errorCount++;
+                    errorOccurrences += e.count;
+                    if (firstErrors.Count < 5) firstErrors.Add(TruncateString(e.message, 200));
+                }
+                else if (e.level == 1) warningCount++;
+            }
+        }
     }
 
     // The refresh action is a handler like any other now — the
@@ -1458,6 +1588,64 @@ public static class CodeFoxBridge
     // the raw JSON with the small parser below instead. The existing
     // actions keep their JsonUtility path, byte for byte.
 
+    // Serialize a plain value tree (null, string, bool, numbers,
+    // List<object>, Dictionary<string, object>) to JSON. Handlers
+    // build their `data` as values and splice the result verbatim
+    // into the outbox file — this is the writer that makes that
+    // possible without a JSON library. Any other enumerable is
+    // written as an array; anything else falls back to its
+    // ToString, escaped. Non-finite numbers (NaN, Infinity — a
+    // live float can be either) are written as strings, because
+    // "R" would emit bare NaN / Infinity, which is not JSON.
+    private static string JsonWrite(object v)
+    {
+        if (v == null) return "null";
+        if (v is string) return "\"" + EscapeJson((string)v) + "\"";
+        if (v is bool) return (bool)v ? "true" : "false";
+        if (v is double)
+        {
+            double d = (double)v;
+            if (double.IsNaN(d) || double.IsInfinity(d)) return "\"" + d.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\"";
+            return d.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (v is float)
+        {
+            float f = (float)v;
+            if (float.IsNaN(f) || float.IsInfinity(f)) return "\"" + f.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\"";
+            return f.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (v is int) return ((int)v).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (v is long) return ((long)v).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (v is Dictionary<string, object>)
+        {
+            var dict = (Dictionary<string, object>)v;
+            var sb = new System.Text.StringBuilder("{");
+            bool first = true;
+            foreach (var kv in dict)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("\"").Append(EscapeJson(kv.Key)).Append("\":").Append(JsonWrite(kv.Value));
+            }
+            sb.Append('}');
+            return sb.ToString();
+        }
+        if (v is System.Collections.IEnumerable)
+        {
+            var sb = new System.Text.StringBuilder("[");
+            bool first = true;
+            foreach (object item in (System.Collections.IEnumerable)v)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append(JsonWrite(item));
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+        return "\"" + EscapeJson(v.ToString()) + "\"";
+    }
+
     // Minimal JSON parser: objects → Dictionary<string, object>,
     // arrays → List<object>, numbers → double, plus string / bool /
     // null. Throws FormatException on bad input.
@@ -1607,6 +1795,26 @@ public static class CodeFoxBridge
         object v;
         if (d != null && d.TryGetValue(key, out v)) return v as List<object>;
         return null;
+    }
+
+    private static double JNum(Dictionary<string, object> d, string key, double def)
+    {
+        object v;
+        if (d == null || !d.TryGetValue(key, out v) || v == null) return def;
+        if (v is double) return (double)v;
+        if (v is string)
+        {
+            double f;
+            if (double.TryParse((string)v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return f;
+        }
+        return def;
+    }
+
+    private static bool JBool(Dictionary<string, object> d, string key, bool def)
+    {
+        object v;
+        if (d != null && d.TryGetValue(key, out v) && v is bool) return (bool)v;
+        return def;
     }
 
     // Every non-abstract Component subclass in the loaded assemblies,
@@ -2311,6 +2519,1199 @@ public static class CodeFoxBridge
     private static void MenuOpenProjectFolder()
     {
         EditorUtility.RevealInFinder(Application.dataPath);
+    }
+
+    // ── Path → object, shared by every action that reads a scene ──
+    // read_component_values and the write actions (Build 6) all
+    // resolve "Player/Arm/Hand" + a component name the same way,
+    // so the lookup lives here once: roots from every loaded scene
+    // (plus the DontDestroyOnLoad scene in Play Mode, found with a
+    // short-lived probe — that scene has no other handle), inactive
+    // children included (Transform.Find sees them), one match or an
+    // error that says how to fix the path.
+    private static class ComponentLocator
+    {
+        public static List<GameObject> FindGameObjects(string path)
+        {
+            var matches = new List<GameObject>();
+            if (string.IsNullOrEmpty(path)) return matches;
+            string[] segments = path.Split(new[] { '/' }, 2);
+            foreach (GameObject root in EnumerateRoots())
+            {
+                if (root == null || root.name != segments[0]) continue;
+                if (segments.Length == 1) { matches.Add(root); continue; }
+                Transform child = root.transform.Find(segments[1]);
+                if (child != null) matches.Add(child.gameObject);
+            }
+            return matches;
+        }
+
+        public static IEnumerable<GameObject> EnumerateRoots()
+        {
+            var roots = new List<GameObject>();
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (!scene.isLoaded) continue;
+                roots.AddRange(scene.GetRootGameObjects());
+            }
+            if (Application.isPlaying)
+            {
+                // The DontDestroyOnLoad scene has no handle except a
+                // probe object: create one, read its scene, destroy
+                // it again. The probe itself is filtered out.
+                var probe = new GameObject("__codefox_probe");
+                UnityEngine.Object.DontDestroyOnLoad(probe);
+                foreach (GameObject root in probe.scene.GetRootGameObjects())
+                    if (root != probe) roots.Add(root);
+                UnityEngine.Object.DestroyImmediate(probe);
+            }
+            return roots;
+        }
+
+        public static bool TryResolve(Dictionary<string, object> args, out Component component, out string error)
+        {
+            component = null;
+            string path = JStr(args, "path", "");
+            string componentName = JStr(args, "component", "");
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(componentName))
+            {
+                error = "'path' and 'component' are required.";
+                return false;
+            }
+            List<GameObject> matches = FindGameObjects(path);
+            if (matches.Count != 1)
+            {
+                error = matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.";
+                return false;
+            }
+            var candidates = new List<Component>();
+            foreach (Component c in matches[0].GetComponents<Component>())
+                if (c != null && string.Equals(c.GetType().Name, componentName, StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(c);
+            if (candidates.Count == 0)
+            {
+                var available = new List<string>();
+                foreach (Component c in matches[0].GetComponents<Component>())
+                    if (c != null) available.Add(c.GetType().Name);
+                error = "No component '" + componentName + "' on '" + path + "'. Available: " + string.Join(", ", available.ToArray()) + ".";
+                return false;
+            }
+            int index = (int)JNum(args, "componentIndex", 0);
+            component = candidates[Mathf.Clamp(index, 0, candidates.Count - 1)];
+            error = null;
+            return true;
+        }
+
+        public static string GetPath(Transform transform)
+        {
+            var names = new List<string>();
+            for (Transform current = transform; current != null; current = current.parent)
+                names.Add(current.name);
+            names.Reverse();
+            return string.Join("/", names.ToArray());
+        }
+    }
+
+    // ── Play Mode ────────────────────────────────────────────────
+    // Enter / exit Play Mode, optionally for a fixed time. Entering
+    // usually reloads the domain, so — like the compile report —
+    // all state lives in SessionState and the poll tick finalizes
+    // the request. The report is the console since the run started:
+    // the model only sees what the game logs, so the run's errors
+    // and first error lines ARE the observation, plus a cursor for
+    // readConsole when it needs the details.
+    //
+    // Phases: entering → (duration 0: report "still running" |
+    // duration > 0: running) → exiting → settled edit. OnPlayMode-
+    // StateChanged is the source of truth for what actually
+    // happened; the timeouts are the backstop. A timed run exits
+    // Play Mode at the end and the scene objects are destroyed —
+    // values cannot be read after it, only the report.
+    private static class PlayMode
+    {
+        private const string PendingIdKey = "CodeFox.PlayMode.PendingId";
+        private const string PhaseKey = "CodeFox.PlayMode.Phase";
+        private const string SettledStateKey = "CodeFox.PlayMode.SettledState";
+        private const string StartCursorKey = "CodeFox.PlayMode.StartCursor";
+        private const string RequestedAtKey = "CodeFox.PlayMode.RequestedAt";
+        private const string RunningSinceKey = "CodeFox.PlayMode.RunningSince";
+        private const string DurationKey = "CodeFox.PlayMode.Duration";
+        private const string EndedByKey = "CodeFox.PlayMode.EndedBy";
+        private const int EnterTimeoutSeconds = 60;
+        private const int ExitTimeoutSeconds = 30;
+        private const int MaxDurationSeconds = 120;
+
+        public static void Initialize()
+        {
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            // A reload that landed back in Edit Mode while a change
+            // was pending (exiting Play Mode reloads) settles the
+            // state here; a reload that landed in Play Mode leaves
+            // it alone — EnteredPlayMode fires next.
+            if (HasPending() && !EditorApplication.isPlaying)
+                SessionState.SetString(SettledStateKey, "edit");
+        }
+
+        public static BridgeResult Begin(string json, Dictionary<string, object> args)
+        {
+            string id = BridgeDispatcher.CurrentRequestId;
+            if (string.IsNullOrEmpty(id)) return BridgeResult.Error("set_play_mode needs a request id.");
+            string pending = SessionState.GetString(PendingIdKey, "");
+            if (!string.IsNullOrEmpty(pending) && pending != id)
+                return BridgeResult.Error("A play-mode change is already running (request " + pending + "). Wait for it to finish, then try again.");
+            if (pending == id) return BridgeResult.Pending("Changing Play Mode…");
+            if (!args.ContainsKey("enabled")) return BridgeResult.Error("'enabled' is required: true to enter Play Mode, false to leave it.");
+            bool enabled = JBool(args, "enabled", false);
+            double durationSeconds = JNum(args, "durationSeconds", 0);
+            if (durationSeconds < 0) durationSeconds = 0;
+            if (durationSeconds > MaxDurationSeconds) durationSeconds = MaxDurationSeconds;
+            if (enabled && EditorApplication.isPlaying)
+                return BridgeResult.Ok("Already in Play Mode.", null, ReportData("", 0, ConsoleBuffer.CurrentCursor()));
+            if (!enabled && !EditorApplication.isPlaying)
+                return BridgeResult.Ok("Already in Edit Mode.", null, ReportData("", 0, ConsoleBuffer.CurrentCursor()));
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                return BridgeResult.Error("Unity is compiling — wait for the compile to finish, then try again.");
+            if (CompileReport.HasPending())
+                return BridgeResult.Error("A compile report is running — wait for it to finish, then try again.");
+            if (enabled && EditorUtility.scriptCompilationFailed)
+                return BridgeResult.Error("The project has compile errors — run recompile_and_report_errors first and fix them. Play Mode will not start while the project does not compile.");
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                return BridgeResult.Error("Play Mode is already changing state — wait a moment and try again.");
+
+            SessionState.SetString(PendingIdKey, id);
+            SessionState.SetString(PhaseKey, enabled ? "entering" : "exiting");
+            SessionState.SetString(SettledStateKey, EditorApplication.isPlaying ? "play" : "edit");
+            SessionState.SetLong(StartCursorKey, ConsoleBuffer.CurrentCursor());
+            SessionState.SetLong(RequestedAtKey, UnixMs());
+            SessionState.SetLong(RunningSinceKey, 0);
+            SessionState.SetLong(DurationKey, (long)(durationSeconds * 1000));
+            SessionState.SetString(EndedByKey, "");
+            EditorApplication.isPlaying = enabled;
+            return BridgeResult.Pending(enabled ? "Entering Play Mode…" : "Exiting Play Mode…");
+        }
+
+        public static bool HasPending()
+        {
+            return !string.IsNullOrEmpty(SessionState.GetString(PendingIdKey, ""));
+        }
+
+        public static bool IsPending(string id)
+        {
+            return !string.IsNullOrEmpty(id) && SessionState.GetString(PendingIdKey, "") == id;
+        }
+
+        // Called every poll tick. Returns true when the change is
+        // final — the transport writes the result and deletes the
+        // processing file.
+        public static bool TryFinalize(out BridgeResult result, out string requestId)
+        {
+            result = null;
+            requestId = null;
+            string id = SessionState.GetString(PendingIdKey, "");
+            if (string.IsNullOrEmpty(id)) return false;
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return false;
+
+            string phase = SessionState.GetString(PhaseKey, "");
+            string settled = SessionState.GetString(SettledStateKey, "");
+            long requestedAt = SessionState.GetLong(RequestedAtKey, 0);
+            long durationMs = SessionState.GetLong(DurationKey, 0);
+            long runningSince = SessionState.GetLong(RunningSinceKey, 0);
+            long startCursor = SessionState.GetLong(StartCursorKey, 0);
+            string endedBy = SessionState.GetString(EndedByKey, "");
+            long now = UnixMs();
+
+            if (phase == "entering" && settled != "play" && requestedAt > 0 && now - requestedAt > EnterTimeoutSeconds * 1000)
+            {
+                ClearState();
+                requestId = id;
+                result = BridgeResult.Error("Timed out waiting for Play Mode to start (60s) — check Unity's Console for errors.");
+                return true;
+            }
+            if (phase == "exiting" && settled != "edit" && requestedAt > 0 && now - requestedAt > ExitTimeoutSeconds * 1000)
+            {
+                ClearState();
+                requestId = id;
+                result = BridgeResult.Error("Timed out waiting for Play Mode to stop (30s).");
+                return true;
+            }
+            if (phase == "entering" && settled == "play")
+            {
+                if (durationMs <= 0)
+                {
+                    // No duration: the game stays running and the
+                    // model reads live state, then stops it itself.
+                    ClearState();
+                    requestId = id;
+                    result = BridgeResult.Ok("In Play Mode (still running) — " + ConsoleSummaryText(startCursor) + " Stop it with set_play_mode {\"enabled\": false} when done.", null, ReportData("", 0, startCursor));
+                    return true;
+                }
+                SessionState.SetString(PhaseKey, "running");
+                SessionState.SetLong(RunningSinceKey, now);
+                phase = "running";
+                runningSince = now;
+            }
+            if (phase == "running")
+            {
+                if (settled == "edit")
+                {
+                    long played = runningSince > 0 ? (now - runningSince) / 1000 : 0;
+                    ClearState();
+                    requestId = id;
+                    result = BridgeResult.Ok("Play Mode run finished (stopped early) — played " + played + "s, " + ConsoleSummaryText(startCursor), null, ReportData(string.IsNullOrEmpty(endedBy) ? "stopped early" : endedBy, played, startCursor));
+                    return true;
+                }
+                if (durationMs > 0 && runningSince > 0 && now - runningSince >= durationMs)
+                {
+                    SessionState.SetString(PhaseKey, "exiting");
+                    SessionState.SetString(EndedByKey, "duration elapsed");
+                    EditorApplication.isPlaying = false;
+                    return false;
+                }
+                return false;
+            }
+            if (phase == "exiting" && settled == "edit")
+            {
+                long played = runningSince > 0 ? (now - runningSince) / 1000 : 0;
+                if (string.IsNullOrEmpty(endedBy)) endedBy = "stopped";
+                ClearState();
+                requestId = id;
+                result = BridgeResult.Ok("Play Mode run finished (" + endedBy + ") — played " + played + "s, " + ConsoleSummaryText(startCursor), null, ReportData(endedBy, played, startCursor));
+                return true;
+            }
+            return false;
+        }
+
+        private static void ClearState()
+        {
+            SessionState.SetString(PendingIdKey, "");
+            SessionState.SetString(PhaseKey, "");
+            SessionState.SetString(SettledStateKey, "");
+            SessionState.SetLong(StartCursorKey, 0);
+            SessionState.SetLong(RequestedAtKey, 0);
+            SessionState.SetLong(RunningSinceKey, 0);
+            SessionState.SetLong(DurationKey, 0);
+            SessionState.SetString(EndedByKey, "");
+        }
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            if (state == PlayModeStateChange.EnteredPlayMode) SessionState.SetString(SettledStateKey, "play");
+            else if (state == PlayModeStateChange.EnteredEditMode) SessionState.SetString(SettledStateKey, "edit");
+        }
+
+        private static string ConsoleSummaryText(long startCursor)
+        {
+            int errorCount;
+            int errorOccurrences;
+            int warningCount;
+            List<string> firstErrors;
+            ConsoleBuffer.SummarySince(startCursor, out errorCount, out errorOccurrences, out warningCount, out firstErrors);
+            return errorCount + " error" + (errorCount == 1 ? "" : "s") + " (" + errorOccurrences + " occurrence" + (errorOccurrences == 1 ? "" : "s") + "), " + warningCount + " warning" + (warningCount == 1 ? "" : "s") + " since the run started.";
+        }
+
+        private static string ReportData(string endedBy, long playedSeconds, long startCursor)
+        {
+            int errorCount;
+            int errorOccurrences;
+            int warningCount;
+            List<string> firstErrors;
+            ConsoleBuffer.SummarySince(startCursor, out errorCount, out errorOccurrences, out warningCount, out firstErrors);
+            var data = new Dictionary<string, object>();
+            data["playing"] = EditorApplication.isPlaying;
+            data["endedBy"] = endedBy;
+            data["playedSeconds"] = playedSeconds;
+            data["errorCount"] = errorCount;
+            data["errorOccurrences"] = errorOccurrences;
+            data["warningCount"] = warningCount;
+            data["firstErrors"] = firstErrors;
+            data["startCursor"] = startCursor;
+            data["hint"] = "Use read_console with sinceSeq=" + startCursor + " for full details.";
+            return JsonWrite(data);
+        }
+
+        private static long UnixMs()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+    }
+
+    // ── Reading live values off a scene object ───────────────────
+    // Two modes, because SerializedObject only exposes serialized
+    // data and the runtime values the model actually wants to test
+    // (a Rigidbody's velocity, a Transform's world position, a
+    // private currentHealth) are not in it:
+    //   (1) serialized properties — Inspector-visible fields
+    //       (public or [SerializeField]), live values in Play Mode,
+    //       no names needed up front;
+    //   (2) runtime members — properties / fields named explicitly,
+    //       read by reflection.
+    // Read-only: writing is a separate action with approval and
+    // undo (Build 6). Output is bounded — 40 properties by
+    // default, 100 hard max, collection items 8, nesting depth 2,
+    // strings 200 chars, floats to 3 decimals — and truncation
+    // returns omitted + available names, so the model can ask for
+    // specific ones next. Values are converted to plain JSON first:
+    // a raw Vector3 can recurse through `normalized` and throw.
+    // renderer.material / meshFilter.mesh instantiate a copy of the
+    // asset every time they are read (and leak it), so those
+    // members are refused and the shared* versions named instead.
+    private static class ReadComponentValuesHandler
+    {
+        private const int DefaultMaxProperties = 40;
+        private const int HardMaxProperties = 100;
+        private const int MaxCollectionItems = 8;
+        private const int MaxDepth = 2;
+        private const int MaxStringChars = 200;
+        private const int MaxMemberSuggestions = 8;
+        private static readonly string[] NoiseProperties = { "m_Script", "m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset", "m_GameObject", "m_EditorHideFlags", "m_EditorClassIdentifier" };
+        private static readonly string[] DeniedMembers = { "material", "materials", "mesh" };
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string path = JStr(args, "path", "");
+            if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+            List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+            if (matches.Count != 1)
+                return BridgeResult.Error(matches.Count == 0
+                    ? "No GameObject at '" + path + "'. Start with the scene root name."
+                    : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+            GameObject target = matches[0];
+            string componentName = JStr(args, "component", "");
+            if (string.IsNullOrEmpty(componentName))
+            {
+                // Discovery: what is on this object, and what is
+                // under it — a model that cannot see the scene tree
+                // has to guess paths.
+                var compNames = new List<string>();
+                foreach (Component c in target.GetComponents<Component>())
+                    if (c != null) compNames.Add(c.GetType().Name);
+                var children = new List<string>();
+                foreach (Transform child in target.transform)
+                    children.Add(ComponentLocator.GetPath(child));
+                var discovery = new Dictionary<string, object>();
+                discovery["path"] = ComponentLocator.GetPath(target.transform);
+                discovery["components"] = compNames;
+                discovery["children"] = children;
+                discovery["matchCount"] = 1;
+                discovery["isPlaying"] = EditorApplication.isPlaying;
+                return BridgeResult.Ok(target.name + " has " + compNames.Count + " component(s) and " + children.Count + " child(ren).", null, JsonWrite(discovery));
+            }
+            if (!ComponentLocator.TryResolve(args, out Component component, out string locateError))
+                return BridgeResult.Error(locateError);
+
+            int maxProperties = (int)JNum(args, "maxProperties", DefaultMaxProperties);
+            if (maxProperties < 1) maxProperties = 1;
+            if (maxProperties > HardMaxProperties) maxProperties = HardMaxProperties;
+            List<string> wanted = ToStringList(JArr(args, "properties"));
+            List<string> members = ToStringList(JArr(args, "members"));
+
+            var serialized = new SerializedObject(component);
+            serialized.Update();
+            // Top-level pass: every visible, non-noise property name.
+            var topNames = new List<string>();
+            SerializedProperty iterator = serialized.GetIterator();
+            if (iterator.NextVisible(true))
+            {
+                do { if (!IsNoiseProperty(iterator.name)) topNames.Add(iterator.name); }
+                while (iterator.NextVisible(false));
+            }
+            var values = new Dictionary<string, object>();
+            var unknownProperties = new List<string>();
+            int omitted = 0;
+            if (wanted != null)
+            {
+                foreach (string name in wanted)
+                {
+                    SerializedProperty p = serialized.FindProperty(name);
+                    if (p == null || IsNoiseProperty(p.name)) { unknownProperties.Add(name); continue; }
+                    values[name] = ReadProperty(p, 0);
+                }
+            }
+            else
+            {
+                foreach (string name in topNames)
+                {
+                    if (values.Count >= maxProperties) break;
+                    SerializedProperty p = serialized.FindProperty(name);
+                    if (p != null) values[name] = ReadProperty(p, 0);
+                }
+                omitted = topNames.Count - values.Count;
+            }
+
+            var runtime = new Dictionary<string, object>();
+            var memberErrors = new Dictionary<string, object>();
+            if (members != null)
+            {
+                Type type = component.GetType();
+                foreach (string name in members)
+                {
+                    string denied = DeniedMemberMessage(name);
+                    if (denied != null) { memberErrors[name] = denied; continue; }
+                    FieldInfo field = FindField(type, name);
+                    if (field != null)
+                    {
+                        try { runtime[name] = ConvertRuntimeValue(field.GetValue(component), 0); }
+                        catch (Exception e) { memberErrors[name] = "Could not read " + type.Name + "." + name + ": " + UnwrapMessage(e); }
+                        continue;
+                    }
+                    PropertyInfo property = FindProperty(type, name);
+                    if (property != null)
+                    {
+                        if (property.GetIndexParameters().Length > 0) { memberErrors[name] = "'" + name + "' is an indexer — read a specific element instead."; continue; }
+                        if (!property.CanRead) { memberErrors[name] = "'" + name + "' cannot be read."; continue; }
+                        try { runtime[name] = ConvertRuntimeValue(property.GetValue(component, null), 0); }
+                        catch (Exception e) { memberErrors[name] = "Could not read " + type.Name + "." + name + ": " + UnwrapMessage(e); }
+                        continue;
+                    }
+                    List<string> similar = SuggestMembers(type, name);
+                    memberErrors[name] = "No field or property named '" + name + "' on " + type.Name + "."
+                        + (similar.Count > 0 ? " Similar: " + string.Join(", ", similar.ToArray()) + "." : "");
+                }
+            }
+
+            var data = new Dictionary<string, object>();
+            data["path"] = ComponentLocator.GetPath(target.transform);
+            data["component"] = component.GetType().Name;
+            data["matchCount"] = matches.Count;
+            data["isPlaying"] = EditorApplication.isPlaying;
+            data["values"] = values;
+            data["runtime"] = runtime;
+            data["totalProperties"] = topNames.Count;
+            data["omitted"] = omitted;
+            data["availableNames"] = topNames.Count > HardMaxProperties ? topNames.GetRange(0, HardMaxProperties) : topNames;
+            data["unknownProperties"] = unknownProperties;
+            data["memberErrors"] = memberErrors;
+            string message = ComponentLocator.GetPath(target.transform) + " / " + component.GetType().Name + ": " + values.Count + " serialized value(s)"
+                + (runtime.Count > 0 ? ", " + runtime.Count + " runtime member(s)" : "")
+                + (unknownProperties.Count > 0 ? " — unknown properties: " + string.Join(", ", unknownProperties.ToArray()) : "")
+                + (memberErrors.Count > 0 ? " — member errors: " + memberErrors.Count : "") + ".";
+            return BridgeResult.Ok(message, null, JsonWrite(data));
+        }
+
+        private static bool IsNoiseProperty(string name)
+        {
+            foreach (string n in NoiseProperties) if (n == name) return true;
+            return false;
+        }
+
+        private static List<string> ToStringList(List<object> raw)
+        {
+            if (raw == null) return null;
+            var list = new List<string>();
+            foreach (object v in raw) if (v != null) list.Add(v.ToString());
+            return list;
+        }
+
+        private static string UnwrapMessage(Exception e)
+        {
+            if (e == null) return "";
+            if (e.InnerException != null) return e.InnerException.Message;
+            return e.Message;
+        }
+
+        private static string DeniedMemberMessage(string name)
+        {
+            foreach (string denied in DeniedMembers)
+            {
+                if (!string.Equals(name, denied, StringComparison.OrdinalIgnoreCase)) continue;
+                if (denied == "material") return "'material' creates a copy of the material each time it is read — use 'sharedMaterial' instead.";
+                if (denied == "materials") return "'materials' creates a copy of the materials each time they are read — use 'sharedMaterials' instead.";
+                return "'mesh' creates a copy of the mesh each time it is read — use 'sharedMesh' instead.";
+            }
+            return null;
+        }
+
+        private static FieldInfo FindField(Type type, string name)
+        {
+            for (Type t = type; t != null && t != typeof(object); t = t.BaseType)
+            {
+                FieldInfo f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly | BindingFlags.IgnoreCase);
+                if (f != null) return f;
+            }
+            return null;
+        }
+
+        private static PropertyInfo FindProperty(Type type, string name)
+        {
+            for (Type t = type; t != null && t != typeof(object); t = t.BaseType)
+            {
+                PropertyInfo p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly | BindingFlags.IgnoreCase);
+                if (p != null) return p;
+            }
+            return null;
+        }
+
+        private static List<string> SuggestMembers(Type type, string wanted)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (Type t = type; t != null && t != typeof(object); t = t.BaseType)
+            {
+                foreach (FieldInfo f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                    names.Add(f.Name);
+                foreach (PropertyInfo p in t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                    if (p.GetIndexParameters().Length == 0) names.Add(p.Name);
+            }
+            var scored = new List<KeyValuePair<string, int>>();
+            foreach (string name in names)
+            {
+                int d;
+                if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0) d = 0;
+                else d = LevenshteinDistance(name.ToLowerInvariant(), wanted.ToLowerInvariant());
+                if (d <= 2) scored.Add(new KeyValuePair<string, int>(name, d));
+            }
+            scored.Sort((a, b) => a.Value != b.Value ? a.Value.CompareTo(b.Value) : string.Compare(a.Key, b.Key, StringComparison.Ordinal));
+            var result = new List<string>();
+            foreach (var kv in scored)
+            {
+                if (result.Count >= MaxMemberSuggestions) break;
+                result.Add(kv.Key);
+            }
+            return result;
+        }
+
+        private static int LevenshteinDistance(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a)) return string.IsNullOrEmpty(b) ? 0 : b.Length;
+            if (string.IsNullOrEmpty(b)) return a.Length;
+            int[] prev = new int[b.Length + 1];
+            int[] cur = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = j;
+            for (int i = 1; i <= a.Length; i++)
+            {
+                cur[0] = i;
+                for (int j = 1; j <= b.Length; j++)
+                {
+                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                }
+                int[] tmp = prev; prev = cur; cur = tmp;
+            }
+            return prev[b.Length];
+        }
+
+        private static double Round3(float f)
+        {
+            return Math.Round((double)f, 3);
+        }
+
+        // One serialized property → a plain value. Internal so the
+        // write action (Build 6) can read before/after values with
+        // the same conversion instead of inventing its own.
+        internal static object ReadProperty(SerializedProperty prop, int depth)
+        {
+            switch (prop.propertyType)
+            {
+                case SerializedPropertyType.Integer: return prop.longValue;
+                case SerializedPropertyType.Boolean: return prop.boolValue;
+                case SerializedPropertyType.Float: return Math.Round(prop.doubleValue, 3);
+                case SerializedPropertyType.String: return TruncateString(prop.stringValue ?? "", MaxStringChars);
+                case SerializedPropertyType.Color:
+                    {
+                        Color c = prop.colorValue;
+                        return new List<object> { Round3(c.r), Round3(c.g), Round3(c.b), Round3(c.a) };
+                    }
+                case SerializedPropertyType.ObjectReference:
+                case SerializedPropertyType.ExposedReference:
+                    {
+                        UnityEngine.Object o = prop.objectReferenceValue;
+                        if (o == null) return null;
+                        return o.name + " (" + o.GetType().Name + ")";
+                    }
+                case SerializedPropertyType.Enum:
+                    {
+                        // A flags enum's combined value is an index
+                        // past the end of the names — return the
+                        // number then, not the wrong name.
+                        string[] names = prop.enumNames;
+                        int idx = prop.enumValueIndex;
+                        if (names != null && idx >= 0 && idx < names.Length) return names[idx];
+                        return idx;
+                    }
+                case SerializedPropertyType.Vector2:
+                    {
+                        Vector2 v = prop.vector2Value;
+                        return new List<object> { Round3(v.x), Round3(v.y) };
+                    }
+                case SerializedPropertyType.Vector3:
+                    {
+                        Vector3 v = prop.vector3Value;
+                        return new List<object> { Round3(v.x), Round3(v.y), Round3(v.z) };
+                    }
+                case SerializedPropertyType.Vector4:
+                    {
+                        Vector4 v = prop.vector4Value;
+                        return new List<object> { Round3(v.x), Round3(v.y), Round3(v.z), Round3(v.w) };
+                    }
+                case SerializedPropertyType.Rect:
+                    {
+                        Rect r = prop.rectValue;
+                        return new List<object> { Round3(r.x), Round3(r.y), Round3(r.width), Round3(r.height) };
+                    }
+                case SerializedPropertyType.ArraySize: return prop.intValue;
+                case SerializedPropertyType.Character: return prop.intValue;
+                case SerializedPropertyType.LayerMask: return prop.intValue;
+                case SerializedPropertyType.Quaternion:
+                    {
+                        // Euler angles in degrees — easier to read
+                        // than four quaternion components.
+                        Vector3 e = prop.quaternionValue.eulerAngles;
+                        return new List<object> { Round3(e.x), Round3(e.y), Round3(e.z) };
+                    }
+                case SerializedPropertyType.RectInt:
+                    {
+                        RectInt r = prop.rectIntValue;
+                        return new List<object> { r.x, r.y, r.width, r.height };
+                    }
+                case SerializedPropertyType.Vector2Int:
+                    {
+                        Vector2Int v = prop.vector2IntValue;
+                        return new List<object> { v.x, v.y };
+                    }
+                case SerializedPropertyType.Vector3Int:
+                    {
+                        Vector3Int v = prop.vector3IntValue;
+                        return new List<object> { v.x, v.y, v.z };
+                    }
+                case SerializedPropertyType.Bounds:
+                    {
+                        Bounds b = prop.boundsValue;
+                        var d = new Dictionary<string, object>();
+                        d["center"] = new List<object> { Round3(b.center.x), Round3(b.center.y), Round3(b.center.z) };
+                        d["extents"] = new List<object> { Round3(b.extents.x), Round3(b.extents.y), Round3(b.extents.z) };
+                        return d;
+                    }
+                case SerializedPropertyType.BoundsInt:
+                    {
+                        BoundsInt b = prop.boundsIntValue;
+                        var d = new Dictionary<string, object>();
+                        d["center"] = new List<object> { b.center.x, b.center.y, b.center.z };
+                        d["extents"] = new List<object> { b.size.x, b.size.y, b.size.z };
+                        return d;
+                    }
+                case SerializedPropertyType.Hash128: return prop.hash128Value.ToString();
+                case SerializedPropertyType.AnimationCurve: return "<curve>";
+                case SerializedPropertyType.Gradient: return "<gradient>";
+                case SerializedPropertyType.FixedBufferSize: return prop.intValue;
+                case SerializedPropertyType.Generic:
+                    {
+                        if (depth >= MaxDepth) return "<" + prop.type + ">";
+                        if (prop.isArray)
+                        {
+                            var items = new List<object>();
+                            int count = prop.arraySize;
+                            for (int i = 0; i < Math.Min(count, MaxCollectionItems); i++)
+                                items.Add(ReadProperty(prop.GetArrayElementAtIndex(i), depth + 1));
+                            var d = new Dictionary<string, object>();
+                            d["items"] = items;
+                            d["total"] = count;
+                            if (count > items.Count) d["truncated"] = true;
+                            return d;
+                        }
+                        var obj = new Dictionary<string, object>();
+                        SerializedProperty end = prop.GetEndProperty();
+                        SerializedProperty child = prop.Copy();
+                        while (child.NextVisible(true) && !SerializedProperty.EqualContents(child, end))
+                        {
+                            if (child.depth == prop.depth + 1)
+                                obj[child.name] = ReadProperty(child, depth + 1);
+                        }
+                        return obj;
+                    }
+                default: return "<" + prop.propertyType + ">";
+            }
+        }
+
+        // One runtime value → a plain value. A Transform is an
+        // IEnumerable, so it is caught by the Object check first;
+        // a string is an IEnumerable too, so it is caught before
+        // the collection check.
+        private static object ConvertRuntimeValue(object v, int depth)
+        {
+            if (v == null) return null;
+            if (v is string) return TruncateString((string)v, MaxStringChars);
+            if (v is bool) return v;
+            if (v is float) return Math.Round((double)(float)v, 3);
+            if (v is double) return Math.Round((double)v, 3);
+            if (v is int || v is long) return v;
+            if (v is Vector2) { var x = (Vector2)v; return new List<object> { Round3(x.x), Round3(x.y) }; }
+            if (v is Vector2Int) { var x = (Vector2Int)v; return new List<object> { x.x, x.y }; }
+            if (v is Vector3) { var x = (Vector3)v; return new List<object> { Round3(x.x), Round3(x.y), Round3(x.z) }; }
+            if (v is Vector3Int) { var x = (Vector3Int)v; return new List<object> { x.x, x.y, x.z }; }
+            if (v is Vector4) { var x = (Vector4)v; return new List<object> { Round3(x.x), Round3(x.y), Round3(x.z), Round3(x.w) }; }
+            if (v is Quaternion) { Vector3 e = ((Quaternion)v).eulerAngles; return new List<object> { Round3(e.x), Round3(e.y), Round3(e.z) }; }
+            if (v is Color) { var x = (Color)v; return new List<object> { Round3(x.r), Round3(x.g), Round3(x.b), Round3(x.a) }; }
+            if (v is Color32) { var x = (Color32)v; return new List<object> { x.r, x.g, x.b, x.a }; }
+            if (v is Rect) { var x = (Rect)v; return new List<object> { Round3(x.x), Round3(x.y), Round3(x.width), Round3(x.height) }; }
+            if (v is RectInt) { var x = (RectInt)v; return new List<object> { x.x, x.y, x.width, x.height }; }
+            if (v is Bounds)
+            {
+                var x = (Bounds)v;
+                var d = new Dictionary<string, object>();
+                d["center"] = new List<object> { Round3(x.center.x), Round3(x.center.y), Round3(x.center.z) };
+                d["extents"] = new List<object> { Round3(x.extents.x), Round3(x.extents.y), Round3(x.extents.z) };
+                return d;
+            }
+            if (v is Enum) return v.ToString();
+            if (v is UnityEngine.Object)
+            {
+                var o = (UnityEngine.Object)v;
+                if (o == null) return "<destroyed or none>";
+                return o.name + " (" + o.GetType().Name + ")";
+            }
+            if (depth >= MaxDepth) return "<" + v.GetType().Name + ">";
+            if (v is System.Collections.IEnumerable)
+            {
+                var items = new List<object>();
+                int total = 0;
+                foreach (object item in (System.Collections.IEnumerable)v)
+                {
+                    total++;
+                    if (items.Count < MaxCollectionItems) items.Add(ConvertRuntimeValue(item, depth + 1));
+                }
+                var d = new Dictionary<string, object>();
+                d["items"] = items;
+                d["total"] = total;
+                if (total > items.Count) d["truncated"] = true;
+                return d;
+            }
+            try { return TruncateString(v.ToString(), MaxStringChars); }
+            catch { return "<" + v.GetType().Name + ">"; }
+        }
+    }
+
+#if ENABLE_INPUT_SYSTEM
+    // ── Scripted input in Play Mode ──────────────────────────────
+    // Queue device state events through the new Input System — the
+    // route with the highest fidelity, because it exercises the
+    // game's real bindings instead of calling game code directly.
+    // The old UnityEngine.Input cannot be faked from editor code,
+    // and OS-level synthetic input is fragile (needs focus, steals
+    // the keyboard) — neither is shipped. A project on the legacy
+    // input system only gets a plain error from the dispatcher.
+    //
+    // The traps, all handled here rather than left to the caller:
+    //   * Silent drops when Unity is not focused — the run saves
+    //     the focus settings in SessionState, sets them to let
+    //     input through while the editor is in the background, and
+    //     restores them when the run finishes, is cancelled, or a
+    //     script reload kills it. The result also reports whether
+    //     the app was focused and the device enabled, so a deaf
+    //     game does not look like a bug in the model's code.
+    //   * Events are processed at the next input update — a tap
+    //     holds for 3 frames, because a press and release inside
+    //     the same update collapse into nothing.
+    //   * Stuck keys — every key and button is released when the
+    //     run finishes, is cancelled, or Play Mode ends.
+    //   * Keyboard.current is never assumed: input goes into the
+    //     existing device. A gamepad is the existing one, or one
+    //     added for the run.
+    //   * Per-frame granularity needs its own EditorApplication.
+    //     update subscription — the transport polls at 150ms–1s,
+    //     far too coarse for input. The transport only collects
+    //     the final result.
+    // The run starts with a self-check: one frame of a key, then
+    // confirm the device reports it pressed. If it never lands,
+    // the run fails plainly as "input is being dropped" instead
+    // of pretending the game ignored the key.
+    private static class InjectInputHandler
+    {
+        private const int MaxSteps = 50;
+        private const double MaxTotalSeconds = 30.0;
+        private const int DefaultTapFrames = 3;
+        private const int NotStarted = -1;
+        private const int SelfCheckFrames = 2;
+        private const double SelfCheckTimeoutSeconds = 5.0;
+
+        private const string ActiveKey = "CodeFox.Inject.Active";
+        private const string BackgroundBehaviorKey = "CodeFox.Inject.BackgroundBehavior";
+        private const string EditorInputBehaviorKey = "CodeFox.Inject.EditorInputBehavior";
+        private const string RunInBackgroundKey = "CodeFox.Inject.RunInBackground";
+
+        private sealed class Step
+        {
+            public Key key = Key.None;
+            public bool hasPadButton;
+            public GamepadButton padButton;
+            public bool hasStick;
+            public Vector2 stick;
+            public int frames;
+            public double seconds;
+            public int startFrame = NotStarted;
+            public double startTime;
+        }
+
+        private static List<Step> _steps;
+        private static int _stepIndex;
+        private static string _pendingRequestId;
+        private static BridgeResult _finishedResult;
+        private static HashSet<Key> _heldKeys = new HashSet<Key>();
+        private static HashSet<GamepadButton> _heldPadButtons = new HashSet<GamepadButton>();
+        private static Vector2 _stick;
+        private static bool _hasStick;
+        private static Gamepad _gamepad;
+        private static bool _selfChecking;
+        private static Key _selfCheckKey = Key.None;
+        private static int _selfCheckStartFrame = NotStarted;
+        private static double _selfCheckStartTime;
+        private static bool _selfCheckPassed;
+        private static bool _diagnosticsFocused;
+        private static bool _diagnosticsDeviceEnabled;
+
+        public static void Initialize()
+        {
+            EditorApplication.update -= Tick;
+            EditorApplication.update += Tick;
+            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeChanged;
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeReload;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeReload;
+            // A domain reload killed a run mid-flight: the settings
+            // the run changed are still changed, and the run's
+            // state is gone. Restore the originals so the editor
+            // is left as the user had it.
+            if (SessionState.GetBool(ActiveKey, false))
+            {
+                RestoreFocusSettings();
+                SessionState.SetBool(ActiveKey, false);
+            }
+        }
+
+        public static BridgeResult Begin(string json, Dictionary<string, object> args)
+        {
+            string id = BridgeDispatcher.CurrentRequestId;
+            if (string.IsNullOrEmpty(id)) return BridgeResult.Error("inject_input needs a request id.");
+            if (_steps != null) return BridgeResult.Error("An input sequence is already running — wait for it to finish.");
+            if (!EditorApplication.isPlaying)
+                return BridgeResult.Error("Enter Play Mode first — input can only be injected while the game is running (set_play_mode without a duration, then inject_input, then set_play_mode {\"enabled\": false}).");
+            List<object> rawSteps = JArr(args, "steps");
+            if (rawSteps == null || rawSteps.Count < 1) return BridgeResult.Error("inject_input needs at least one step.");
+            if (rawSteps.Count > MaxSteps) return BridgeResult.Error("inject_input takes at most " + MaxSteps + " steps — split the run into shorter ones.");
+            List<Step> steps;
+            string parseError;
+            if (!TryParseSteps(rawSteps, out steps, out parseError)) return BridgeResult.Error(parseError);
+            double totalSeconds = 0;
+            bool needsKeyboard = false;
+            bool needsGamepad = false;
+            Key firstKey = Key.None;
+            foreach (Step s in steps)
+            {
+                totalSeconds += s.seconds + s.frames / 60.0;
+                if (s.key != Key.None) { needsKeyboard = true; if (firstKey == Key.None) firstKey = s.key; }
+                if (s.hasPadButton || s.hasStick) needsGamepad = true;
+            }
+            if (totalSeconds > MaxTotalSeconds) return BridgeResult.Error("Input steps total more than " + MaxTotalSeconds + " seconds — split them into shorter runs.");
+            if (needsKeyboard && Keyboard.current == null)
+                return BridgeResult.Error("No keyboard device is connected — the game cannot receive keyboard input.");
+            _gamepad = null;
+            if (needsGamepad)
+            {
+                _gamepad = Gamepad.current;
+                if (_gamepad == null)
+                {
+                    try { _gamepad = InputSystem.AddDevice<Gamepad>(); }
+                    catch (Exception e) { return BridgeResult.Error("Could not add a gamepad device for input: " + e.Message); }
+                }
+            }
+
+            _diagnosticsFocused = Application.isFocused;
+            _diagnosticsDeviceEnabled = needsKeyboard
+                ? (Keyboard.current != null && Keyboard.current.enabled)
+                : (_gamepad != null && _gamepad.enabled);
+
+            // Save the focus settings, then let input through while
+            // the editor is in the background. Restored in Finish
+            // — and in Initialize, if a reload kills the run first.
+            InputSettings settings = InputSystem.settings;
+            if (settings != null)
+            {
+                SessionState.SetInt(BackgroundBehaviorKey, (int)settings.backgroundBehavior);
+                SessionState.SetInt(EditorInputBehaviorKey, (int)settings.editorInputBehaviorInPlayMode);
+                SessionState.SetBool(RunInBackgroundKey, Application.runInBackground);
+                settings.backgroundBehavior = InputSettings.BackgroundBehavior.IgnoreFocus;
+                settings.editorInputBehaviorInPlayMode = InputSettings.EditorInputBehaviorInPlayMode.AllDeviceInputAlwaysGoesToGameView;
+            }
+            Application.runInBackground = true;
+            SessionState.SetBool(ActiveKey, true);
+
+            _steps = steps;
+            _stepIndex = 0;
+            _pendingRequestId = id;
+            _finishedResult = null;
+            _selfCheckKey = firstKey;
+            _selfChecking = firstKey != Key.None;
+            _selfCheckPassed = false;
+            _selfCheckStartFrame = NotStarted;
+            return BridgeResult.Pending("Injecting input…");
+        }
+
+        public static bool HasPending()
+        {
+            return _steps != null;
+        }
+
+        public static bool IsPending(string id)
+        {
+            return _steps != null && _pendingRequestId == id;
+        }
+
+        public static bool TryFinalize(out BridgeResult result, out string requestId)
+        {
+            result = null;
+            requestId = null;
+            if (_finishedResult == null || string.IsNullOrEmpty(_pendingRequestId)) return false;
+            result = _finishedResult;
+            requestId = _pendingRequestId;
+            _finishedResult = null;
+            _pendingRequestId = null;
+            return true;
+        }
+
+        private static void Tick()
+        {
+            if (_steps == null) return;
+            if (_selfChecking) { SelfCheckTick(); return; }
+            if (_stepIndex >= _steps.Count) return;
+            Step step = _steps[_stepIndex];
+            if (step.startFrame == NotStarted)
+            {
+                step.startFrame = Time.frameCount;
+                step.startTime = Time.realtimeSinceStartup;
+                if (step.key != Key.None) { _heldKeys.Add(step.key); FlushKeyboardState(); }
+                if (step.hasPadButton) { _heldPadButtons.Add(step.padButton); FlushGamepadState(); }
+                if (step.hasStick) { _stick = step.stick; _hasStick = true; FlushGamepadState(); }
+            }
+            bool done = step.frames > 0
+                ? Time.frameCount - step.startFrame >= step.frames
+                : Time.realtimeSinceStartup - step.startTime >= step.seconds;
+            if (!done) return;
+            if (step.key != Key.None) { _heldKeys.Remove(step.key); FlushKeyboardState(); }
+            if (step.hasPadButton) { _heldPadButtons.Remove(step.padButton); FlushGamepadState(); }
+            if (step.hasStick) { _hasStick = false; _stick = Vector2.zero; FlushGamepadState(); }
+            _stepIndex++;
+            if (_stepIndex >= _steps.Count)
+                Finish(BridgeResult.Ok("Input done — " + _steps.Count + " step(s).", null, DiagnosticsJson(_steps.Count)));
+        }
+
+        private static void SelfCheckTick()
+        {
+            if (_selfCheckKey == Key.None) { _selfChecking = false; return; }
+            if (Keyboard.current == null)
+            {
+                Abort("Input is being dropped — no keyboard device is connected.");
+                return;
+            }
+            if (_selfCheckStartFrame == NotStarted)
+            {
+                _heldKeys.Add(_selfCheckKey);
+                FlushKeyboardState();
+                _selfCheckStartFrame = Time.frameCount;
+                _selfCheckStartTime = Time.realtimeSinceStartup;
+                return;
+            }
+            bool pressed;
+            try { pressed = Keyboard.current[_selfCheckKey].isPressed; }
+            catch { pressed = false; }
+            if (pressed)
+            {
+                _heldKeys.Remove(_selfCheckKey);
+                FlushKeyboardState();
+                _selfChecking = false;
+                _selfCheckPassed = true;
+                _selfCheckStartFrame = NotStarted;
+                return;
+            }
+            if (Time.realtimeSinceStartup - _selfCheckStartTime > SelfCheckTimeoutSeconds)
+                Abort("Input is being dropped (focus or device disabled) — the game is not receiving keyboard input. Check that the Game View has focus and that the keyboard device is enabled, then try again.");
+        }
+
+        private static void FlushKeyboardState()
+        {
+            if (Keyboard.current == null) return;
+            InputSystem.QueueStateEvent(Keyboard.current, new KeyboardState(_heldKeys.ToArray()));
+        }
+
+        private static void FlushGamepadState()
+        {
+            if (_gamepad == null) return;
+            GamepadState state = new GamepadState();
+            state.leftStick = _hasStick ? _stick : Vector2.zero;
+            foreach (GamepadButton b in _heldPadButtons) state = state.WithButton(b);
+            InputSystem.QueueStateEvent(_gamepad, state);
+        }
+
+        private static void OnPlayModeChanged(PlayModeStateChange state)
+        {
+            if (state == PlayModeStateChange.ExitingPlayMode || state == PlayModeStateChange.EnteredEditMode)
+                Abort("Play Mode ended during input.");
+        }
+
+        private static void OnBeforeReload()
+        {
+            Abort("Script reload during input.");
+        }
+
+        private static void Abort(string reason)
+        {
+            if (_steps == null) return;
+            Finish(BridgeResult.Error(reason));
+        }
+
+        private static void Finish(BridgeResult result)
+        {
+            _heldKeys.Clear();
+            _heldPadButtons.Clear();
+            _stick = Vector2.zero;
+            _hasStick = false;
+            try { FlushKeyboardState(); } catch { }
+            try { FlushGamepadState(); } catch { }
+            RestoreFocusSettings();
+            SessionState.SetBool(ActiveKey, false);
+            _steps = null;
+            _selfChecking = false;
+            _finishedResult = result;
+        }
+
+        private static void RestoreFocusSettings()
+        {
+            try
+            {
+                InputSettings settings = InputSystem.settings;
+                if (settings == null) return;
+                settings.backgroundBehavior = (InputSettings.BackgroundBehavior)SessionState.GetInt(BackgroundBehaviorKey, (int)InputSettings.BackgroundBehavior.ResetAndDisableNonBackgroundDevices);
+                settings.editorInputBehaviorInPlayMode = (InputSettings.EditorInputBehaviorInPlayMode)SessionState.GetInt(EditorInputBehaviorKey, (int)InputSettings.EditorInputBehaviorInPlayMode.PointersAndKeyboardsRespectGameViewFocus);
+                Application.runInBackground = SessionState.GetBool(RunInBackgroundKey, false);
+            }
+            catch { }
+        }
+
+        private static string DiagnosticsJson(int stepsRun)
+        {
+            var data = new Dictionary<string, object>();
+            data["stepsRun"] = stepsRun;
+            data["focused"] = _diagnosticsFocused;
+            data["deviceEnabled"] = _diagnosticsDeviceEnabled;
+            data["selfCheckPassed"] = _selfCheckPassed;
+            return JsonWrite(data);
+        }
+
+        private static bool TryParseSteps(List<object> rawSteps, out List<Step> steps, out string error)
+        {
+            steps = new List<Step>();
+            error = null;
+            foreach (object raw in rawSteps)
+            {
+                var stepArgs = raw as Dictionary<string, object>;
+                if (stepArgs == null) { error = "Each input step must be an object."; return false; }
+                var step = new Step();
+                string keyStr = JStr(stepArgs, "key", "");
+                string padStr = JStr(stepArgs, "gamepadButton", "");
+                List<object> stickRaw = JArr(stepArgs, "leftStick");
+                if (stepArgs.ContainsKey("wait"))
+                {
+                    step.seconds = JNum(stepArgs, "wait", 0);
+                    if (step.seconds <= 0) { error = "A wait step needs a positive number of seconds."; return false; }
+                }
+                else if (!string.IsNullOrEmpty(keyStr))
+                {
+                    object parsedKey;
+                    if (!Enum.TryParse(typeof(Key), keyStr, true, out parsedKey) || (Key)parsedKey == Key.None)
+                    {
+                        error = "Unknown key '" + keyStr + "' — use the new Input System Key names (Space, W, A, S, D, LeftShift, Enter).";
+                        return false;
+                    }
+                    step.key = (Key)parsedKey;
+                    if (!TryParsePress(stepArgs, step, "key '" + keyStr + "'", out error)) return false;
+                }
+                else if (!string.IsNullOrEmpty(padStr))
+                {
+                    object parsedButton;
+                    if (!Enum.TryParse(typeof(GamepadButton), padStr, true, out parsedButton))
+                    {
+                        error = "Unknown gamepad button '" + padStr + "' — use South, North, East, West, Start, Select, LeftShoulder, RightShoulder, LeftTrigger, RightTrigger, or a Dpad direction.";
+                        return false;
+                    }
+                    step.hasPadButton = true;
+                    step.padButton = (GamepadButton)parsedButton;
+                    if (!TryParsePress(stepArgs, step, "button '" + padStr + "'", out error)) return false;
+                }
+                else if (stickRaw != null)
+                {
+                    if (stickRaw.Count != 2) { error = "A leftStick step needs two numbers: [x, y]."; return false; }
+                    double x = ToDouble(stickRaw[0]);
+                    double y = ToDouble(stickRaw[1]);
+                    step.hasStick = true;
+                    step.stick = new Vector2((float)Math.Max(-1, Math.Min(1, x)), (float)Math.Max(-1, Math.Min(1, y)));
+                    step.seconds = JNum(stepArgs, "seconds", 0);
+                    if (step.seconds <= 0) { error = "A leftStick step needs 'seconds'."; return false; }
+                }
+                else
+                {
+                    error = "Each input step needs a key, a gamepadButton, a leftStick, or a wait.";
+                    return false;
+                }
+                steps.Add(step);
+            }
+            return true;
+        }
+
+        private static bool TryParsePress(Dictionary<string, object> stepArgs, Step step, string what, out string error)
+        {
+            error = null;
+            string action = JStr(stepArgs, "action", "tap");
+            if (action == "tap")
+            {
+                step.frames = (int)JNum(stepArgs, "frames", DefaultTapFrames);
+                if (step.frames < 1) { error = "A tap for " + what + " needs at least 1 frame."; return false; }
+            }
+            else if (action == "hold")
+            {
+                step.seconds = JNum(stepArgs, "seconds", 0);
+                if (step.seconds <= 0) { error = "A hold for " + what + " needs 'seconds'."; return false; }
+            }
+            else
+            {
+                error = "Unknown action '" + action + "' for " + what + " — use 'tap' or 'hold'.";
+                return false;
+            }
+            return true;
+        }
+
+        private static double ToDouble(object v)
+        {
+            if (v is double) return (double)v;
+            if (v is string)
+            {
+                double f;
+                if (double.TryParse((string)v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return f;
+            }
+            return 0;
+        }
+    }
+#endif
+
+    // Click a UI element while the game runs: execute the
+    // pointer-click handler on the object, the same path a real
+    // click takes through the EventSystem. It only does what the
+    // button itself does — nothing is invented.
+    private static BridgeResult ClickUI(string json, Dictionary<string, object> args)
+    {
+        string path = JStr(args, "path", "");
+        if (string.IsNullOrEmpty(path)) return BridgeResult.Error("'path' is required.");
+        if (!EditorApplication.isPlaying) return BridgeResult.Error("Enter Play Mode first — UI clicks only do anything while the game is running.");
+        List<GameObject> matches = ComponentLocator.FindGameObjects(path);
+        if (matches.Count != 1)
+            return BridgeResult.Error(matches.Count == 0
+                ? "No GameObject at '" + path + "'. Start with the scene root name."
+                : matches.Count + " objects match '" + path + "'. Use a more specific path.");
+        if (EventSystem.current == null) return BridgeResult.Error("No EventSystem in the scene — UI clicks need one (add one with GameObject → UI → Event System).");
+        var eventData = new PointerEventData(EventSystem.current);
+        bool handled = ExecuteEvents.Execute(matches[0], eventData, ExecuteEvents.pointerClickHandler);
+        if (!handled) return BridgeResult.Error("Nothing on '" + path + "' handles a pointer click — it needs a Button or another IPointerClickHandler.");
+        return BridgeResult.Ok("Clicked '" + path + "'.");
     }
 }
 #endif

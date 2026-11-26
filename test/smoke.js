@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.14.0.
+// 2. package.json version is 0.15.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.14.0', pkg.version === '0.14.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.14.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.14.0 — Local'));
+check('package.json version is 0.15.0', pkg.version === '0.15.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.15.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.15.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.12.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.12.0') && bridgeCs.includes('BridgeVersion = "0.12.0"'));
-check('embedded bridge has the 0.12.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.12.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.12.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.12.0');
+check('bridge .cs has the 0.13.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.13.0') && bridgeCs.includes('BridgeVersion = "0.13.0"'));
+check('embedded bridge has the 0.13.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.13.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.13.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.13.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.12.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.12.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.12.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.13.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.13.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.13.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2892,14 +2892,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.12.0 everywhere',
-  bridgeCs.includes('// CodeFoxBridge version: 0.12.0')
-  && bridgeCs.includes('BridgeVersion = "0.12.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.12.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.12.0'));
+check('bridge version pins are 0.13.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
+  bridgeCs.includes('// CodeFoxBridge version: 0.13.0')
+  && bridgeCs.includes('BridgeVersion = "0.13.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.13.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.13.0')
+  && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.14.0')
+  && readme.includes('readConsole') && readme.includes('version-0.15.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3164,8 +3165,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge is now 0.12.0 (moved in 0.14.0)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.12.0';"));
+check('bridge is now 0.13.0 (play-test loop in 0.15.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.13.0';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3229,7 +3230,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.14.0', readme.includes('version-0.14.0'));
+check('README badge reads 0.15.0', readme.includes('version-0.15.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3337,6 +3338,164 @@ check('README documents the .bridge/ transport, the console buffer, and the Unit
   && readme.includes("Unity's own compiler")
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Bridge protocol hardened'));
+
+// 39. v0.15.0 — the play-test loop: set_play_mode,
+// read_component_values, inject_input, click_ui, and the app-side
+// wait tool. The bridge .cs is structural (it can only truly run
+// in Rob's Unity — the first compile, the play-mode event
+// ordering, the input focus behaviour, and the timed-run
+// round-trip are all proven there); the app-side wait parser and
+// the heartbeat fields are plain Node and are tested directly.
+const waitParserSrc = extractFunction(appJs, 'parseWaitBlocks');
+const waitClampSrc = extractFunction(appJs, 'clampWaitSeconds');
+check('app.js wait parser is extractable for testing', !!waitParserSrc && !!waitClampSrc);
+if (waitParserSrc && waitClampSrc) {
+  const parseWait = new Function(waitClampSrc + '\n' + waitParserSrc + '\nreturn parseWaitBlocks;')();
+  const clampWait = new Function(waitClampSrc + '\nreturn clampWaitSeconds;')();
+  check('wait clamp: positive seconds pass, 0/negative/non-numbers fail, over 30 clamps to 30',
+    clampWait(5) === 5 && clampWait(30) === 30 && clampWait(120) === 30 && clampWait(0.5) === 0.5
+    && clampWait(0) === null && clampWait(-3) === null && clampWait('x') === null && clampWait(null) === null);
+  const waits = parseWait('enter play mode\n```wait\n{"seconds": 5}\n```\nthen read\n```wait\n10\n```\n```wait\nnot json\n```\n');
+  check('wait parser: object form, bare number, and invalid JSON',
+    waits.length === 3
+    && waits[0].seconds === 5 && waits[0].valid === true
+    && waits[1].seconds === 10 && waits[1].valid === true
+    && waits[2].valid === false && waits[2].error != null);
+  check('wait parser: 0 seconds is invalid, 120 seconds parses and clamps',
+    parseWait('```wait\n{"seconds": 0}\n```')[0].valid === false
+    && parseWait('```wait\n{"seconds": 120}\n```')[0].valid === true
+    && clampWait(parseWait('```wait\n{"seconds": 120}\n```')[0].seconds) === 30);
+}
+const changeMaking15Src = extractFunction(appJs, 'isChangeMakingAction');
+check('app.js routes wait blocks through parseAgentActions and the loop waits interruptibly; a wait is not a change',
+  appJs.includes('for (const b of parseWaitBlocks(text))')
+  && appJs.includes("actions.push({ type: 'wait', seconds: b.seconds")
+  && appJs.includes("action.type === 'wait'")
+  && appJs.includes('clampWaitSeconds(action.seconds)')
+  && appJs.includes('Tool result — Waited ')
+  && appJs.includes('while (waitedMs < seconds * 1000)')
+  && !!changeMaking15Src && !changeMaking15Src.includes("'wait'"));
+check('bridge dispatcher registers set_play_mode, read_component_values, click_ui, inject_input (new Input System only, legacy gets a plain error)',
+  bridgeCs.includes('{ "set_play_mode", (json, args) => PlayMode.Begin(json, args) }')
+  && bridgeCs.includes('{ "read_component_values", (json, args) => ReadComponentValuesHandler.Handle(json, args) }')
+  && bridgeCs.includes('{ "click_ui", (json, args) => ClickUI(json, args) }')
+  && bridgeCs.includes('#if ENABLE_INPUT_SYSTEM')
+  && bridgeCs.includes('{ "inject_input", (json, args) => InjectInputHandler.Begin(json, args) }')
+  && bridgeCs.includes('uses the legacy input system only'));
+const playStart = bridgeCs.indexOf('private static class PlayMode');
+const playEnd = bridgeCs.indexOf('private static class ReadComponentValuesHandler', playStart);
+const playSrc = playStart !== -1 && playEnd !== -1 ? bridgeCs.slice(playStart, playEnd) : '';
+check('bridge PlayMode is extractable for the structural checks', playSrc.length > 0);
+check('bridge PlayMode: SessionState phases, 60s enter / 30s exit timeouts, 120s duration cap, compile-error block, console report',
+  playSrc.includes('CodeFox.PlayMode.PendingId') && playSrc.includes('CodeFox.PlayMode.Phase')
+  && playSrc.includes('CodeFox.PlayMode.SettledState') && playSrc.includes('CodeFox.PlayMode.StartCursor')
+  && playSrc.includes('CodeFox.PlayMode.Duration') && playSrc.includes('CodeFox.PlayMode.EndedBy')
+  && playSrc.includes('EnterTimeoutSeconds = 60') && playSrc.includes('ExitTimeoutSeconds = 30')
+  && playSrc.includes('MaxDurationSeconds = 120')
+  && playSrc.includes('EditorUtility.scriptCompilationFailed')
+  && playSrc.includes('OnPlayModeStateChanged') && playSrc.includes('EnteredPlayMode') && playSrc.includes('EnteredEditMode')
+  && playSrc.includes('ConsoleBuffer.SummarySince') && playSrc.includes('"errorOccurrences"')
+  && playSrc.includes('Use read_console with sinceSeq=')
+  && playSrc.includes('TryFinalize') && playSrc.includes('IsPending'));
+check('bridge transport finalizes play-mode and input requests, recovery skips pending play-mode ids, heartbeat carries play-mode state',
+  bridgeCs.includes('TryFinalizePending') && bridgeCs.includes('PlayMode.TryFinalize')
+  && bridgeCs.includes('InjectInputHandler.TryFinalize')
+  && bridgeCs.includes('if (PlayMode.IsPending(id)) continue;')
+  && bridgeCs.includes('isPlayingOrWillChangePlaymode') && bridgeCs.includes('isPaused'));
+check('bridge compile action refuses while the game is running',
+  bridgeCs.includes('Stop Play Mode first: set_play_mode'));
+const rcStart = bridgeCs.indexOf('private static class ReadComponentValuesHandler');
+const rcEnd = bridgeCs.indexOf('#if ENABLE_INPUT_SYSTEM', rcStart);
+const rcSrc = rcStart !== -1 && rcEnd !== -1 ? bridgeCs.slice(rcStart, rcEnd) : '';
+check('bridge ComponentLocator + read_component_values are extractable', bridgeCs.includes('private static class ComponentLocator') && rcSrc.length > 0);
+check('bridge ComponentLocator: roots from loaded scenes + DontDestroyOnLoad probe, case-insensitive component, componentIndex',
+  bridgeCs.includes('SceneManager.GetSceneAt') && bridgeCs.includes('__codefox_probe')
+  && bridgeCs.includes('DontDestroyOnLoad') && bridgeCs.includes('StringComparison.OrdinalIgnoreCase')
+  && bridgeCs.includes('"componentIndex"') && rcSrc.includes('internal static object ReadProperty'));
+check('bridge read_component_values: discovery, caps, denied members, Similar suggestions, bounded output',
+  rcSrc.includes('DefaultMaxProperties = 40') && rcSrc.includes('HardMaxProperties = 100')
+  && rcSrc.includes('MaxCollectionItems = 8') && rcSrc.includes('MaxDepth = 2')
+  && rcSrc.includes('MaxStringChars = 200')
+  && rcSrc.includes('DeniedMembers') && rcSrc.includes('sharedMaterial') && rcSrc.includes('sharedMesh')
+  && rcSrc.includes('Similar: ') && rcSrc.includes('LevenshteinDistance')
+  && rcSrc.includes('"omitted"') && rcSrc.includes('"availableNames"') && rcSrc.includes('"unknownProperties"')
+  && rcSrc.includes('"memberErrors"') && rcSrc.includes('"m_Script"'));
+const injStart = bridgeCs.indexOf('private static class InjectInputHandler');
+const injEnd = bridgeCs.indexOf('#endif', injStart);
+const injSrc = injStart !== -1 && injEnd !== -1 ? bridgeCs.slice(injStart, injEnd) : '';
+check('bridge InjectInputHandler is extractable for the structural checks', injSrc.length > 0);
+check('bridge inject_input: Input System only, 50 steps / 30s caps, focus save/restore, self-check, stuck-key release, no arbitrary reflection',
+  injSrc.includes('MaxSteps = 50') && injSrc.includes('MaxTotalSeconds = 30')
+  && injSrc.includes('InputSystem.QueueStateEvent') && injSrc.includes('KeyboardState')
+  && injSrc.includes('GamepadState') && injSrc.includes('WithButton')
+  && injSrc.includes('backgroundBehavior') && injSrc.includes('IgnoreFocus')
+  && injSrc.includes('editorInputBehaviorInPlayMode') && injSrc.includes('AllDeviceInputAlwaysGoesToGameView')
+  && injSrc.includes('SessionState') && injSrc.includes('RestoreFocusSettings')
+  && injSrc.includes('SelfCheck') && injSrc.includes('is being dropped')
+  && injSrc.includes('DefaultTapFrames = 3')
+  && injSrc.includes('AssemblyReloadEvents.beforeAssemblyReload')
+  && injSrc.includes('playModeStateChanged')
+  && !injSrc.includes('Invoke(') && !injSrc.includes('GetMethod('));
+check('bridge has a hand-rolled JsonWrite (no Newtonsoft) and a shared ComponentLocator',
+  bridgeCs.includes('private static string JsonWrite(object v)')
+  && bridgeCs.includes('private static class ComponentLocator')
+  && !bridgeCs.includes('Newtonsoft'));
+check('unity-command heartbeat parses the 0.13.0 fields and readHeartbeat passes them through',
+  unityCommand.parseHeartbeat('{"protocol":1,"timeMs":1000,"isCompiling":false,"isPlaying":true,"isPlayingOrWillChangePlaymode":true,"isPaused":false}').isPlayingOrWillChangePlaymode === true
+  && unityCommand.parseHeartbeat('{"protocol":1,"timeMs":1000,"isCompiling":false,"isPlaying":false}').isPlayingOrWillChangePlaymode === false
+  && unityCommand.parseHeartbeat('{"protocol":1,"timeMs":1000,"isCompiling":false,"isPlaying":false}').isPaused === false
+  && (() => {
+    const fakeFs = { existsSync: () => true, readFileSync: () => '{"protocol":1,"timeMs":' + Date.now() + ',"isCompiling":false,"isPlaying":true,"isPlayingOrWillChangePlaymode":true,"isPaused":true}' };
+    const hb = unityCommand.readHeartbeat('/proj', fakeFs);
+    return hb.exists === true && hb.fresh === true && hb.isPlaying === true && hb.isPlayingOrWillChangePlaymode === true && hb.isPaused === true;
+  })());
+check('README has the Play testing section + wait in the loop list; CHANGELOG has the 0.15.0 entry',
+  readme.includes('### Play testing') && readme.includes('set_play_mode') && readme.includes('inject_input')
+  && readme.includes('```wait blocks (a sleep in the loop, at most 30 seconds)')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.15.0 — 2026-11-26')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('The play-test loop'));
+if (promptSrc) {
+  const buildPrompt15 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt15 = buildPrompt15(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the play-test actions (set_play_mode, read_component_values, inject_input, click_ui) and the Play testing section',
+    agentPrompt15.includes('## Play testing')
+    && agentPrompt15.includes('"action": "set_play_mode"')
+    && agentPrompt15.includes('"action": "read_component_values"')
+    && agentPrompt15.includes('"action": "inject_input"')
+    && agentPrompt15.includes('"action": "click_ui"')
+    && agentPrompt15.includes('linearVelocity') && agentPrompt15.includes('"velocity"'));
+  check('agent prompt has the stop-Play-Mode rule, the timed-run default, and the two patterns',
+    agentPrompt15.includes('stop Play Mode before finishing')
+    && agentPrompt15.includes('A timed run is the default')
+    && agentPrompt15.includes('console-based test') && agentPrompt15.includes('state probing')
+    && agentPrompt15.includes('```wait')
+    && agentPrompt15.includes('Never edit code while the game is running')
+    && agentPrompt15.includes('run the game with set_play_mode'));
+  check('the play-test examples in the built prompt are valid JSON',
+    (() => {
+      const section = agentPrompt15.slice(agentPrompt15.indexOf('## Unity — prefabs'), agentPrompt15.indexOf('## Reading and editing files'));
+      const simple = section.match(/\{"action": "(?:set_play_mode|read_component_values|click_ui)"[^}]*\}/g) || [];
+      if (simple.length < 5) return false;
+      try { for (const f of simple) JSON.parse(f); } catch { return false; }
+      const inj = section.indexOf('{"action": "inject_input"');
+      if (inj < 0) return false;
+      let depth = 0;
+      for (let i = inj; i < section.length; i++) {
+        if (section[i] === '{') depth++;
+        else if (section[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            try { JSON.parse(section.slice(inj, i + 1)); return true; } catch { return false; }
+          }
+        }
+      }
+      return false;
+    })());
+}
 
 (async () => {
   // v0.14.0 runner: runUnityCommand against an injected fs and

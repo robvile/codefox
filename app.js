@@ -1655,6 +1655,36 @@ function parseFileBlocks(text) {
   }
   return out;
 }
+
+// ```wait blocks (v0.15.0, Agent mode only): {"seconds": 5} — an
+// async sleep in the agent loop, no bridge involved. A bare number
+// works too. Needed for state probing: enter Play Mode, wait, read
+// values, stop. Capped at 30s; anything else is a plain failure.
+function clampWaitSeconds(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return null;
+  return Math.min(s, 30);
+}
+function parseWaitBlocks(text) {
+  const out = [];
+  const re = /```wait\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    const seconds = typeof parsed === 'number' ? parsed
+      : (parsed && typeof parsed === 'object' ? parsed.seconds : null);
+    out.push({
+      seconds,
+      raw: m[1].trim(),
+      valid: clampWaitSeconds(seconds) != null,
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
 // Intent-based mode routing (v0.8.2). Ask mode is instructed to
 // refuse file work ("Answer and explain only"), so a build request
 // sent in Ask mode gets an INSTRUCTED refusal — the model doing
@@ -1839,6 +1869,9 @@ function parseAgentActions(text) {
   }
   for (const b of parseFileBlocks(text)) {
     actions.push({ type: 'file', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
+  for (const b of parseWaitBlocks(text)) {
+    actions.push({ type: 'wait', seconds: b.seconds, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
@@ -2801,6 +2834,30 @@ async function processAgentActions(actions) {
       await appendToolResult('Tool result — File tool: unknown action "' + f + '" — use "view", "grep", or "str_replace".');
       failed++;
       outcomes++;
+    } else if (action.type === 'wait') {
+      // App-side wait (v0.15.0): just a sleep in the loop, no
+      // bridge involved. A wait is not a change, so it never
+      // triggers a backup. Sleeps in 250ms chunks so the Stop
+      // button ends it instead of waiting out the full 30s.
+      const seconds = clampWaitSeconds(action.seconds);
+      if (seconds == null) {
+        await appendToolResult('Tool result — Wait: could not parse the ```wait block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"seconds": 5} (at most 30).');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      if (loopState) setLoopStatus(roundLabel() + 'waiting ' + seconds + 's…');
+      let waitedMs = 0;
+      while (waitedMs < seconds * 1000) {
+        if (!loopState || loopState.stopRequested) break;
+        await new Promise(r => setTimeout(r, 250));
+        waitedMs += 250;
+      }
+      const waited = Math.min(seconds, waitedMs / 1000);
+      await appendToolResult('Tool result — Waited ' + waited + 's' + (waited < seconds ? ' (stopped early)' : '') + '.');
+      outcomes++;
     }
   }
   // v0.11.0: compile after every edit — one build check when this
@@ -3064,9 +3121,17 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += '- deleteAsset — delete one asset: ```unity-command\n{"action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab"}\n```\nThe path must start with Assets/ and must exist. CodeFox snapshots the file (and its .meta) before Unity deletes it, so the user can revert the delete.\n';
       prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
-      prompt += '- readConsole — read the Unity console from the bridge\'s own log buffer, without recompiling or reimporting anything (reading never clears the console). The buffer reads by sequence number, earliest first: {"action": "readConsole", "sinceSeq": 0} reads everything since the cursor, {"action": "readConsole", "mark": true} returns just the cursor so you can mark a point in time and read what happens after it. Filter with "minLevel" (0 = everything, 1 = warnings and errors, 2 = errors only), "contains" (a substring), "playModeOnly": true (only entries logged while the game was running), and "maxEntries" (default 30, at most 100). The result carries a cursor for the next read, plus errorCount / warningCount for the window, omitted (cut by maxEntries), hiddenByFilter, and missedEvictedEntries (older entries the buffer dropped — the full log is in Editor.log). Stacks come back for error entries only. To watch what happens while the game runs: mark the console, ask the user to run the game, then read since the cursor with minLevel 1 and playModeOnly true — errors? fix them, recompile, and repeat. The old "logType": "Error" / "Warning" still works (it maps to minLevel 2 / 1) — never "All". Use it when a build, a play-mode run, or a prefab command fails and the error is in Unity, not in the file you just wrote.\n';
-      prompt += '- recompile_and_report_errors — ask Unity itself to compile and report the errors, with file:line: {"action": "recompile_and_report_errors"}. Use it after writing or editing .cs files by hand, or whenever you need to know whether the project compiles. The result is {"success": bool, "compiled": bool, "errors": [{"file", "line", "message"}], "errorCount": n, "warningCount": n} — compile errors come back as success:false, which is the tool working and reporting a failure, not a bridge failure. "compiled": false means there was nothing to compile. Fix the first error first; later errors are often caused by it. If the first error is identical on two consecutive checks, stop and tell the user — the fix is not working.\n';
+      prompt += '- readConsole — read the Unity console from the bridge\'s own log buffer, without recompiling or reimporting anything (reading never clears the console). The buffer reads by sequence number, earliest first: {"action": "readConsole", "sinceSeq": 0} reads everything since the cursor, {"action": "readConsole", "mark": true} returns just the cursor so you can mark a point in time and read what happens after it. Filter with "minLevel" (0 = everything, 1 = warnings and errors, 2 = errors only), "contains" (a substring), "playModeOnly": true (only entries logged while the game was running), and "maxEntries" (default 30, at most 100). The result carries a cursor for the next read, plus errorCount / warningCount for the window, omitted (cut by maxEntries), hiddenByFilter, and missedEvictedEntries (older entries the buffer dropped — the full log is in Editor.log). Stacks come back for error entries only. To watch what happens while the game runs: run the game with set_play_mode, then read since the cursor with minLevel 1 and playModeOnly true — errors? fix them, recompile, and repeat. The old "logType": "Error" / "Warning" still works (it maps to minLevel 2 / 1) — never "All". Use it when a build, a play-mode run, or a prefab command fails and the error is in Unity, not in the file you just wrote.\n';
+      prompt += '- recompile_and_report_errors — ask Unity itself to compile and report the errors, with file:line: {"action": "recompile_and_report_errors"}. Use it after writing or editing .cs files by hand, or whenever you need to know whether the project compiles. The result is {"success": bool, "compiled": bool, "errors": [{"file", "line", "message"}], "errorCount": n, "warningCount": n} — compile errors come back as success:false, which is the tool working and reporting a failure, not a bridge failure. "compiled": false means there was nothing to compile. Fix the first error first; later errors are often caused by it. If the first error is identical on two consecutive checks, stop and tell the user — the fix is not working. Unity cannot compile while the game is running — stop Play Mode first.\n';
+      prompt += '- set_play_mode — run the game: {"action": "set_play_mode", "enabled": true, "durationSeconds": 10} enters Play Mode, runs for 10 seconds, exits, and returns a console summary (errorCount, errorOccurrences, warningCount, firstErrors, and a startCursor for readConsole). {"action": "set_play_mode", "enabled": true} without a duration enters and stays — use it only when you need to read live state, and stop it yourself afterwards with {"action": "set_play_mode", "enabled": false}. A timed run is the default: a model that enters without a duration can forget to stop it, and timed runs always end. Duration is capped at 120 seconds. Compile errors block Play Mode — fix them with recompile_and_report_errors first. Entering Play Mode usually reloads the domain, so a timed run returns its report when it finishes; readConsole still works while a run is in progress.\n';
+      prompt += '- read_component_values — read live state from a scene object: {"action": "read_component_values", "path": "Player", "component": "Rigidbody"} returns the Inspector-visible values; {"action": "read_component_values", "path": "Player"} lists the components and children instead. Add "members": ["linearVelocity", "position"] to read runtime values that are not serialized (a Rigidbody\'s velocity, a Transform\'s world position) — name them explicitly. The result is bounded (40 properties by default; ask for specific ones with "properties": ["m_Mass"] when you need more). A timed set_play_mode run destroys the scene objects when it exits, so you CANNOT read values after a timed run — either read the run\'s console report, or enter Play Mode without a duration, wait, read, then stop. The model can read state but cannot provide input — probing covers spawning, falling, AI and timers only (inject_input below closes that gap for keyboard and gamepad). On Unity 6 the Rigidbody member is "linearVelocity"; on older versions it is "velocity" — if a member is unknown the error lists similar names.\n';
+      prompt += '- inject_input — play the game with scripted input: {"action": "inject_input", "steps": [{"key": "D", "action": "hold", "seconds": 1.5}, {"key": "Space", "action": "tap"}, {"wait": 0.5}]}. Keys are the new Input System Key names (Space, W, A, S, D, LeftShift, Enter); a tap holds for 3 frames, a hold for the seconds given. Gamepad steps use "gamepadButton": "South" (or North, East, West, Start, Select, shoulders) and "leftStick": [x, y]. At most 50 steps, 30 seconds total. The game must already be in Play Mode (enter it without a duration first) — input cannot be injected while the editor is in Edit Mode, and a project on the legacy input system only (UnityEngine.Input) cannot receive injected input at all: the action fails plainly and suggests opt-in hooks instead. The run checks first that input is actually landing (a key press that never registers means Unity is not focused or the device is disabled) and releases every key when it finishes, is cancelled, or Play Mode ends.\n';
+      prompt += '- click_ui — click a UI Button while the game runs: {"action": "click_ui", "path": "Canvas/MainMenu/PlayButton"}.\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
+      prompt += '## Play testing\n';
+      prompt += 'The loop without vision: edit, recompile, set_play_mode for 10 seconds, read the run report (errorCount, firstErrors, startCursor), readConsole since the cursor for details, fix, repeat. The model only sees what the game logs — Debug.Log and LogError are its eyes — so add DELIBERATE log lines when you need to observe something (for example "[Test] Player reached checkpoint 2"), run, and check for them.\n';
+      prompt += 'Two patterns: (1) console-based test — a timed run, then read the report; (2) state probing — enter Play Mode WITHOUT a duration, wait, read values with read_component_values, then stop with {"action": "set_play_mode", "enabled": false}. To wait inside a turn, output a ```wait block with JSON {"seconds": 5} (at most 30 seconds — a bare number works too). It is just a sleep in the loop; no bridge call is involved.\n';
+      prompt += 'Rule: stop Play Mode before finishing, unless the user asked to leave it running. Never edit code while the game is running — edits in Play Mode trigger recompiles that disrupt the run, so stop the game first, then touch code. Play Mode changes are lost when it stops.\n';
       prompt += '## Reading and editing files\n';
       prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
       prompt += '- view — read a file in line ranges, with line numbers: {"action": "view", "path": "Assets/Scripts/Player.cs", "start": 40, "end": 80}. Omit start/end to read from the top. At most 200 lines come back at once, and the result says so when it was cut short — view the next range if you need it.\n';

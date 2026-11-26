@@ -1,4 +1,4 @@
-// unity-command.js — run one command through the Unity bridge (v0.12.0).
+// unity-command.js — run one command through the Unity bridge (v0.15.0).
 //
 // Plain Node, no Electron dependency, so the smoke test can exercise
 // this file directly with `node` (stub fs / sleep). main.js requires
@@ -74,9 +74,12 @@ function makeBridgeRequestId() {
 }
 
 // Parse a heartbeat file's contents. Returns { ok, protocol,
-// timeMs, isCompiling, isPlaying } or { ok:false, error } — never
-// throws, so a half-written heartbeat (the bridge writes it
-// atomically, but a torn read is still possible) is a plain miss.
+// timeMs, isCompiling, isPlaying, isPlayingOrWillChangePlaymode,
+// isPaused } or { ok:false, error } — never throws, so a
+// half-written heartbeat (the bridge writes it atomically, but a
+// torn read is still possible) is a plain miss. The two play-mode
+// fields are new in the 0.13.0 bridge; an older heartbeat simply
+// has them false, which is the safe reading.
 function parseHeartbeat(raw) {
   if (!raw || typeof raw !== 'string') return { ok: false, error: 'empty heartbeat' };
   let parsed = null;
@@ -91,6 +94,8 @@ function parseHeartbeat(raw) {
     timeMs,
     isCompiling: parsed.isCompiling === true,
     isPlaying: parsed.isPlaying === true,
+    isPlayingOrWillChangePlaymode: parsed.isPlayingOrWillChangePlaymode === true,
+    isPaused: parsed.isPaused === true,
   };
 }
 
@@ -107,7 +112,8 @@ function heartbeatStatus(heartbeat, nowMs) {
 }
 
 // Read and classify the heartbeat for a project. Returns
-// { exists, fresh, isCompiling, isPlaying, timeMs, protocol } or
+// { exists, fresh, isCompiling, isPlaying,
+// isPlayingOrWillChangePlaymode, isPaused, timeMs, protocol } or
 // { exists:false }. Used by main.js's unity:heartbeat IPC (the
 // compile check's fast path) and by runUnityCommand below.
 function readHeartbeat(projectPath, fsOverride) {
@@ -127,6 +133,8 @@ function readHeartbeat(projectPath, fsOverride) {
     staleCompiling: status === 'stale-compiling',
     isCompiling: parsed.isCompiling,
     isPlaying: parsed.isPlaying,
+    isPlayingOrWillChangePlaymode: parsed.isPlayingOrWillChangePlaymode,
+    isPaused: parsed.isPaused,
     timeMs: parsed.timeMs,
     protocol: parsed.protocol,
   };

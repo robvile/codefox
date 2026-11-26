@@ -1319,8 +1319,9 @@ ipcMain.handle('unity:command', async (_, payload) => {
 
 // Bridge heartbeat, for the compile check's fast path and the UI:
 // whether the bridge is ticking right now, without waiting for it.
-// { exists, fresh, staleCompiling, isCompiling, isPlaying, timeMs,
-// protocol } or { exists:false }. A fresh heartbeat is what makes
+// { exists, fresh, staleCompiling, isCompiling, isPlaying,
+// isPlayingOrWillChangePlaymode, isPaused, timeMs, protocol } or
+// { exists:false }. A fresh heartbeat is what makes
 // the bridge-compile path worth trying; anything else falls back
 // to the dotnet build check.
 ipcMain.handle('unity:heartbeat', async (_, projectPath) => {
