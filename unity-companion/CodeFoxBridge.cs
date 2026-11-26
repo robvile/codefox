@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.16.0
+// CodeFoxBridge version: 0.16.1
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -221,7 +221,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.16.0";
+    public const string BridgeVersion = "0.16.1";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -4683,7 +4683,6 @@ public static class CodeFoxBridge
                 }
             }
             return readbackProblems;
-        }
         }
 
         private static List<object> DescribeStaged(SerializedObject so, List<StagedChange> staged)

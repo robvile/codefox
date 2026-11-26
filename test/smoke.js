@@ -23,10 +23,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.21.0.
+// 2. package.json version is 0.21.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.21.0', pkg.version === '0.21.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.21.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.0 — Local'));
+check('package.json version is 0.21.1', pkg.version === '0.21.1', 'got ' + pkg.version);
+check('sidebar footer shows 0.21.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.1 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -437,12 +437,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.16.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.16.0') && bridgeCs.includes('BridgeVersion = "0.16.0"'));
-check('embedded bridge has the 0.16.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.16.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.16.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.16.0');
+check('bridge .cs has the 0.16.1 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.16.1') && bridgeCs.includes('BridgeVersion = "0.16.1"'));
+check('embedded bridge has the 0.16.1 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.16.1'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.16.1',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.16.1');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -504,9 +504,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.16.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.16.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.16.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.16.1' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.16.1 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.16.1');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2924,15 +2924,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.16.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
-  bridgeCs.includes('// CodeFoxBridge version: 0.16.0')
-  && bridgeCs.includes('BridgeVersion = "0.16.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.16.0')
+check('bridge version pins are 0.16.1 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
+  bridgeCs.includes('// CodeFoxBridge version: 0.16.1')
+  && bridgeCs.includes('BridgeVersion = "0.16.1"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.1'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.16.1')
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.21.0')
+  && readme.includes('readConsole') && readme.includes('version-0.21.1')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3197,8 +3197,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge is now 0.16.0 (import profile in 0.17.0)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.16.0';"));
+check('bridge is now 0.16.1 (import profile in 0.17.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.16.1';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3262,7 +3262,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.21.0', readme.includes('version-0.21.0'));
+check('README badge reads 0.21.1', readme.includes('version-0.21.1'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3905,25 +3905,25 @@ if (promptSrc) {
 
   // Bridge: the import-profile handler is registered, confined,
   // and versioned.
-  check('bridge registers apply_import_profile, confined to Assets/Generated/, version 0.16.0',
+  check('bridge registers apply_import_profile, confined to Assets/Generated/, version 0.16.1',
     bridgeCs.includes('{ "apply_import_profile", (json, args) => ApplyImportProfileHandler.Handle(json, args) }')
     && bridgeCs.includes('TextureImporterType.Sprite') && bridgeCs.includes('SaveAndReimport')
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
-    && bridgeCs.includes('// CodeFoxBridge version: 0.16.0'));
+    && bridgeCs.includes('// CodeFoxBridge version: 0.16.1'));
 
-  // Version pins and packaging for 0.21.0.
+  // Version pins and packaging for 0.21.1.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.21.0 and build.files includes the three split modules + context-budget.js',
-    pkg.version === '0.21.0'
+  check('package.json is 0.21.1 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.21.1'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js')
     && pkg.build.files.includes('context-budget.js')
     && pkg.build.files.includes('turn-ledger.js'));
-  check('index.html footer and README badge are 0.21.0, CHANGELOG keeps the 0.20.0 entry',
-    indexHtml.includes('CodeFox 0.21.0 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.0-blue')
-    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.20.0 — 2026-11-26'));
+  check('index.html footer and README badge are 0.21.1, CHANGELOG keeps the 0.21.0 entry',
+    indexHtml.includes('CodeFox 0.21.1 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.1-blue')
+    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.21.0 — 2026-11-26'));
 }
 
 // 42. v0.18.0 — the eval harness: YAML tasks, programmatic
@@ -4662,8 +4662,8 @@ check('mcp-server: classifyUnityAction allows reads and denies writes',
   && MCP.classifyUnityAction('set_property') === 'mutating'
   && MCP.classifyUnityAction('recompile_and_report_errors') === 'mutating');
 check('v0.21.0 wiring: version pins, script tags, IPCs, prompt sections, migration',
-  pkg.version === '0.21.0'
-  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.0 — Local')
+  pkg.version === '0.21.1'
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.1 — Local')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="docs-search.js"></script>')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="model-profiles.js"></script>')
   && pkg.build.files.includes('docs-search.js')
@@ -4685,8 +4685,8 @@ check('v0.21.0 wiring: version pins, script tags, IPCs, prompt sections, migrati
   && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('restoreCoderAfterVision')
   && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('Unity docs')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.21.0 — 2026-11-26'));
-check('v0.21.0 wiring: bridge unchanged at 0.16.0',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes('0.16.0')
+check('v0.21.1 wiring: bridge is 0.16.1 (the brace fix), not 0.17.0',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.1'")
   && !/0\.17\.0/.test(fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8')));
 
 (async () => {
@@ -5343,6 +5343,69 @@ check('v0.21.0 wiring: bridge unchanged at 0.16.0',
   check('mock ComfyUI server tests ran without throwing', false, String(e && e.message));
   finish();
 });
+
+// 46. v0.21.1 — bridge brace-balance regression + GPU mode layout.
+// The 0.16.0 bridge shipped with one extra '}' after
+// SetPropertyHandler.ReadbackProblems (line ~4687). It closed the
+// handler class early, so every handler after it — and ClickUI —
+// landed at namespace level and Unity refused the whole file with
+// CS8803 / CS0106 / CS1022. A brace-balance check on the .cs file
+// would have caught it before it shipped: strip strings, chars and
+// comments, count braces, and require final depth 0 with every
+// handler class nested at depth 1 inside CodeFoxBridge.
+{
+  const cs = fs.readFileSync(path.join(root, 'unity-companion', 'CodeFoxBridge.cs'), 'utf8');
+  let clean = '';
+  let st = 'code';
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    const nx = cs[i + 1] || '';
+    if (st === 'code') {
+      if (c === '/' && nx === '/') { st = 'line'; i++; continue; }
+      if (c === '/' && nx === '*') { st = 'block'; i++; continue; }
+      if (c === '$' && nx === '"') { st = 'str'; clean += '  '; i++; continue; }
+      if (c === '@' && nx === '"') { st = 'verb'; clean += '  '; i++; continue; }
+      if (c === '"') { st = 'str'; clean += ' '; continue; }
+      if (c === "'") { st = 'char'; clean += ' '; continue; }
+      clean += c;
+    } else if (st === 'line') {
+      if (c === '\n') { st = 'code'; clean += c; }
+    } else if (st === 'block') {
+      if (c === '*' && nx === '/') { st = 'code'; i++; continue; }
+      if (c === '\n') clean += c;
+    } else if (st === 'str') {
+      if (c === '\\') { i++; continue; }
+      if (c === '"') { st = 'code'; clean += ' '; continue; }
+      if (c === '\n') clean += c;
+    } else if (st === 'verb') {
+      if (c === '"' && nx === '"') { i++; continue; }
+      if (c === '"') { st = 'code'; clean += ' '; continue; }
+      if (c === '\n') clean += c;
+    } else if (st === 'char') {
+      if (c === '\\') { i++; continue; }
+      if (c === "'") { st = 'code'; clean += ' '; continue; }
+    }
+  }
+  const cl = clean.split('\n');
+  let depth = 0;
+  const misplaced = [];
+  cl.forEach((line, idx) => {
+    const before = depth;
+    depth += (line.match(/{/g) || []).length - (line.match(/}/g) || []).length;
+    if (line.includes('static class ') && !line.includes('CodeFoxBridge') && before !== 1)
+      misplaced.push((idx + 1) + ':' + line.trim().slice(0, 50));
+    if (line.includes('ClickUI(string json') && before !== 1)
+      misplaced.push((idx + 1) + ':ClickUI');
+  });
+  check('bridge braces balance to depth 0', depth === 0, 'final depth ' + depth);
+  check('every bridge handler class is nested inside CodeFoxBridge', misplaced.length === 0, misplaced.join('; '));
+  check('bridge version is 0.16.1 everywhere pinned',
+    cs.includes('// CodeFoxBridge version: 0.16.1') && cs.includes('BridgeVersion = "0.16.1"')
+    && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.1'"));
+  const appJs = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  check('GPU mode select is width:auto so the settings-pane width:100% rule cannot crush the row',
+    appJs.includes('setComfyuiGpuMode(this.value)" style="padding:4px 8px;font-size:12px;width:auto;max-width:340px;flex-shrink:0;"'));
+}
 
 function finish() {
   if (failures) {

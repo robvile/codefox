@@ -5550,7 +5550,7 @@ async function renderSettingsConnections() {
       <span class="conn-ico">◈</span>
       <span class="conn-row-info"><span class="conn-name">GPU mode</span><br>
       <span class="conn-status">Shared keeps the chat model loaded while ComfyUI generates. Swap unloads it first (so a heavy generation has the whole GPU) and loads it back after — the generation pauses the conversation while the model is out, and a failed reload is reported, never silent.</span></span>
-      <select onchange="setComfyuiGpuMode(this.value)" style="padding:4px 8px;font-size:12px;">
+      <select onchange="setComfyuiGpuMode(this.value)" style="padding:4px 8px;font-size:12px;width:auto;max-width:340px;flex-shrink:0;">
         <option value="shared" ${state.comfyuiGpuMode === 'shared' ? 'selected' : ''}>Shared — model stays loaded</option>
         <option value="swap" ${state.comfyuiGpuMode === 'swap' ? 'selected' : ''}>Swap — unload model for the generation</option>
       </select>
