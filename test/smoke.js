@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.9.3.
+// 2. package.json version is 0.10.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.9.3', pkg.version === '0.9.3', 'got ' + pkg.version);
-check('sidebar footer shows 0.9.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.3 — Local'));
+check('package.json version is 0.10.0', pkg.version === '0.10.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.10.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.10.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2323,6 +2323,170 @@ const mockServer = http.createServer((req, res) => {
     res.end();
   }
 });
+
+// 34. v0.10.0 — automatic git backups, diff and self-restore.
+// Rob runs GitKraken; the backups are local commits in the
+// project's own .git folder, made by the git CLI before CodeFox
+// changes anything. Pure parsers and loop helpers are tested
+// here; the engine (stubbed git) and the real-git round-trip run
+// in the async block below, before finish().
+const gitBackup = require(path.join(root, 'git-backup.js'));
+check('git-backup parses porcelain status (staged/modified/untracked/deleted/rename)',
+  (() => {
+    const s = gitBackup.parsePorcelainStatus('M  src/a.cs\n M src/b.cs\nMM src/c.cs\n?? new.txt\n D src/d.cs\nD  src/e.cs\nR  old.cs -> new.cs\nA  src/f.cs\n');
+    return s.staged.includes('src/a.cs') && s.staged.includes('src/c.cs') && s.staged.includes('src/f.cs')
+      && s.modified.includes('src/b.cs') && s.modified.includes('src/c.cs')
+      && s.untracked.includes('new.txt')
+      && s.deleted.includes('src/d.cs') && s.deleted.includes('src/e.cs')
+      && s.renamed.length === 1 && s.renamed[0].from === 'old.cs' && s.renamed[0].to === 'new.cs';
+  })());
+check('git-backup parses log output and flags backup commits',
+  (() => {
+    const commits = gitBackup.parseLogOutput('abc1234567890abcdef\x1fabc1234\x1fRob\x1f2026-11-26\x1fCodeFox backup: before fix the prefab\ndef1234567890abcdef\x1fdef1234\x1fRob\x1f2026-11-25\x1fFix the bridge\n');
+    return commits.length === 2 && commits[0].short === 'abc1234' && commits[0].isBackup === true
+      && commits[0].message === 'CodeFox backup: before fix the prefab' && commits[1].isBackup === false;
+  })());
+check('git-backup parses name-status diffs',
+  (() => {
+    const d = gitBackup.parseNameStatus('M\tAssets/Scripts/Player.cs\nD\tAssets/Old.cs\nA\tAssets/New.cs\n');
+    return d.modified.length === 1 && d.modified[0] === 'Assets/Scripts/Player.cs'
+      && d.deleted.length === 1 && d.deleted[0] === 'Assets/Old.cs'
+      && d.added.length === 1 && d.added[0] === 'Assets/New.cs';
+  })());
+check('git-backup truncates a huge diff with a note, leaves a small one alone',
+  (() => {
+    const big = gitBackup.truncateDiff('x'.repeat(300 * 1024));
+    const small = gitBackup.truncateDiff('diff --git a/x b/x');
+    return big.truncated === true && big.diff.includes('truncated at 200KB')
+      && small.truncated === false && small.diff === 'diff --git a/x b/x';
+  })());
+check('git-backup commit message format, 80-char cap, empty fallback',
+  gitBackup.backupCommitMessage('fix the prefab') === 'CodeFox backup: before fix the prefab'
+  && gitBackup.backupCommitMessage('  fix   the\nprefab  ') === 'CodeFox backup: before fix the prefab'
+  && gitBackup.backupCommitMessage('x'.repeat(200)).length === 'CodeFox backup: before '.length + 80
+  && gitBackup.backupCommitMessage('') === 'CodeFox backup: before assistant change');
+check('git-backup refuses paths escaping the repo',
+  gitBackup.isPathInsideRepo('/repo', 'Assets/a.cs') === true
+  && gitBackup.isPathInsideRepo('/repo', '../evil.cs') === false
+  && gitBackup.isPathInsideRepo('/repo', '/abs/path.cs') === false
+  && gitBackup.isPathInsideRepo('/repo', 'Assets/../../evil.cs') === false
+  && gitBackup.isPathInsideRepo('/repo', '') === false);
+check('git-backup never stages the transient bridge files',
+  gitBackup.TRANSIENT_EXCLUDES.includes(':!Assets/.codefox-command.json')
+  && gitBackup.TRANSIENT_EXCLUDES.includes(':!Assets/.codefox-result.json')
+  && gitBackup.TRANSIENT_EXCLUDES.includes(':!Assets/.codefox-refresh-trigger'));
+
+// Loop helpers (v0.10.0) — extracted from app.js like the 0.9.3 ones.
+const summarizeSrc = extractFunction(appJs, 'summarizeForBackup');
+const shouldBackupSrc = extractFunction(appJs, 'shouldTakeTurnBackup');
+const changeMakingSrc = extractFunction(appJs, 'isChangeMakingAction');
+const verifyDecisionSrc = extractFunction(appJs, 'postTurnVerifyDecision');
+const parseGitSrc = extractFunction(appJs, 'parseGitBlocks');
+check('git loop helpers can be extracted for testing',
+  !!summarizeSrc && !!shouldBackupSrc && !!changeMakingSrc && !!verifyDecisionSrc && !!parseGitSrc);
+if (summarizeSrc && shouldBackupSrc && changeMakingSrc && verifyDecisionSrc && parseGitSrc) {
+  const gitHelpers = new Function(
+    summarizeSrc + '\n' + shouldBackupSrc + '\n' + changeMakingSrc + '\n' + verifyDecisionSrc + '\n' + parseGitSrc
+    + '\nreturn { summarizeForBackup, shouldTakeTurnBackup, isChangeMakingAction, postTurnVerifyDecision, parseGitBlocks };')();
+  check('backup summary cleans the request to one 80-char line',
+    gitHelpers.summarizeForBackup('  fix   the\nprefab  ') === 'fix the prefab'
+    && gitHelpers.summarizeForBackup('x'.repeat(200)).length === 80
+    && gitHelpers.summarizeForBackup('') === 'assistant change');
+  check('turn backup is taken once, only for a real change, only when on',
+    gitHelpers.shouldTakeTurnBackup({ backupAttempted: false, gitAutoBackup: true, projectPath: 'C:\\x', hasChangeActions: true }) === true
+    && gitHelpers.shouldTakeTurnBackup({ backupAttempted: true, gitAutoBackup: true, projectPath: 'C:\\x', hasChangeActions: true }) === false
+    && gitHelpers.shouldTakeTurnBackup({ backupAttempted: false, gitAutoBackup: false, projectPath: 'C:\\x', hasChangeActions: true }) === false
+    && gitHelpers.shouldTakeTurnBackup({ backupAttempted: false, gitAutoBackup: true, projectPath: '', hasChangeActions: true }) === false
+    && gitHelpers.shouldTakeTurnBackup({ backupAttempted: false, gitAutoBackup: true, projectPath: 'C:\\x', hasChangeActions: false }) === false);
+  check('change-making actions include files/unity/packages/shell and git-restore, not git reads',
+    gitHelpers.isChangeMakingAction({ type: 'files' })
+    && gitHelpers.isChangeMakingAction({ type: 'unity-command' })
+    && gitHelpers.isChangeMakingAction({ type: 'package-install' })
+    && gitHelpers.isChangeMakingAction({ type: 'package-remove' })
+    && gitHelpers.isChangeMakingAction({ type: 'shell' })
+    && gitHelpers.isChangeMakingAction({ type: 'git', command: { action: 'restore' } })
+    && !gitHelpers.isChangeMakingAction({ type: 'git', command: { action: 'status' } })
+    && !gitHelpers.isChangeMakingAction({ type: 'git', command: { action: 'log' } })
+    && !gitHelpers.isChangeMakingAction({ type: 'comfyui' })
+    && !gitHelpers.isChangeMakingAction(null));
+  check('verify decision: ok / fixed / restore-git / restore-snapshot / report-only',
+    gitHelpers.postTurnVerifyDecision({ firstCheckOk: true }) === 'ok'
+    && gitHelpers.postTurnVerifyDecision({ firstCheckOk: false, fixProduced: true, secondCheckOk: true }) === 'fixed'
+    && gitHelpers.postTurnVerifyDecision({ firstCheckOk: false, fixProduced: false, secondCheckOk: null, hasGitPoint: true, hasSnapshots: true }) === 'restore-git'
+    && gitHelpers.postTurnVerifyDecision({ firstCheckOk: false, fixProduced: true, secondCheckOk: false, hasGitPoint: false, hasSnapshots: true }) === 'restore-snapshot'
+    && gitHelpers.postTurnVerifyDecision({ firstCheckOk: false, fixProduced: false, secondCheckOk: null, hasGitPoint: false, hasSnapshots: false }) === 'report-only');
+  check('parseGitBlocks parses status/diff/restore JSON, rejects bad JSON',
+    (() => {
+      const blocks = gitHelpers.parseGitBlocks('```git\n{"action": "status"}\n```\n```git\n{"action": "restore", "ref": "abc1234"}\n```\n```git\nnot json\n```\n');
+      return blocks.length === 3
+        && blocks[0].valid && blocks[0].command.action === 'status'
+        && blocks[1].valid && blocks[1].command.ref === 'abc1234'
+        && !blocks[2].valid && !!blocks[2].error;
+    })());
+}
+// extractFileChanges must skip ```git fences like the other tool blocks.
+check('parser skips ```git fences as files, still extracts a real file change',
+  (() => {
+    const p = new Function('CODE_EXTS', parserSrc + '\nreturn extractFileChanges;')(codeExtsMatch[1]);
+    return p('```git\n{"action": "status"}\n```\n').length === 0
+      && p('**File Path:** `Assets/Scripts/Player.cs`\n```git\n{"action": "diff"}\n```\n').length === 0
+      && p('**File Path:** `Assets/Scripts/Player.cs`\n```csharp\npublic class Player {}\n```\n').length === 1;
+  })());
+// Prompt: the agent prompt carries the git docs (re-extract like 0.9.2).
+if (promptSrc) {
+  const buildPrompt10 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt10 = buildPrompt10(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the Git backups section with status/diff/log/restore examples',
+    agentPrompt10.includes('## Git backups')
+    && agentPrompt10.includes('```git')
+    && agentPrompt10.includes('"action": "status"')
+    && agentPrompt10.includes('"action": "diff"')
+    && agentPrompt10.includes('"action": "log"')
+    && agentPrompt10.includes('"action": "restore"')
+    && agentPrompt10.includes('GitKraken')
+    && agentPrompt10.includes('never leave the project broken'));
+  check('agent prompt capability statement mentions the backup commit',
+    agentPrompt10.includes('a backup commit is taken first'));
+  check('the git examples in the built prompt are valid JSON',
+    (() => {
+      const gitSection = agentPrompt10.slice(agentPrompt10.indexOf('## Git backups'));
+      const found = gitSection.match(/\{"action": "[a-z]+"[^}]*\}/g) || [];
+      if (found.length < 4) return false;
+      try { for (const f of found) JSON.parse(f); return true; } catch { return false; }
+    })());
+}
+// Wiring: IPCs, preload, UI, loop.
+check('main.js has the git IPCs and the engine require',
+  mainJs.includes("require('./git-backup')")
+  && mainJs.includes("ipcMain.handle('git:repoInfo'")
+  && mainJs.includes("ipcMain.handle('git:status'")
+  && mainJs.includes("ipcMain.handle('git:diff'")
+  && mainJs.includes("ipcMain.handle('git:log'")
+  && mainJs.includes("ipcMain.handle('git:backup'")
+  && mainJs.includes("ipcMain.handle('git:restore'")
+  && mainJs.includes("'git_auto_backup', '1'")
+  && mainJs.includes("'git_exe_path', ''"));
+check('preload.js exposes rb.git with all six calls',
+  preloadJs.includes('git:') && preloadJs.includes("ipcRenderer.invoke('git:repoInfo'")
+  && preloadJs.includes("ipcRenderer.invoke('git:status'") && preloadJs.includes("ipcRenderer.invoke('git:diff'")
+  && preloadJs.includes("ipcRenderer.invoke('git:log'") && preloadJs.includes("ipcRenderer.invoke('git:backup'")
+  && preloadJs.includes("ipcRenderer.invoke('git:restore'"));
+check('sidebar has the Git Backups section and the loop has the git machinery',
+  indexHtml.includes('git-backups-list')
+  && appJs.includes('renderGitBackupSection') && appJs.includes('gitBackupNow')
+  && appJs.includes('gitRestoreLastBackup') && appJs.includes('showGitRestoreBar')
+  && appJs.includes('ensureTurnBackup') && appJs.includes('verifyTurnAfterChanges')
+  && appJs.includes('restoreTurnToBackupPoint') && appJs.includes('saveGitExePath')
+  && appJs.includes("setShellToggle('git_auto_backup'"));
+check('sidebar revert guards the fake bar (revertFromHistory fix)',
+  appJs.includes('bar && bar.querySelector') && appJs.includes('bar && bar.remove'));
+check('README has the Git backups section, CHANGELOG has the 0.10.0 entry',
+  readme.includes('### Git backups') && readme.includes('Never leave it broken')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.10.0 — 2026-11-26'));
 (async () => {
   await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
   const base = 'http://127.0.0.1:' + mockServer.address().port;
@@ -2612,6 +2776,176 @@ const mockServer = http.createServer((req, res) => {
       && inserts.length === 0);
   } catch (e) {
     check('snapshotForDelete runs against stubbed rb/state', false, String(e && e.message));
+  }
+
+  // v0.10.0 — git engine against a stubbed git, then the real
+  // thing. The stub matches on the git args after `git -C <dir>`.
+  {
+    const proj = '/tmp/codefox-git-stub';
+    const mkFs = (extra) => {
+      const existing = new Set([proj + '/.git', '/usr/bin/git', ...(extra || [])]);
+      return { existsSync: (p) => existing.has(p), unlinkSync: () => {} };
+    };
+    const mkRun = (handlers) => {
+      const calls = [];
+      const run = async (cmd, args, opts, timeoutMs) => {
+        calls.push(args.slice(2).join(' '));
+        for (const h of handlers) {
+          const r = h(args.slice(2));
+          if (r) return { code: r.code ?? 0, stdout: r.stdout || '', stderr: r.stderr || '', timedOut: false };
+        }
+        return { code: 0, stdout: '', stderr: '', timedOut: false };
+      };
+      return { run, calls };
+    };
+    const statusHandlers = (porcelain) => [
+      (a) => a[0] === 'status' ? { stdout: porcelain } : null,
+      (a) => a[0] === 'rev-parse' && a[1] === 'HEAD' ? { stdout: 'abc1234567890abcdef\n' } : null,
+      (a) => a[0] === 'symbolic-ref' && a[1] === '--short' ? { stdout: 'main\n' } : null,
+    ];
+    // Status parsing through the engine.
+    {
+      const { run } = mkRun(statusHandlers(' M Assets/Scripts/Player.cs\n?? Notes.txt\n'));
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const st = await eng.status(proj);
+      check('git engine status parses modified/untracked, branch, head, not clean',
+        st.ok === true && st.branch === 'main' && st.head === 'abc1234567890abcdef'
+        && st.modified.includes('Assets/Scripts/Player.cs') && st.untracked.includes('Notes.txt') && st.clean === false);
+    }
+    // Backup on a clean tree: no commit, HEAD is the restore point.
+    {
+      const { run, calls } = mkRun(statusHandlers(''));
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const b = await eng.backup(proj, 'fix the player');
+      check('git engine backup on a clean tree makes no commit, HEAD is the restore point',
+        b.ok === true && b.committed === false && b.sha === 'abc1234567890abcdef'
+        && !calls.some(c => c.startsWith('commit')));
+    }
+    // Backup on a dirty tree: add -u (tracked only, transient
+    // files excluded), then a commit with the CodeFox message.
+    {
+      const handlers = [
+        ...statusHandlers('M  Assets/Scripts/Player.cs\n'),
+        (a) => a[0] === 'diff' && a[1] === '--cached' ? { code: 1, stdout: '' } : null, // something staged
+        (a) => a[0] === 'config' ? { code: 1, stdout: '' } : null, // no user.name/email set
+        (a) => a[0] === 'commit' ? { stdout: '[main abc1234] CodeFox backup: before fix the player\n' } : null,
+      ];
+      const { run, calls } = mkRun(handlers);
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const b = await eng.backup(proj, 'fix the player');
+      check('git engine backup commits tracked changes with the CodeFox message',
+        b.ok === true && b.committed === true && b.sha === 'abc1234567890abcdef'
+        && calls.some(c => c.startsWith('add -u') && c.includes(':!Assets/.codefox-command.json'))
+        && calls.some(c => c.includes('commit') && c.includes('CodeFox backup: before fix the player'))
+        && calls.some(c => c.includes('-c') && c.includes('user.name=CodeFox')));
+    }
+    // Backup with only untracked changes: nothing staged, no commit.
+    {
+      const handlers = [
+        ...statusHandlers('?? Notes.txt\n'),
+        (a) => a[0] === 'diff' && a[1] === '--cached' ? { code: 0, stdout: '' } : null, // nothing staged
+      ];
+      const { run, calls } = mkRun(handlers);
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const b = await eng.backup(proj, 'fix the player');
+      check('git engine backup with only untracked changes makes no commit',
+        b.ok === true && b.committed === false && !calls.some(c => c.startsWith('commit')));
+    }
+    // Backup refusals: not a repo, git missing, merge in progress.
+    {
+      const engNoRepo2 = gitBackup.createEngine({ run: mkRun([]).run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: { existsSync: (p) => p === '/usr/bin/git', unlinkSync: () => {} }, path, getGitExePath: () => '' });
+      const r1 = await engNoRepo2.backup('/tmp/not-a-repo', 'x');
+      check('git engine backup refuses a non-repo', r1.ok === false && r1.reason === 'not-a-repo');
+      const engNoGit = gitBackup.createEngine({ run: mkRun([]).run, where: async () => ({ found: false, path: null }), fs: mkFs(), path, getGitExePath: () => '' });
+      const r2 = await engNoGit.backup(proj, 'x');
+      check('git engine backup reports git-not-found, never silently', r2.ok === false && r2.reason === 'git-not-found');
+      const engMerge = gitBackup.createEngine({ run: mkRun(statusHandlers('')).run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs([proj + '/.git/MERGE_HEAD']), path, getGitExePath: () => '' });
+      const r3 = await engMerge.backup(proj, 'x');
+      check('git engine backup refuses during a merge', r3.ok === false && r3.reason === 'merge-in-progress');
+    }
+    // Restore: dry-run plan derived from name-status; bad paths
+    // and bad refs refused; nothing executed on a dry run.
+    {
+      const handlers = [
+        (a) => a[0] === 'rev-parse' && a[1] === '--verify' ? { stdout: 'abc1234567890abcdef\n' } : null,
+        (a) => a[0] === 'diff' ? { stdout: 'M\tAssets/Scripts/Player.cs\nD\tAssets/Old.cs\nA\tAssets/New.cs\n' } : null,
+      ];
+      const { run, calls } = mkRun(handlers);
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const plan = await eng.restore(proj, 'abc1234', { dryRun: true });
+      check('git engine restore dry-run derives checkout/delete lists from name-status',
+        plan.ok === true && plan.dryRun === true && plan.sha === 'abc1234567890abcdef'
+        && plan.checkout.includes('Assets/Scripts/Player.cs') && plan.checkout.includes('Assets/Old.cs')
+        && plan.delete.includes('Assets/New.cs')
+        && !calls.some(c => c.startsWith('checkout')));
+      const badPath = await eng.restore(proj, 'abc1234', { filesToCheckout: ['../evil.cs'], dryRun: true });
+      check('git engine restore refuses a path escaping the repo', badPath.ok === false && badPath.reason === 'bad-path');
+      const engBadRef = gitBackup.createEngine({ run: async () => ({ code: 128, stdout: '', stderr: 'unknown revision', timedOut: false }), where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const badRef = await engBadRef.restore(proj, 'nonsense', {});
+      check('git engine restore refuses an unknown ref', badRef.ok === false && badRef.reason === 'bad-ref');
+    }
+    // Diff truncation through the engine.
+    {
+      const { run } = mkRun([(a) => a[0] === 'diff' ? { stdout: 'x'.repeat(300 * 1024) } : null]);
+      const eng = gitBackup.createEngine({ run, where: async () => ({ found: true, path: '/usr/bin/git' }), fs: mkFs(), path, getGitExePath: () => '' });
+      const d = await eng.diff(proj, {});
+      check('git engine diff truncates a huge diff', d.ok === true && d.truncated === true && d.diff.includes('truncated at 200KB'));
+    }
+  }
+
+  // v0.10.0 — real git round-trip in a throwaway repo (only when
+  // git is on this VM; the stub tests above cover the engine when
+  // it is not).
+  {
+    let gitVersion = null;
+    try { gitVersion = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim(); } catch {}
+    if (gitVersion) {
+      const { spawn } = require('child_process');
+      const realRun = (cmd, args, opts, timeoutMs) => new Promise((resolve) => {
+        let stdout = '', stderr = '';
+        let proc;
+        try { proc = spawn(cmd, args, opts); } catch (e) { return resolve({ code: -1, stdout: '', stderr: String(e), timedOut: false }); }
+        const timer = setTimeout(() => { try { proc.kill(); } catch {} resolve({ code: -1, stdout, stderr, timedOut: true }); }, timeoutMs || 30000);
+        proc.stdout && proc.stdout.on('data', d => { stdout += d.toString(); });
+        proc.stderr && proc.stderr.on('data', d => { stderr += d.toString(); });
+        proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: stderr + '\n' + e.message, timedOut: false }); });
+        proc.on('close', (code) => { clearTimeout(timer); resolve({ code: code == null ? -1 : code, stdout, stderr, timedOut: false }); });
+      });
+      const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-git-real-'));
+      try {
+        const gitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+        const eng = gitBackup.createEngine({ run: realRun, where: async () => ({ found: true, path: gitPath }), fs, path, getGitExePath: () => '' });
+        await realRun('git', ['init', '-b', 'main', tmpRepo], {}, 10000);
+        await realRun('git', ['-C', tmpRepo, 'config', 'user.email', 'test@codefox.local'], {}, 5000);
+        await realRun('git', ['-C', tmpRepo, 'config', 'user.name', 'CodeFox Test'], {}, 5000);
+        fs.writeFileSync(path.join(tmpRepo, 'Player.cs'), 'v1\n');
+        await realRun('git', ['-C', tmpRepo, 'add', '-A'], {}, 5000);
+        await realRun('git', ['-C', tmpRepo, 'commit', '-m', 'initial'], {}, 5000);
+        fs.writeFileSync(path.join(tmpRepo, 'Player.cs'), 'v2 broken\n');
+        fs.writeFileSync(path.join(tmpRepo, 'NewFile.cs'), 'new\n');
+        const b = await eng.backup(tmpRepo, 'fix the player');
+        check('real git: backup commits the tracked change',
+          b.ok === true && b.committed === true && !!b.sha, 'got ' + JSON.stringify(b));
+        const l = await eng.log(tmpRepo, 5);
+        check('real git: backup commit is in the log with the CodeFox message',
+          l.ok === true && l.commits[0].isBackup === true && l.commits[0].message === 'CodeFox backup: before fix the player');
+        fs.writeFileSync(path.join(tmpRepo, 'Player.cs'), 'v3 worse\n');
+        const d = await eng.diff(tmpRepo, { ref: b.sha });
+        check('real git: diff vs the backup shows the new change',
+          d.ok === true && d.diff.includes('v3 worse'));
+        const r = await eng.restore(tmpRepo, b.sha, {});
+        check('real git: restore returns the file to the backup state',
+          r.ok === true && fs.readFileSync(path.join(tmpRepo, 'Player.cs'), 'utf8') === 'v2 broken\n');
+        check('real git: restore does not touch files that predate the backup',
+          fs.existsSync(path.join(tmpRepo, 'NewFile.cs')));
+        fs.writeFileSync(path.join(tmpRepo, 'Created.cs'), 'created\n');
+        const r2 = await eng.restore(tmpRepo, b.sha, { filesToCheckout: [], filesToDelete: ['Created.cs'] });
+        check('real git: restore deletes a file the change created',
+          r2.ok === true && !fs.existsSync(path.join(tmpRepo, 'Created.cs')));
+      } finally { fs.rmSync(tmpRepo, { recursive: true, force: true }); }
+    } else {
+      check('real-git integration skipped — git not on this VM (stub tests cover the engine)', true);
+    }
   }
   finish();
 })().catch((e) => {

@@ -447,6 +447,10 @@ async function init() {
   // v0.5.1: auto-apply new Unity asset files. Default on; the
   // setting is seeded to '1' in main.js, so a missing key means on.
   state.autoApplyUnityAssets = (await rb.db.getSetting('auto_apply_unity_assets') || '1') === '1';
+  // v0.10.0: automatic git backups before changes. Default on; the
+  // setting is seeded to '1' in main.js, so a missing key means on.
+  state.gitAutoBackup = (await rb.db.getSetting('git_auto_backup') || '1') === '1';
+  state.gitExePath = await rb.db.getSetting('git_exe_path') || '';
   try { state.shellAutoApprove = JSON.parse(await rb.db.getSetting('shell_auto_approve') || 'null') || DEFAULT_SHELL_AUTO_APPROVE.slice(); }
   catch { state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice(); }
   if (!Array.isArray(state.shellAutoApprove)) state.shellAutoApprove = DEFAULT_SHELL_AUTO_APPROVE.slice();
@@ -545,6 +549,14 @@ async function refreshSidebar() {
   } catch (e) {
     renderSnapshotList([]);
   }
+  // Git backups (v0.10.0) — its own try/catch so a git failure
+  // (not a repo, git missing) can never break the sidebar.
+  try {
+    const gitInfo = await rb.git.repoInfo({ projectPath: state.projectPath });
+    renderGitBackupSection(gitInfo);
+  } catch (e) {
+    renderGitBackupSection(null);
+  }
 }
 
 function renderSnapshotList(snapshots) {
@@ -573,6 +585,99 @@ function formatTime(isoStr) {
     const d = new Date(isoStr.replace(' ', 'T') + 'Z');
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch { return isoStr; }
+}
+
+// ── Git backups sidebar section (v0.10.0) ────────────────────────
+// Repo + branch, the last CodeFox backup commit, and the three
+// actions. A git failure never breaks the sidebar: repoInfo is
+// fetched in its own try/catch in refreshSidebar.
+let gitHistoryOpen = false;
+function renderGitBackupSection(info) {
+  const el = document.getElementById('git-backups-list');
+  if (!el) return;
+  if (!info) {
+    el.innerHTML = '<div style="padding:4px 14px;color:var(--text3);font-size:11px;">Git status unavailable</div>';
+    return;
+  }
+  if (!info.isRepo) {
+    el.innerHTML = '<div style="padding:4px 14px;color:var(--text3);font-size:11px;">Not a git project'
+      + (info.gitFound ? '' : ' · Git not found — set the path in Settings → Advanced') + '</div>';
+    return;
+  }
+  const last = info.lastBackup;
+  el.innerHTML = `
+    <div style="padding:4px 14px;font-size:11px;color:var(--text2);">
+      <div>Branch: <b>${escHtml(info.branch || '?')}</b>${info.clean === false ? ' · <span style="color:var(--amber);">uncommitted changes</span>' : ''}</div>
+      <div>${last ? 'Last backup: <b>' + escHtml(last.short) + '</b> ' + escHtml(last.message) + ' · ' + escHtml(last.date) : 'No CodeFox backup commit yet'}</div>
+    </div>
+    <div style="display:flex;gap:6px;padding:2px 14px 6px;">
+      <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;" onclick="gitBackupNow()">Backup now</button>
+      <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;" onclick="gitRestoreLastBackup()" ${last ? '' : 'disabled'}>Restore last backup</button>
+      <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;" onclick="gitToggleHistory()">History</button>
+    </div>
+    <div id="git-history-list"></div>`;
+  if (gitHistoryOpen) gitShowHistory();
+}
+
+async function gitBackupNow() {
+  showToast('Backing up…');
+  let res;
+  try { res = await rb.git.backup({ projectPath: state.projectPath, summary: 'manual backup from the sidebar' }); }
+  catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+  showToast(res && res.ok ? ('✓ ' + (res.message || 'Backup done')) : ('⚠ Backup failed: ' + ((res && (res.error || res.reason)) || 'unknown error')));
+  refreshSidebar().catch(() => {});
+}
+
+async function gitToggleHistory() {
+  gitHistoryOpen = !gitHistoryOpen;
+  if (gitHistoryOpen) await gitShowHistory();
+  else { const el = document.getElementById('git-history-list'); if (el) el.innerHTML = ''; }
+}
+
+async function gitShowHistory() {
+  const el = document.getElementById('git-history-list');
+  if (!el) return;
+  el.innerHTML = '<div style="padding:2px 14px;color:var(--text3);font-size:11px;">Loading…</div>';
+  let res;
+  try { res = await rb.git.log({ projectPath: state.projectPath, count: 10 }); }
+  catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+  if (!res || !res.ok) {
+    el.innerHTML = '<div style="padding:2px 14px;color:var(--text3);font-size:11px;">' + escHtml((res && res.error) || 'Could not load history') + '</div>';
+    return;
+  }
+  el.innerHTML = (res.commits || []).map(c => `
+    <div class="sidebar-link" style="flex-direction:column;align-items:flex-start;gap:2px;padding:4px 14px;">
+      <span style="font-size:11px;color:var(--text2);"><b>${escHtml(c.short)}</b> ${escHtml(c.message)}${c.isBackup ? ' <span style="color:var(--amber);">[backup]</span>' : ''}</span>
+      <span style="font-size:10px;color:var(--text3);">${escHtml(c.author)} · ${escHtml(c.date)}</span>
+    </div>`).join('') || '<div style="padding:2px 14px;color:var(--text3);font-size:11px;">No commits yet</div>';
+}
+
+async function gitRestoreLastBackup() {
+  let info;
+  try { info = await rb.git.repoInfo({ projectPath: state.projectPath }); } catch { info = null; }
+  const last = info && info.lastBackup;
+  if (!last) { showToast('No CodeFox backup commit to restore'); return; }
+  let plan;
+  try { plan = await rb.git.restore({ projectPath: state.projectPath, ref: last.sha, dryRun: true }); }
+  catch (e) { plan = { ok: false, error: String(e && e.message || e) }; }
+  if (!plan || !plan.ok) { showToast('⚠ Restore failed: ' + ((plan && plan.error) || 'unknown error')); return; }
+  // The user clicked the button, but restoring discards changes —
+  // show the same approval bar the model path uses, with the plan.
+  showGitRestoreBar(plan, {
+    approved: async () => {
+      let res;
+      try { res = await rb.git.restore({ projectPath: state.projectPath, ref: last.sha, filesToCheckout: plan.checkout, filesToDelete: plan.delete }); }
+      catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+      if (res && res.ok) {
+        showToast('↩ Restored to backup ' + (res.sha || '').slice(0, 7) + ' — Unity refreshing');
+        await rb.unity.refresh(state.projectPath);
+        refreshSidebar().catch(() => {});
+      } else {
+        showToast('⚠ Restore failed: ' + ((res && res.error) || 'unknown error'));
+      }
+    },
+    declined: () => showToast('Restore dismissed — nothing changed'),
+  });
 }
 
 async function revertFromHistory(snapshotId) {
@@ -1102,6 +1207,85 @@ function loopNoActionsDecision(userRequest, enforcementRetried, lastRoundHadActi
   if (!enforcementRetried) return 'enforce';
   return 'stop';
 }
+
+// ── Git backups (v0.10.0) — pure helpers ─────────────────────────
+// The agent loop takes one backup commit before the first change
+// of a turn, then never leaves the project broken: after a turn
+// that changed code, one build check runs; a failure gets one fix
+// round, and if the fix fails the turn is restored to the backup
+// point. These are pure so the smoke test can exercise them.
+
+// A backup commit's summary is the user's request, cleaned down
+// to one line of at most 80 chars ("CodeFox backup: before …").
+function summarizeForBackup(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'assistant change';
+}
+
+// Should this turn take its (one) backup before the first change?
+// A backup is taken once per turn, only when the turn actually
+// changes something, only when the setting is on, and only when a
+// project folder is set. A "no" here never stops the turn — the
+// snapshot system is the fallback.
+function shouldTakeTurnBackup(opts) {
+  const o = opts || {};
+  if (o.backupAttempted) return false;
+  if (!o.gitAutoBackup) return false;
+  if (!o.projectPath) return false;
+  if (!o.hasChangeActions) return false;
+  return true;
+}
+
+// Which action types change the project? A ```git block that only
+// reads (status/diff/log) does not; a restore does — it discards
+// changes, so the backup must happen first.
+function isChangeMakingAction(action) {
+  if (!action || !action.type) return false;
+  if (action.type === 'files' || action.type === 'unity-command'
+    || action.type === 'package-install' || action.type === 'package-remove'
+    || action.type === 'shell') return true;
+  if (action.type === 'git' && action.command && action.command.action === 'restore') return true;
+  return false;
+}
+
+// The post-turn verify decision, after the optional fix round:
+// firstCheckOk — the build check right after the loop ended.
+// fixProduced — the fix round output actions (false = refusal or
+// a text-only reply). secondCheckOk — the build check after the
+// fix round (null when no fix was produced, so no re-check ran).
+// hasGitPoint — a git backup restore point exists for this turn.
+// hasSnapshots — snapshots were taken this turn (fallback).
+// Returns 'ok' | 'fixed' | 'restore-git' | 'restore-snapshot' |
+// 'report-only'.
+function postTurnVerifyDecision(opts) {
+  const o = opts || {};
+  if (o.firstCheckOk) return 'ok';
+  if (o.fixProduced && o.secondCheckOk) return 'fixed';
+  if (o.hasGitPoint) return 'restore-git';
+  if (o.hasSnapshots) return 'restore-snapshot';
+  return 'report-only';
+}
+
+// Parse ```git blocks (v0.10.0, Agent mode only): JSON
+// {"action": "status" | "diff" | "log" | "backup" | "restore", ...}.
+// Ask/Plan never parse these.
+function parseGitBlocks(text) {
+  const out = [];
+  const re = /```git\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    out.push({
+      command: parsed,
+      raw: m[1].trim(),
+      valid: !!parsed && typeof parsed === 'object' && typeof parsed.action === 'string' && !!parsed.action,
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
 // Intent-based mode routing (v0.8.2). Ask mode is instructed to
 // refuse file work ("Answer and explain only"), so a build request
 // sent in Ask mode gets an INSTRUCTED refusal — the model doing
@@ -1276,6 +1460,9 @@ function parseAgentActions(text) {
   }
   for (const b of parseUnityCommandBlocks(text)) {
     actions.push({ type: 'unity-command', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
+  for (const b of parseGitBlocks(text)) {
+    actions.push({ type: 'git', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
@@ -1455,6 +1642,206 @@ async function handleSkillSaveFlags(content) {
   }
 }
 
+// ── Git backups in the agent loop (v0.10.0) ──────────────────────
+
+// Record what this turn changed, for the post-turn verify step.
+// `paths` are repo-relative. A path ending .cs/.prefab/.unity
+// marks the turn as code-changing, which is what triggers the
+// post-turn build check.
+function noteTurnChange(paths) {
+  if (!loopState) return;
+  if (!loopState.turnChangedFiles) loopState.turnChangedFiles = [];
+  for (const p of (paths || [])) {
+    const rel = String(p || '').replace(/\\/g, '/');
+    if (rel && !loopState.turnChangedFiles.includes(rel)) loopState.turnChangedFiles.push(rel);
+    if (/\.(cs|prefab|unity)$/i.test(rel)) loopState.turnChangedCode = true;
+  }
+}
+function noteTurnSnapshot(snapshotId) {
+  if (!loopState || !snapshotId) return;
+  if (!loopState.turnSnapshotIds) loopState.turnSnapshotIds = [];
+  if (!loopState.turnSnapshotIds.includes(snapshotId)) loopState.turnSnapshotIds.push(snapshotId);
+}
+
+// Take the turn's one git backup (see git-backup.js). Stores the
+// restore point on loopState: { kind:'git', sha } plus the
+// untracked list at backup time, so the auto-restore can tell
+// files the turn created from files the user already had
+// untracked. A skip or failure is noted once in a system message
+// and never blocks the turn — the snapshot system is the fallback.
+async function ensureTurnBackup(userRequest) {
+  let res = null;
+  try {
+    res = await rb.git.backup({ projectPath: state.projectPath, summary: summarizeForBackup(userRequest) });
+  } catch (e) {
+    res = { ok: false, reason: 'git-error', error: String(e && e.message || e) };
+  }
+  if (!loopState) return;
+  if (res && res.ok && res.sha) {
+    loopState.backupRestorePoint = { kind: 'git', sha: res.sha, committed: !!res.committed };
+    try {
+      const st = await rb.git.status({ projectPath: state.projectPath });
+      loopState.backupPreUntracked = (st && st.ok && st.untracked) ? st.untracked.slice() : [];
+    } catch { loopState.backupPreUntracked = []; }
+    // Success is silent: the commit is visible in GitKraken and
+    // in the sidebar's Git section. Only a skip/failure is noted.
+  } else if (res && res.ok) {
+    // No commits yet and nothing to commit: there is no restore
+    // point, but nothing was lost either — the snapshot system
+    // covers the turn's file writes. Nothing to say.
+    loopState.backupRestorePoint = null;
+  } else {
+    loopState.backupRestorePoint = null;
+    const why = (res && (res.error || res.reason)) || 'unknown error';
+    addSystemMessage('Git backup skipped (' + why + ') — file snapshots still apply, so changes can be reverted from the sidebar.');
+  }
+}
+
+// Plain-text tool results for the read/backup git actions.
+function gitToolResultText(action, res) {
+  if (!res || res.ok === false) {
+    return 'Tool result — Git ' + action + ' failed: ' + ((res && (res.error || res.reason)) || 'unknown error');
+  }
+  if (action === 'status') {
+    const parts = [];
+    if (res.staged.length) parts.push(res.staged.length + ' staged');
+    if (res.modified.length) parts.push(res.modified.length + ' modified');
+    if (res.untracked.length) parts.push(res.untracked.length + ' untracked');
+    if (res.deleted.length) parts.push(res.deleted.length + ' deleted');
+    if (res.renamed.length) parts.push(res.renamed.length + ' renamed');
+    return 'Tool result — Git status (branch ' + (res.branch || '?') + ', HEAD ' + (res.head || 'none').slice(0, 7) + '): '
+      + (parts.length ? parts.join(', ') : 'clean')
+      + (res.mergeInProgress ? ' — a merge or rebase is in progress.' : '')
+      + (res.modified.length ? '\nModified: ' + res.modified.slice(0, 20).join(', ') : '')
+      + (res.untracked.length ? '\nUntracked: ' + res.untracked.slice(0, 20).join(', ') : '');
+  }
+  if (action === 'diff') {
+    if (res.modified || res.deleted || res.added) {
+      return 'Tool result — Git diff vs ' + (res.ref || 'HEAD') + ': '
+        + (res.modified || []).length + ' modified, ' + (res.deleted || []).length + ' deleted, ' + (res.added || []).length + ' added.'
+        + ((res.modified || []).length ? '\nModified: ' + res.modified.join(', ') : '')
+        + ((res.deleted || []).length ? '\nDeleted: ' + res.deleted.join(', ') : '')
+        + ((res.added || []).length ? '\nAdded: ' + res.added.join(', ') : '');
+    }
+    return 'Tool result — Git diff vs ' + (res.ref || 'HEAD') + (res.truncated ? ' (truncated at 200KB)' : '') + ':\n' + (res.diff || '(no changes)');
+  }
+  if (action === 'log') {
+    return 'Tool result — Git log:\n' + (res.commits || []).map(c =>
+      c.short + ' ' + c.message + ' (' + c.author + ', ' + c.date + ')' + (c.isBackup ? ' [CodeFox backup]' : '')).join('\n');
+  }
+  if (action === 'backup') {
+    return 'Tool result — Git backup: ' + res.message + (res.committed ? ' Restore point: ' + (res.sha || '').slice(0, 7) + '.' : '');
+  }
+  return 'Tool result — Git ' + action + ': done.';
+}
+
+// Verify-then-restore — the "never leave it broken" guarantee.
+// Runs after a turn that changed code (or after the bridge stopped
+// answering mid-turn, which means a .cs change broke compilation).
+// One build check, one fix round, then restore. The restore is
+// always reported, never silent. At most one check + one fix round
+// — never a retry loop.
+async function verifyTurnAfterChanges() {
+  if (!loopState || !state.projectPath) return;
+  const first = await rb.unity.buildCheck({ projectPath: state.projectPath });
+  const firstOk = !!(first && first.ok);
+  const noSolution = first && first.ok === false && first.error === 'no .NET solution found';
+  const timeoutSignal = loopState.unityWasAnswering && loopState.unityTimedOut;
+  const buildFailed = !firstOk && !noSolution;
+  // Nothing to verify: no solution to check and no timeout signal.
+  if (!buildFailed && !timeoutSignal) return;
+
+  const detail = buildFailed
+    ? String((first && (first.rawTail || first.error)) || 'build failed')
+    : 'Unity stopped answering after a change — the bridge stops answering when a .cs change breaks compilation. The dotnet build itself passes, so this may also be Unity not running.';
+  // One fix round: give the model the errors and let it fix them.
+  await appendToolResult('Tool result — post-change check failed:\n' + detail.slice(0, 4000)
+    + '\nFix it now — output the corrected file(s), or a ```unity-command block. If you cannot fix it, say so and stop.');
+  let fixProduced = false;
+  try {
+    const content = await streamOneTurn(
+      state.messages.map(m => ({ role: m.role, content: m.content })),
+      loopState.systemPrompt, loopState.threadId);
+    if (content != null && !loopState.stopRequested && !isRefusal(content)) {
+      const fixActions = parseAgentActions(content);
+      if (fixActions.length) {
+        await processAgentActions(fixActions);
+        fixProduced = true;
+      }
+    }
+  } catch (e) { /* a failed fix round counts as no fix */ }
+  let secondOk = null;
+  if (buildFailed && fixProduced) {
+    const second = await rb.unity.buildCheck({ projectPath: state.projectPath });
+    secondOk = !!(second && second.ok);
+    if (secondOk) {
+      addSystemMessage('The build broke after the last change, but the fix round repaired it — the build passes now.');
+      return;
+    }
+  }
+  if (!buildFailed) {
+    // Timeout only, build passes: nothing is provably broken, so
+    // nothing is restored. Say so plainly.
+    addSystemMessage('Unity stopped answering during the last change, but the build passes — nothing was restored. If the bridge is still silent, check Unity\'s Console for the compile error.');
+    return;
+  }
+  const decision = postTurnVerifyDecision({
+    firstCheckOk: false, fixProduced, secondCheckOk: secondOk,
+    hasGitPoint: !!(loopState.backupRestorePoint && loopState.backupRestorePoint.sha),
+    hasSnapshots: (loopState.turnSnapshotIds || []).length > 0,
+  });
+  if (decision === 'ok' || decision === 'fixed') return; // unreachable in practice, but safe
+  await restoreTurnToBackupPoint(decision, detail);
+}
+
+async function restoreTurnToBackupPoint(decision, detail) {
+  const point = loopState ? loopState.backupRestorePoint : null;
+  if (decision === 'restore-git' && point && point.sha) {
+    const sha = point.sha;
+    // What changed since the backup? Tracked changes from git,
+    // created files from the untracked list (minus what was
+    // already untracked before the turn).
+    let checkout = [];
+    let toDelete = [];
+    try {
+      const d = await rb.git.diff({ projectPath: state.projectPath, ref: sha, nameStatus: true });
+      if (d && d.ok) checkout = [...(d.modified || []), ...(d.deleted || [])];
+      const st = await rb.git.status({ projectPath: state.projectPath });
+      const before = new Set((loopState.backupPreUntracked || []).map(p => p.replace(/\\/g, '/')));
+      if (st && st.ok) toDelete = (st.untracked || []).map(p => p.replace(/\\/g, '/')).filter(p => !before.has(p));
+    } catch {}
+    let res = null;
+    try {
+      res = await rb.git.restore({ projectPath: state.projectPath, ref: sha, filesToCheckout: checkout, filesToDelete: toDelete });
+    } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+    await rb.unity.refresh(state.projectPath);
+    refreshSidebar().catch(() => {});
+    if (res && res.ok) {
+      addSystemMessage('The build still failed after a fix attempt, so CodeFox restored the project to the backup commit ' + sha.slice(0, 7)
+        + ' (' + (res.checkedOut || []).length + ' file(s) checked out, ' + (res.deleted || []).length + ' created file(s) deleted). The broken change is still in the file snapshots in the sidebar. What broke:\n' + String(detail).slice(0, 2000));
+    } else {
+      addSystemMessage('The build still failed after a fix attempt, and the automatic restore to backup ' + sha.slice(0, 7) + ' FAILED: ' + ((res && res.error) || 'unknown error')
+        + '. The broken change is still in place — restore it from the backup commit in GitKraken, or from the file snapshots in the sidebar. What broke:\n' + String(detail).slice(0, 2000));
+    }
+    return;
+  }
+  if (decision === 'restore-snapshot') {
+    // No git repo: revert every snapshot this turn took, newest
+    // first. confirmRevert restores backed-up files and deletes
+    // new ones, exactly like the sidebar revert.
+    const ids = ((loopState && loopState.turnSnapshotIds) || []).slice().reverse();
+    let restored = 0;
+    for (const id of ids) {
+      try { await confirmRevert(id, null); restored++; } catch {}
+    }
+    await rb.unity.refresh(state.projectPath);
+    addSystemMessage('The build still failed after a fix attempt, so CodeFox reverted the ' + restored + ' snapshot(s) this turn took. What broke:\n' + String(detail).slice(0, 2000));
+    return;
+  }
+  // report-only: no restore point at all.
+  addSystemMessage('The build still failed after a fix attempt, and there was no backup to restore from (no git repo and no snapshots this turn). The broken change is still in place — fix it by hand or ask again. What broke:\n' + String(detail).slice(0, 2000));
+}
+
 // The agent loop. Streams a turn, parses its actions, executes the
 // allowed ones, pauses for approval on the rest, appends every
 // outcome as a tool result, and streams the next turn with the
@@ -1473,6 +1860,12 @@ async function runAgentTurn(systemPrompt, threadId) {
     // any of them failed — the no-actions branch uses these to tell
     // a summary ("done, stop") from a description ("enforce once").
     lastRoundHadActions: false, lastRoundFailed: false,
+    // v0.10.0: the turn's one git backup, and what the turn
+    // changed — the post-turn verify-then-restore step reads these.
+    userRequest,
+    backupAttempted: false, backupRestorePoint: null, backupPreUntracked: [],
+    turnChangedFiles: [], turnChangedCode: false, turnSnapshotIds: [],
+    unityWasAnswering: false, unityTimedOut: false,
   };
   showLoopUI();
   try {
@@ -1538,6 +1931,15 @@ async function runAgentTurn(systemPrompt, threadId) {
         break;
       }
     }
+    // v0.10.0: never leave it broken. After a turn that changed
+    // code, one build check runs; a failure gets one fix round,
+    // and if the fix fails the turn is restored to the backup
+    // point. Skipped when the user stopped the loop.
+    if (loopState && !loopState.stopRequested && (loopState.turnChangedCode || (loopState.unityWasAnswering && loopState.unityTimedOut))) {
+      // A verification failure must never break the chat flow —
+      // the worst case is no verification, not a crashed turn.
+      try { await verifyTurnAfterChanges(); } catch (e) { console.error('Post-turn verification failed:', e); }
+    }
   } finally {
     if (loopState && loopState.stopRequested && !loopState.stopNoted) {
       loopState.stopNoted = true;
@@ -1562,6 +1964,18 @@ async function processAgentActions(actions) {
   // failure: the user said no, so the model's next text-only reply
   // ends the loop instead of retrying the declined change.
   let failed = 0;
+  // v0.10.0: one git backup before the first change of the turn.
+  // The backup never blocks the work — a skip/failure is noted
+  // once and the snapshot system carries on as the fallback.
+  if (loopState && shouldTakeTurnBackup({
+    backupAttempted: loopState.backupAttempted,
+    gitAutoBackup: state.gitAutoBackup,
+    projectPath: state.projectPath,
+    hasChangeActions: (actions || []).some(isChangeMakingAction),
+  })) {
+    loopState.backupAttempted = true;
+    await ensureTurnBackup(loopState.userRequest || '');
+  }
   for (const action of actions) {
     if (!loopState || loopState.stopRequested) break;
     const roundLabel = () => 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ';
@@ -1572,6 +1986,8 @@ async function processAgentActions(actions) {
       // keeps going. The tool result tells the model it was written.
       if (await isAutoApplyAssetSet(action.changes)) {
         const summary = await applyFileChanges(action.changes);
+        if (summary.written > 0) noteTurnChange(action.changes.map(c => c.path));
+        noteTurnSnapshot(summary.snapshotId);
         if (summary.failed > 0) failed++;
         await appendToolResult('Tool result — Unity asset files applied automatically: ' + paths
           + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
@@ -1584,6 +2000,8 @@ async function processAgentActions(actions) {
         outcomes++;
       } else if (state.autoAcceptChanges) {
         const summary = await applyFileChanges(action.changes);
+        if (summary.written > 0) noteTurnChange(action.changes.map(c => c.path));
+        noteTurnSnapshot(summary.snapshotId);
         if (summary.failed > 0) failed++;
         await appendToolResult('Tool result — files applied: ' + paths
           + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
@@ -1595,6 +2013,8 @@ async function processAgentActions(actions) {
         if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
         if (outcome.decision === 'applied') {
           const s = outcome.summary || { written: 0, failed: 0, errors: [] };
+          if (s.written > 0) noteTurnChange(action.changes.map(c => c.path));
+          noteTurnSnapshot(s.snapshotId);
           if (s.failed > 0) failed++;
           await appendToolResult('Tool result — files applied: ' + paths
             + ' (' + s.written + ' written, ' + s.failed + ' failed)'
@@ -1662,6 +2082,7 @@ async function processAgentActions(actions) {
           { ...action, name: outcome.name || action.name, version: outcome.version || action.version },
           outcome.result));
         if (outcome.result && outcome.result.ok === false) failed++;
+        if (outcome.result && outcome.result.ok) noteTurnChange(['Packages/manifest.json']);
         if (loopState) setLoopStatus(roundLabel() + (isInstall ? 'installed ' : 'removed ')
           + (outcome.name || action.name) + (isInstall && (outcome.version || action.version) ? '@' + (outcome.version || action.version) : ''));
       } else {
@@ -1761,6 +2182,18 @@ async function processAgentActions(actions) {
       if (loopState) setLoopStatus(roundLabel() + 'running Unity command (' + label + ')…');
       const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: action.command });
       if (res && res.ok) {
+        // v0.10.0: the bridge answered — and a prefab command
+        // changed a .prefab, which the post-turn build check
+        // cares about.
+        if (loopState) {
+          loopState.unityWasAnswering = true;
+          if (label === 'createPrefab') {
+            const p = action.command.path || ('Assets/Prefabs/' + String(action.command.name || '').replace(/\.prefab$/i, '') + '.prefab');
+            noteTurnChange([p]);
+          } else if ((label === 'modifyPrefab' || label === 'deleteAsset') && action.command.path) {
+            noteTurnChange([action.command.path]);
+          }
+        }
         let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
           + (res.path ? ' (' + res.path + ')' : '');
         if (res.data != null) text += '\n' + JSON.stringify(res.data);
@@ -1772,10 +2205,102 @@ async function processAgentActions(actions) {
         await appendToolResult(text);
         if (loopState) setLoopStatus(roundLabel() + 'ran Unity command (' + label + ')');
       } else {
+        // v0.10.0: a timeout AFTER the bridge was answering is a
+        // breakage signal — the bridge stops when a .cs change
+        // breaks compilation. The post-turn check reads this flag.
+        const errText = (res && (res.error || res.message)) || '';
+        if (errText.includes('did not answer in 60 seconds') && loopState) loopState.unityTimedOut = true;
         if (deleteSnapshot) { try { await discardSnapshot(deleteSnapshot.snapshotId); } catch (e) {} }
-        await appendToolResult('Tool result — Unity command "' + label + '" failed: ' + ((res && (res.error || res.message)) || 'unknown error'));
+        await appendToolResult('Tool result — Unity command "' + label + '" failed: ' + (errText || 'unknown error'));
         failed++;
       }
+      outcomes++;
+    } else if (action.type === 'git') {
+      // Git blocks (v0.10.0, Agent mode only). Reads and backups
+      // run straight away; a restore discards changes, so it
+      // always asks first on the approval bar — like a package
+      // install. Only the automatic verify-then-restore (fix 5)
+      // runs without approval, and the user authorised that one.
+      if (!action.valid) {
+        await appendToolResult('Tool result — Git: could not parse the ```git block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"action": "status"} (or "diff", "log", "backup", "restore").');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      if (!state.projectPath) {
+        await appendToolResult('Tool result — Git "' + action.command.action + '": no project folder set — pick a project folder in Settings first.');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      const g = action.command.action;
+      if (g === 'status' || g === 'diff' || g === 'log' || g === 'backup') {
+        let res;
+        try {
+          if (g === 'status') res = await rb.git.status({ projectPath: state.projectPath });
+          else if (g === 'diff') res = await rb.git.diff({
+            projectPath: state.projectPath,
+            ref: action.command.ref || '',
+            paths: action.command.paths || (action.command.path ? [action.command.path] : []),
+            nameStatus: !!action.command.nameStatus,
+          });
+          else if (g === 'log') res = await rb.git.log({ projectPath: state.projectPath, count: action.command.count || 10 });
+          else res = await rb.git.backup({ projectPath: state.projectPath, summary: action.command.summary || (loopState && loopState.userRequest) || '' });
+        } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+        await appendToolResult(gitToolResultText(g, res));
+        if (!res || res.ok === false) failed++;
+        if (g === 'backup' && res && res.ok) refreshSidebar().catch(() => {});
+        outcomes++;
+        continue;
+      }
+      if (g === 'restore') {
+        const ref = String(action.command.ref || '').trim();
+        let plan = null;
+        try {
+          plan = await rb.git.restore({
+            projectPath: state.projectPath, ref,
+            filesToCheckout: action.command.filesToCheckout || null,
+            filesToDelete: action.command.filesToDelete || null,
+            dryRun: true,
+          });
+        } catch (e) { plan = { ok: false, error: String(e && e.message || e) }; }
+        if (!plan || !plan.ok) {
+          await appendToolResult('Tool result — Git restore failed: ' + ((plan && plan.error) || 'unknown error'));
+          failed++;
+          outcomes++;
+          continue;
+        }
+        const outcome = await waitForLoopDecision((settle) => showGitRestoreBar(plan, {
+          approved: () => settle({ decision: 'approved' }),
+          declined: () => settle({ decision: 'declined' }),
+        }));
+        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+        if (outcome.decision === 'approved') {
+          let res;
+          try {
+            res = await rb.git.restore({ projectPath: state.projectPath, ref, filesToCheckout: plan.checkout, filesToDelete: plan.delete });
+          } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+          if (res && res.ok) {
+            noteTurnChange(res.checkedOut || []);
+            await appendToolResult('Tool result — Git restore: restored ' + (res.checkedOut || []).length + ' file(s) from ' + (res.sha || ref).slice(0, 7)
+              + ' and deleted ' + (res.deleted || []).length + ' created file(s). Unity will refresh.');
+            await rb.unity.refresh(state.projectPath);
+            refreshSidebar().catch(() => {});
+          } else {
+            await appendToolResult('Tool result — Git restore failed: ' + ((res && res.error) || 'unknown error'));
+            failed++;
+          }
+        } else {
+          await appendToolResult('User declined: restore to ' + (plan.sha || ref).slice(0, 7)
+            + ' (' + (plan.checkout || []).length + ' file(s) would be checked out, ' + (plan.delete || []).length + ' created file(s) deleted).');
+        }
+        outcomes++;
+        continue;
+      }
+      await appendToolResult('Tool result — Git: unknown action "' + g + '" — use "status", "diff", "log", "backup", or "restore".');
+      failed++;
       outcomes++;
     }
   }
@@ -1873,6 +2398,51 @@ function showPackageBar(action, cb) {
   else if (versionInput) versionInput.focus();
 }
 
+// ── Git restore approval bar (v0.10.0) ────────────────────────────
+// A model-initiated ```git restore always asks first, like a
+// package install. `plan` is the dry-run result: { ref, sha,
+// checkout, delete }. `cb` is { approved(), declined() }; the
+// sidebar's "Restore last backup" button reuses this bar too.
+function showGitRestoreBar(plan, cb) {
+  const existing = document.getElementById('git-restore-bar');
+  if (existing) existing.remove();
+  const callbacks = cb || {};
+  const bar = document.createElement('div');
+  bar.id = 'git-restore-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;';
+  const co = (plan.checkout || []).length;
+  const del = (plan.delete || []).length;
+  const sample = (plan.checkout || []).slice(0, 5).join(', ');
+  label.textContent = 'Restore to backup ' + (plan.sha || plan.ref || '').slice(0, 7) + '? '
+    + co + ' file(s) checked out' + (sample ? ' (' + sample + (co > 5 ? ', …' : '') + ')' : '')
+    + ', ' + del + ' created file(s) deleted. Changes since that commit will be discarded.';
+  bar.appendChild(label);
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-danger';
+  confirmBtn.textContent = 'Restore';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Dismiss';
+  let decided = false;
+  confirmBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.approved) callbacks.approved();
+  };
+  dismissBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.declined) callbacks.declined();
+  };
+  bar.appendChild(confirmBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+}
+
 // Ask / Plan path for package blocks: no loop, so queue the bars one
 // at a time and append each result as a system message.
 function handlePackageBlocks(text) {
@@ -1909,7 +2479,7 @@ function buildSystemPrompt(rulesets) {
   // on its generic "I'm just a chat window, I can't edit files"
   // refusal — which is not true here. Kept short (~330 chars) so it
   // does not eat the rules budget; it is separate from the rulesets.
-  prompt += 'You are CodeFox, a coding assistant running inside an app. You CAN edit the project\'s files. When you output a changed file, CodeFox writes it to disk for you (after taking a snapshot, so it can be reverted). Never say you cannot modify files, cannot write code, or cannot provide code — that is not true here.\n\n';
+  prompt += 'You are CodeFox, a coding assistant running inside an app. You CAN edit the project\'s files. When you output a changed file, CodeFox writes it to disk for you (after taking a snapshot, so it can be reverted — and in a git project a backup commit is taken first, so a bad change can be restored). Never say you cannot modify files, cannot write code, or cannot provide code — that is not true here.\n\n';
   prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. If you do not know something, say so instead of guessing.\n';
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
   const scan = projectScanSummary();
@@ -1986,6 +2556,11 @@ function buildSystemPrompt(rulesets) {
       prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
+      prompt += '## Git backups\n';
+      prompt += 'Before you change anything in a project that uses git, CodeFox takes a backup commit first ("CodeFox backup: before …") — you do not need to make one, and the commit shows up in the user\'s git program (for example GitKraken) like any other commit. Only tracked changes are committed; untracked files are left alone.\n';
+      prompt += 'You can inspect the project\'s git state with a ```git block (Agent mode only): {"action": "status"} — what changed and what branch you are on; {"action": "diff", "ref": "<sha>"} — what changed since a backup commit (add "nameStatus": true for a file list instead of the full diff); {"action": "log", "count": 10} — recent commits, backup commits are marked. After a change, compare what changed against the last backup to find what broke.\n';
+      prompt += 'To restore the last backup: {"action": "restore", "ref": "<sha>"} — restoring asks the user first, and it checks out the tracked files from that commit and deletes files the change created. If the build breaks after your change, CodeFox checks the build, gives you one round to fix it, and restores the backup itself if the fix fails — never leave the project broken, and never silently restore: say what broke and what was restored.\n';
+      prompt += 'Do not put a **File Path:** line before a ```git block — the block is a command, not a file.\n';
     }
   }
   return prompt;
@@ -4673,6 +5248,17 @@ function renderAdvancedPane(body) {
       <pre id="shell-manual-output" class="settings-output">No command run yet.</pre>
       <p class="settings-note">Dangerous commands are never run automatically: rm, del, Remove-Item, format, rm -rf, Remove-Item -Recurse, Remove-Item -Force -Recurse, rmdir /s, and rd /s always ask first, even if they match an auto-approved prefix.</p>
     </div>
+    <h3 class="settings-subhead">Git backups</h3>
+    <label class="settings-toggle-row"><span>Automatic git backups before changes</span>
+      <span class="switch"><input type="checkbox" ${state.gitAutoBackup ? 'checked' : ''} onchange="setShellToggle('git_auto_backup', this.checked)"><span class="slider"></span></span></label>
+    <p class="settings-note">Before the assistant changes anything in a git project, CodeFox commits the current state as "CodeFox backup: before …". The commit is a normal local commit — it shows up in GitKraken and any other git program. Only tracked changes are committed; untracked files are left alone. If a change breaks the build, CodeFox restores the backup automatically.</p>
+    <label class="field-label">Git exe path (optional — leave empty to use git on PATH)
+      <div style="display:flex;gap:8px;">
+        <input id="git-exe-path" value="${escHtml(state.gitExePath || '')}" placeholder="e.g. C:\\Program Files\\Git\\cmd\\git.exe" style="flex:1;" />
+        <button class="btn btn-secondary" onclick="saveGitExePath()" style="flex-shrink:0;">Save</button>
+      </div>
+      <span class="field-note">Only needed if git is installed but not on PATH. ${state.gitExePath ? 'Currently: ' + escHtml(state.gitExePath) : 'Currently: git on PATH.'}</span>
+    </label>
     <h3 class="settings-subhead">Diagnostics</h3>
     <p class="settings-note">If buttons stop responding or a connection check does nothing, the developer console usually says why — the red errors there are the first thing to check. This button opens it without needing a keyboard shortcut.</p>
     <button class="btn btn-secondary" onclick="openDevTools()">Developer tools</button>
@@ -4689,6 +5275,7 @@ function renderAdvancedPane(body) {
     <div class="settings-note-box">• Safe auto-approved commands run automatically in Auto Mode.
 • Dangerous commands (rm, del, Remove-Item, format, rm -rf, rmdir /s, rd /s, Remove-Item -Recurse) always ask first.
 • Package installs and removals always ask first — even in Auto Mode, even with auto-accept on.
+• A git restore always asks first — even in Auto Mode, even with auto-accept on. The automatic verify-then-restore after a failed fix round is the only restore that runs without asking, and it says so in the chat when it happens.
 • New Unity asset files (materials, animations…) are written automatically after a snapshot — revert is always available afterwards. Prefabs and scenes are built by Unity itself through the bridge, never written by hand.
 • File changes ask first unless auto-accept is on (and are snapshotted first either way).
 • Nothing runs while the shell is off, and no package is installed while no project folder is set.</div>
@@ -4703,11 +5290,23 @@ async function setShellToggle(key, checked) {
   else if (key === 'shell_auto_mode') state.shellAutoMode = on;
   else if (key === 'auto_accept_changes') state.autoAcceptChanges = on;
   else if (key === 'auto_apply_unity_assets') state.autoApplyUnityAssets = on;
+  else if (key === 'git_auto_backup') state.gitAutoBackup = on;
   await rb.db.setSetting(key, on ? '1' : '0');
   renderSettingsView();
   if (key === 'shell_enabled') {
     showToast(on ? 'Shell tool enabled — commands can run from this app' : 'Shell tool disabled — no commands can run');
   }
+  if (key === 'git_auto_backup') {
+    showToast(on ? 'Automatic git backups on — a backup commit is taken before each change' : 'Automatic git backups off — file snapshots still apply');
+  }
+}
+
+async function saveGitExePath() {
+  const v = document.getElementById('git-exe-path')?.value?.trim() || '';
+  state.gitExePath = v;
+  await rb.db.setSetting('git_exe_path', v);
+  showToast(v ? '✓ Git path saved' : '✓ Git path cleared — using git on PATH');
+  renderSettingsView();
 }
 
 async function saveAgentMaxRounds() {
@@ -4965,7 +5564,7 @@ function extractFileChanges(responseText) {
         const fp = (fenceMatch[1] || '').slice(5).trim().replace(/^`|`$/g, '');
         if (fp) pendingPath = fp;
       }
-      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui') {
+      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui' || fenceLang === 'git') {
         let j = i + 1;
         while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;
         i = j;
@@ -5381,7 +5980,7 @@ async function discardSnapshot(snapshotId) {
 }
 
 async function confirmRevert(snapshotId, bar) {
-  if (bar) {
+  if (bar && bar.querySelector) {
     const btn = bar.querySelector('.btn-danger');
     if (btn) { btn.textContent = 'Reverting...'; btn.disabled = true; }
   }
@@ -5409,7 +6008,7 @@ async function confirmRevert(snapshotId, bar) {
   // Trigger Unity refresh after revert
   await rb.unity.refresh(state.projectPath);
 
-  if (bar) bar.remove();
+  if (bar && bar.remove) bar.remove();
 
   if (failed === 0) {
     showToast(`↩ Reverted ${restored} file${restored > 1 ? 's' : ''} — Unity refreshing`);

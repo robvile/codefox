@@ -6,6 +6,7 @@ const { spawn, execFile } = require('child_process');
 const upm = require('./upm-manifest');
 const unityBridge = require('./unity-bridge');
 const unityCommand = require('./unity-command');
+const gitBackup = require('./git-backup');
 const comfyui = require('./comfyui');
 // Static data the renderer needs (v0.6.4) — see 'app:staticData'
 // below. The main process is plain Node and can require these;
@@ -298,6 +299,8 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_enabled', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows_dir', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows', '[]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('git_auto_backup', '1')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('git_exe_path', '')");
   } else {
     // Migration for existing databases: add the new keys without
     // overwriting anything the user already set.
@@ -331,6 +334,11 @@ async function initDB() {
 
   // v0.5.1: auto-apply new Unity-native asset files (default on).
   db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
+
+  // v0.10.0: automatic git backups before changes (default on), and
+  // an optional git exe path override (empty = find git on PATH).
+  db.run("INSERT OR IGNORE INTO settings VALUES ('git_auto_backup', '1')");
+  db.run("INSERT OR IGNORE INTO settings VALUES ('git_exe_path', '')");
 
   // ── v0.3.0 migration: one project row per workspace ─────────────
   // If no projects exist, create one from the existing project_path
@@ -1132,6 +1140,51 @@ ipcMain.handle('unity:command', async (_, payload) => {
   const root = (payload && payload.projectPath) || readSetting('project_path', '');
   const command = payload && payload.command;
   return unityCommand.runUnityCommand(root, command);
+});
+
+// ── Git backups (v0.10.0) ────────────────────────────────────────
+// Automatic local backup commits before CodeFox changes anything,
+// plus diff / log / restore for the model and the UI. Local only:
+// the engine never touches remotes. The runner is main.js's own
+// runProcess / runWhere, so git runs exactly like the dotnet build
+// check does — no shell, non-interactive, with timeouts.
+const gitEngine = gitBackup.createEngine({
+  run: runProcess,
+  where: runWhere,
+  fs,
+  path,
+  getGitExePath: () => readSetting('git_exe_path', ''),
+});
+
+function gitProjectPath(payload) {
+  return (payload && payload.projectPath) || readSetting('project_path', '');
+}
+
+ipcMain.handle('git:repoInfo', async (_, payload) => {
+  return gitEngine.repoInfo(gitProjectPath(payload));
+});
+ipcMain.handle('git:status', async (_, payload) => {
+  return gitEngine.status(gitProjectPath(payload));
+});
+ipcMain.handle('git:diff', async (_, payload) => {
+  const p = payload || {};
+  return gitEngine.diff(gitProjectPath(p), { ref: p.ref || '', paths: p.paths || [], nameStatus: !!p.nameStatus });
+});
+ipcMain.handle('git:log', async (_, payload) => {
+  const p = payload || {};
+  return gitEngine.log(gitProjectPath(p), p.count);
+});
+ipcMain.handle('git:backup', async (_, payload) => {
+  const p = payload || {};
+  return gitEngine.backup(gitProjectPath(p), p.summary || '');
+});
+ipcMain.handle('git:restore', async (_, payload) => {
+  const p = payload || {};
+  return gitEngine.restore(gitProjectPath(p), p.ref || '', {
+    filesToCheckout: p.filesToCheckout || null,
+    filesToDelete: p.filesToDelete || null,
+    dryRun: !!p.dryRun,
+  });
 });
 
 // Copies the bundled companion script into the project's Assets/Editor

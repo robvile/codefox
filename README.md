@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.9.3-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.10.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -180,11 +180,18 @@ Click **▶ Execute plan** — CodeFox creates a dedicated thread, sends the pla
 - **Keep changes** — an explicit click that discards the snapshot, so the change can no longer be reverted. Nothing discards a snapshot automatically: not closing the app, not starting a new conversation. Only a Keep click does.
 - **Snapshot history** — last 5 snapshots shown in the left panel, each with a ↩ revert button, so you can undo even after the revert bar is gone
 
+### Git backups
+
+- **Automatic backup commits** — before the assistant changes anything in a git project, CodeFox commits the current state as `CodeFox backup: before <what you asked>`. It is a normal local commit in the project's own `.git` folder — it shows up in GitKraken and any other git program exactly like a commit you made yourself. No remote is ever touched (no fetch/pull/push). Only tracked changes are committed, so untracked files are left alone; a clean tree makes no empty commit (HEAD is the restore point). A merge or rebase in progress blocks backups rather than committing over it. Turn it off in Settings → Advanced → "Automatic git backups before changes" (`git_auto_backup`, default on). If git is not on PATH, set the exe path there too (or install Git for Windows).
+- **Sidebar** — the Git Backups section shows the branch, whether there are uncommitted changes, and the last CodeFox backup commit, with **Backup now** (commits the current state with a manual-backup message), **Restore last backup** (shows an approval bar with exactly what will be checked out and deleted, then restores), and **History** (last 10 commits, backup commits marked).
+- **The model can look at git** — with ```git blocks in Agent mode: `status` (what changed, what branch), `diff` (what changed since a backup commit; `nameStatus: true` gives a file list instead of the full diff), `log` (recent commits, backups marked), `backup` (take one now), `restore` (always asks you first). After a change, the model can compare against the last backup to find what broke.
+- **Never leave it broken** — after a turn that changed code, CodeFox runs one `dotnet build` check. If the build fails, the model gets one round to fix it from the errors. If the fix fails too, CodeFox restores the project to the backup commit automatically (tracked files checked out, files the change created deleted) — or reverts the turn's file snapshots when the project is not a git project — and tells you what broke, what was restored, and the backup commit. One check + one fix round, never a retry loop. A bridge that stops answering mid-turn (after it was answering) counts as a breakage signal too, since a .cs change that breaks compilation kills the bridge. If the build passes but the bridge went quiet, nothing is restored — the message says so.
+
 ### Agent mode (the loop)
 
 In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each assistant reply:
 
-1. It parses the reply for actions, in order: file changes (the usual `**File Path:**` + fenced block), ```powershell / ```pwsh / ```shell blocks, and ```upm-install / ```upm-remove blocks.
+1. It parses the reply for actions, in order: file changes (the usual `**File Path:**` + fenced block), ```powershell / ```pwsh / ```shell blocks, ```upm-install / ```upm-remove blocks, ```unity-command blocks (prefabs and other Unity work, run through the bridge), ```comfyui blocks (generations), and ```git blocks (status / diff / log / backup / restore).
 2. Safe actions run on their own: shell commands that match your auto-approved list when the shell is on and Auto Mode is on, and file changes when auto-accept is on.
 3. Anything risky pauses the loop on its approval bar instead of running: dangerous shell commands, any package install or removal, and file changes when auto-accept is off. Click Run / Apply / Install and the loop resumes from that point; click Dismiss and the loop resumes with a "User declined" note so the model can try a different approach.
 4. Every executed action's result is appended to the conversation as a tool-result message (`Tool result — <command> (exit 0): …`) and sent to the model with the next turn, so it can see the build error and fix it, then rebuild — without you prompting again.
@@ -196,6 +203,7 @@ In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each
 - Safe auto-approved commands run automatically in Auto Mode.
 - Dangerous commands always ask: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `rmdir /s`, `rd /s`, `Remove-Item -Recurse` — even in Auto Mode, even if they match an auto-approved prefix.
 - Package installs and removals always ask — even in Auto Mode, even with auto-accept on. There is no way to auto-approve them.
+- A git restore always asks — even in Auto Mode, even with auto-accept on. The automatic verify-then-restore after a failed fix round is the only restore that runs without asking, and it says so in the chat when it happens.
 - New Unity asset files (materials, animations…) are written automatically after a snapshot — revert is always available afterwards. Prefabs and scenes are built by Unity itself through the bridge, never written by hand.
 - File changes ask unless auto-accept is on (and are snapshotted first either way).
 - Nothing runs while the shell is off, and no package is installed while no project folder is set.

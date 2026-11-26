@@ -197,6 +197,17 @@ contextBridge.exposeInMainWorld('rb', {
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
     openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
   },
+  // Git backups (v0.10.0) — local backup commits before changes,
+  // diff / log / restore. The engine is the git CLI on the user's
+  // machine; it never touches remotes.
+  git: {
+    repoInfo: (payload) => ipcRenderer.invoke('git:repoInfo', payload || {}),
+    status: (payload) => ipcRenderer.invoke('git:status', payload || {}),
+    diff: (payload) => ipcRenderer.invoke('git:diff', payload || {}),
+    log: (payload) => ipcRenderer.invoke('git:log', payload || {}),
+    backup: (payload) => ipcRenderer.invoke('git:backup', payload || {}),
+    restore: (payload) => ipcRenderer.invoke('git:restore', payload || {}),
+  },
   mcp: {
     checkToken: (payload) => ipcRenderer.invoke('mcp:checkToken', payload || {}),
     checkApp: (payload) => ipcRenderer.invoke('mcp:checkApp', payload || {}),
