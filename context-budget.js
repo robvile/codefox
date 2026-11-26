@@ -341,9 +341,10 @@
   // it. Phases, in order, each stopping as soon as the target is
   // met: elide stale tool results, summarize the oldest turns into
   // one working-memory note, drop the oldest turns outright. The
-  // last KEEP_GROUPS turns are never touched, and a group is never
-  // split: a tool call stays with its result, or the whole turn
-  // goes. When nothing can be compacted further (only the newest
+  // last KEEP_GROUPS turns are never touched, the first turn (the
+  // user's original request) is never summarized or dropped, and a
+  // group is never split: a tool call stays with its result, or the
+  // whole turn goes. When nothing can be compacted further (only the newest
   // turns are left), the log says floorHit — the caller must not
   // pretend the history shrank.
   function compactHistory(messages, opts) {
@@ -376,6 +377,15 @@
     function isProtected(gi) {
       if (turnOrdinals[gi] === -1) return true; // system singletons are never compacted
       return turnOrdinals[gi] >= turnCount - keepGroups;
+    }
+    // v0.21.4: the first turn is the user's original request — it
+    // is never summarized or dropped, so the model always works
+    // from the user's words, not from a note about them. Its tool
+    // results can still be elided (Phase 1 only checks
+    // isProtected), so this pins the request itself, not the whole
+    // turn's bulk.
+    function isFirstTurn(gi) {
+      return turnOrdinals[gi] === 0;
     }
     function flatten(gs) {
       var out = [];
@@ -419,7 +429,7 @@
     while (action === 'summarize') {
       var next = -1;
       for (var si = 0; si < working.length; si++) {
-        if (working[si].kind === 'turn' && !isProtected(si)) { next = si; break; }
+        if (working[si].kind === 'turn' && !isProtected(si) && !isFirstTurn(si)) { next = si; break; }
       }
       if (next === -1) break;
       summarized.push(working[next]);
@@ -462,7 +472,7 @@
       if (afterNote.u > compactTo) {
         var moreSummarizable = false;
         for (var ms = 0; ms < working.length; ms++) {
-          if (working[ms].kind === 'turn' && !isProtected(ms)) { moreSummarizable = true; break; }
+          if (working[ms].kind === 'turn' && !isProtected(ms) && !isFirstTurn(ms)) { moreSummarizable = true; break; }
         }
         if (!moreSummarizable) log.floorHit = true;
       }
@@ -485,7 +495,7 @@
     while (action === 'drop') {
       var di = -1;
       for (var d = 0; d < working.length; d++) {
-        if (working[d].kind === 'turn' && !isProtected(d)) { di = d; break; }
+        if (working[d].kind === 'turn' && !isProtected(d) && !isFirstTurn(d)) { di = d; break; }
       }
       if (di === -1) { log.floorHit = true; break; }
       working.splice(di, 1);

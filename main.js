@@ -310,7 +310,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_url', 'http://localhost:11434')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
-    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '1')"); // v0.21.4: on by default — Agent mode builds without waiting for an Apply click
     db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");
@@ -339,7 +339,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('ollama_url', 'http://localhost:11434')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_enabled', '0')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_mode', '0')");
-    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '0')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('auto_accept_changes', '1')"); // v0.21.4: on by default — Agent mode builds without waiting for an Apply click
     db.run("INSERT OR IGNORE INTO settings VALUES ('auto_apply_unity_assets', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('shell_auto_approve', '[\"git status\", \"git diff\", \"npm test\", \"npm run test\", \"dotnet build\", \"dotnet test\"]')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('excluded_file_types', '[\"meta\", \"mat\", \"anim\", \"controller\", \"overrideController\", \"physicMaterial\", \"physicsMaterial2D\", \"renderTexture\", \"cubemap\", \"flare\", \"guiskin\", \"avatarMask\", \"terrainlayer\", \"preset\", \"playable\", \"spriteatlas\", \"scenetemplate\", \"shadervariants\", \"lighting\", \"png\", \"jpg\", \"asset\", \"package-lock.json\"]')");

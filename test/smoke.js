@@ -23,10 +23,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.21.3.
+// 2. package.json version is 0.21.4.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.21.3', pkg.version === '0.21.3', 'got ' + pkg.version);
-check('sidebar footer shows 0.21.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.3 — Local'));
+check('package.json version is 0.21.4', pkg.version === '0.21.4', 'got ' + pkg.version);
+check('sidebar footer shows 0.21.4', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.4 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2935,7 +2935,7 @@ check('bridge version pins are 0.16.2 everywhere (MIN_TRANSPORT_VERSION stays 0.
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.21.3')
+  && readme.includes('readConsole') && readme.includes('version-0.21.4')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3265,7 +3265,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.21.3', readme.includes('version-0.21.3'));
+check('README badge reads 0.21.4', readme.includes('version-0.21.4'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3914,18 +3914,18 @@ if (promptSrc) {
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
     && bridgeCs.includes('// CodeFoxBridge version: 0.16.2'));
 
-  // Version pins and packaging for 0.21.3.
+  // Version pins and packaging for 0.21.4.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.21.3 and build.files includes the three split modules + context-budget.js',
-    pkg.version === '0.21.3'
+  check('package.json is 0.21.4 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.21.4'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js')
     && pkg.build.files.includes('context-budget.js')
     && pkg.build.files.includes('turn-ledger.js'));
-  check('index.html footer and README badge are 0.21.3, CHANGELOG keeps the 0.21.1 entry',
-    indexHtml.includes('CodeFox 0.21.3 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.3-blue')
+  check('index.html footer and README badge are 0.21.4, CHANGELOG keeps the 0.21.1 entry',
+    indexHtml.includes('CodeFox 0.21.4 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.4-blue')
     && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.21.1 — 2026-11-26'));
 }
 
@@ -4453,7 +4453,7 @@ check('app 0.20.0: prompt documents the prefab transaction, ops batching, and th
   appJs.includes('Several edits to one prefab go in one call as')
   && appJs.includes('never try to undo a prefab edit yourself with Ctrl+Z')
   && appJs.includes('pass \\"prefab\\": \\"Assets/Prefabs/….prefab\\" to set a property on an object inside a prefab asset instead')
-  && appJs.includes('Scene and prefab writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject, modifyPrefab) are previewed'));
+  && appJs.includes('Scene and prefab writes run as soon as you output them'));
 check('v0.20.0 wiring: turn-ledger script + Agent Turn section in index.html, module in build.files, docs',
   fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="turn-ledger.js"></script>')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('id="agent-turn-list"')
@@ -4666,8 +4666,8 @@ check('mcp-server: classifyUnityAction allows reads and denies writes',
   && MCP.classifyUnityAction('set_property') === 'mutating'
   && MCP.classifyUnityAction('recompile_and_report_errors') === 'mutating');
 check('v0.21.0 wiring: version pins, script tags, IPCs, prompt sections, migration',
-  pkg.version === '0.21.3'
-  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.3 — Local')
+  pkg.version === '0.21.4'
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.4 — Local')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="docs-search.js"></script>')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="model-profiles.js"></script>')
   && pkg.build.files.includes('docs-search.js')
@@ -5565,6 +5565,76 @@ check('v0.21.2 wiring: bridge is 0.16.2 (the API fixes), not 0.17.0',
   }
   check('app.js has the fence-line parsers wired into the loop',
     appJs.includes('extractFencedPayloads') && appJs.includes('tryParseJsonLoose') && appJs.includes('fileBlockFromBarePath'));
+}
+
+// 49. v0.21.4 — Agent mode builds without waiting, then proves
+// it in Unity. Rob's first live test banked every change behind an
+// Apply click: scene writes previewed and then WAITED for the user
+// on every single command, while the prompt promised the model the
+// approval "happens without you" — and the file path already had
+// an auto-accept setting the scene path never respected. The loop
+// now auto-applies (the preview still runs for the staleness
+// guards), reads the scene back once before the summary so the
+// final message reports what Unity actually has, points .unity
+// refusals at scene commands instead of createPrefab, and pins
+// the original request so compaction never replaces it with a note.
+{
+  const mainJs49 = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
+  check('auto-accept is on by default (state, fallback, seeds, one-time migration)',
+    appJs.includes('autoAcceptChanges: true')
+    && appJs.includes("getSetting('auto_accept_changes') || '1'")
+    && appJs.includes('auto_accept_migrated_0214')
+    && !mainJs49.includes("'auto_accept_changes', '0'")
+    && mainJs49.includes("'auto_accept_changes', '1'"));
+  check('scene writes skip the approval bar when auto-accept is on (preview still runs)',
+    appJs.includes('if (!state.autoAcceptChanges) {\n          const outcome = await waitForLoopDecision((settle) => showSceneApprovalBar'));
+  check('loop tracks scene mutations and verifies before the summary',
+    appJs.includes('unitySceneMutated: false, unityVerified: false')
+    && appJs.includes("label !== 'modifyPrefab' && !(label === 'set_property' && action.command.prefab)")
+    && appJs.includes('if (loopState.unitySceneMutated && !loopState.unityVerified)')
+    && appJs.includes('await appendToolResult(await unitySceneVerificationText());'));
+  const verify49Src = extractFunction(appJs, 'unitySceneVerificationText');
+  check('scene verification reads the hierarchy back and reports a failed read plainly',
+    !!verify49Src && verify49Src.includes("action: 'list_hierarchy'")
+    && verify49Src.includes('report only what is listed here')
+    && verify49Src.includes('could not read the scene back'));
+  const looksJson49Src = extractFunction(appJs, 'looksLikeUnityCommandJson');
+  check('looksLikeUnityCommandJson spots a Unity command hiding in a file block',
+    !!looksJson49Src && (() => {
+      const fn = new Function(looksJson49Src + '\nreturn looksLikeUnityCommandJson;')();
+      return fn('{"action": "create_gameobject", "name": "X"}') === true
+        && fn('{"action": "view", "path": "a.cs"}') === true
+        && fn('public class X {}') === false
+        && fn('{"foo": 1}') === false
+        && fn('') === false;
+    })());
+  check('.unity refusal points at scene commands, .prefab refusal at prefab commands, JSON content named',
+    appJs.includes('To change the OPEN SCENE, use a ```unity-command block with the scene commands')
+    && appJs.includes('createPrefab / modifyPrefab only edit prefab assets on disk, never the open scene')
+    && appJs.includes('it is a Unity command, not file content'));
+  check('prompt: scope rule, no approval wait, auto-applied str_replace, scene example in the Unity enforcement',
+    appJs.includes('Do only what was asked')
+    && appJs.includes('After an error, change your approach')
+    && appJs.includes('there is no approval click to wait for')
+    && appJs.includes('applies it right away (changes are auto-applied in Agent mode')
+    && appJs.includes('For the OPEN SCENE, use a scene command instead')
+    && appJs.includes('Change your approach — if the last attempt failed'));
+  check('context-budget: compactHistory never summarizes or drops the first turn (the original request)',
+    (() => {
+      const msgs = [];
+      for (let t = 0; t < 6; t++) {
+        msgs.push(cbMsg('user', 'do thing ' + t + ' ' + 'x'.repeat(200)));
+        msgs.push(cbMsg('assistant', 'reply ' + t + ' ' + 'y'.repeat(2000)));
+        msgs.push(cbMsg('user', 'Tool result — Unity command "readConsole": ' + 'z'.repeat(3000)));
+      }
+      const res = CB.compactHistory(msgs, { loadedContext: 8192, outputReserve: 1024, promptTokens: 1000 });
+      return res.messages.some(m => m.role === 'user' && m.content.includes('do thing 0'))
+        && res.log.groupsSummarized > 0
+        && res.messages.some(m => m.content.includes('[Context note'));
+    })());
+  check('app.js has the v0.21.4 wiring (verification helper, first-turn pin)',
+    appJs.includes('unitySceneVerificationText')
+    && fs.readFileSync(path.join(root, 'context-budget.js'), 'utf8').includes('isFirstTurn'));
 }
 
 function finish() {

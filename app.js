@@ -62,7 +62,7 @@ let state = {
   settingsSection: 'model',
   shellEnabled: false,
   shellAutoMode: false,
-  autoAcceptChanges: false,
+  autoAcceptChanges: true, // v0.21.4: on by default — Agent mode builds without waiting for an Apply click
   // v0.5.1: new Unity-native asset files (.prefab, .asset, .unity,
   // …) are written straight away after a snapshot, no Apply click.
   autoApplyUnityAssets: true,
@@ -489,7 +489,19 @@ async function init() {
   state.chatMode = await rb.db.getSetting('chat_mode') || 'agent';
   state.shellEnabled = (await rb.db.getSetting('shell_enabled') || '0') === '1';
   state.shellAutoMode = (await rb.db.getSetting('shell_auto_mode') || '0') === '1';
-  state.autoAcceptChanges = (await rb.db.getSetting('auto_accept_changes') || '0') === '1';
+  // v0.21.4: auto-accept is on by default — Agent mode builds
+  // without waiting for an Apply click on every change (the
+  // revert bar, snapshots and git backups are the safety net).
+  // One-time migration: installs that still hold the old seeded
+  // '0' get the new default. The sentinel key makes it run once,
+  // so turning the toggle off afterwards stays off.
+  if (!(await rb.db.getSetting('auto_accept_migrated_0214'))) {
+    try {
+      await rb.db.setSetting('auto_accept_changes', '1');
+      await rb.db.setSetting('auto_accept_migrated_0214', '1');
+    } catch {}
+  }
+  state.autoAcceptChanges = (await rb.db.getSetting('auto_accept_changes') || '1') === '1';
   // v0.5.1: auto-apply new Unity asset files. Default on; the
   // setting is seeded to '1' in main.js, so a missing key means on.
   state.autoApplyUnityAssets = (await rb.db.getSetting('auto_apply_unity_assets') || '1') === '1';
@@ -2047,7 +2059,7 @@ function lastUserMessageText() {
   }
   return '';
 }
-const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format — a whole file, or a ```file str_replace block for a small change (view the file first to get the exact text). An explanation without the file is not an answer.';
+const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format — a whole file, or a ```file str_replace block for a small change (view the file first to get the exact text). An explanation without the file is not an answer. Change your approach — if the last attempt failed, repeating it will fail the same way.';
 
 // Unity-aware corrections (v0.9.2). The generic correction tells
 // the model to "output the file" — for a prefab request that
@@ -2055,7 +2067,7 @@ const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user aske
 // request gets the bridge correction instead: the work is a
 // unity-command block, never a file and never a helper script.
 const REFUSAL_CORRECTION_UNITY = 'You CAN do this. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
-const ENFORCEMENT_FOLLOWUP_UNITY = 'You did not output any file changes. The user asked for a Unity change. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
+const ENFORCEMENT_FOLLOWUP_UNITY = 'You did not output any file changes. The user asked for a Unity change. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — for a prefab, example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. For the OPEN SCENE, use a scene command instead — createPrefab only edits prefab assets on disk, never the scene: ```unity-command\n{"action": "create_gameobject", "name": "Canvas", "components": ["Canvas", "CanvasScaler", "GraphicRaycaster"]}\n```. The bridge runs it in Unity and the result comes back to you as a tool result. Change your approach — if the last attempt failed, repeating it will fail the same way.';
 const REFUSAL_CORRECTION_TRIAGE = 'This is a log-triage turn, not a fix turn. Do not output any file changes. Diagnose the root cause from the log and the console, and end with the triage report format (root cause, evidence, location, confidence, other issues, ignored noise, suggested fix described not applied).';
 // Pure, so the smoke test can exercise them directly.
 function isUnityRequest(text) {
@@ -2658,6 +2670,25 @@ async function restoreTurnToBackupPoint(decision, detail) {
   addSystemMessage('The build still failed after a fix attempt, and there was no backup to restore from (no git repo and no snapshots this turn). The broken change is still in place — fix it by hand or ask again. What broke:\n' + String(detail).slice(0, 2000));
 }
 
+// v0.21.4: read the open scene back from Unity after a turn that
+// mutated it, so the model's summary is grounded in what is
+// actually there. A failed read is a plain tool result, never a
+// thrown error — the turn still ends normally, and the model is
+// told to say what is unconfirmed instead of claiming the scene
+// is set up.
+async function unitySceneVerificationText() {
+  try {
+    const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'list_hierarchy' } });
+    if (res && res.ok) {
+      const body = res.data != null ? (typeof res.data === 'string' ? res.data : JSON.stringify(res.data)) : (res.message || '');
+      return 'Tool result — verification: the open scene now contains (read back from Unity after your changes — report only what is listed here, and say what is missing if something you meant to create is not listed):\n' + body;
+    }
+    return 'Tool result — verification: could not read the scene back (' + ((res && (res.error || res.message)) || 'no answer from Unity') + ') — say what is unconfirmed instead of claiming the scene is set up.';
+  } catch (e) {
+    return 'Tool result — verification: could not read the scene back (' + (e && e.message ? e.message : e) + ') — say what is unconfirmed instead of claiming the scene is set up.';
+  }
+}
+
 // The agent loop. Streams a turn, parses its actions, executes the
 // allowed ones, pauses for approval on the rest, appends every
 // outcome as a tool result, and streams the next turn with the
@@ -2686,6 +2717,12 @@ async function runAgentTurn(systemPrompt, threadId) {
     backupAttempted: false, backupRestorePoint: null, backupPreUntracked: [],
     turnChangedFiles: [], turnChangedCode: false, turnSnapshotIds: [],
     unityWasAnswering: false, unityTimedOut: false,
+    // v0.21.4: whether this turn actually changed the open scene
+    // (a scene write that ran), and whether the scene has been
+    // read back once since — the loop verifies before the summary
+    // so the final message reports what Unity has, not what the
+    // model meant to create.
+    unitySceneMutated: false, unityVerified: false,
     // v0.12.0: the first error of the last compile check — the
     // identical-first-error rule compares against it.
     lastCompileFirstError: null,
@@ -2733,7 +2770,19 @@ async function runAgentTurn(systemPrompt, threadId) {
         // (or the last round failed) is this a description instead
         // of doing, which gets one enforcement retry.
         const noActionsDecision = loopNoActionsDecision(userRequest, loopState.enforcementRetried, loopState.lastRoundHadActions, loopState.lastRoundFailed);
-        if (noActionsDecision === 'done') break;
+        if (noActionsDecision === 'done') {
+          // v0.21.4: prove it in Unity. The turn changed the open
+          // scene and the model is about to summarize — read the
+          // scene back once first, so the summary reports what is
+          // actually there. One verification per turn at most; a
+          // failed read is a plain tool result, never a retry.
+          if (loopState.unitySceneMutated && !loopState.unityVerified) {
+            loopState.unityVerified = true;
+            await appendToolResult(await unitySceneVerificationText());
+            continue;
+          }
+          break;
+        }
         if (noActionsDecision === 'enforce') {
           loopState.enforcementRetried = true;
           loopState.round++;
@@ -3270,15 +3319,24 @@ async function processAgentActions(actions) {
           outcomes++;
           continue;
         }
-        const outcome = await waitForLoopDecision((settle) => showSceneApprovalBar({ label: scenePreviewLabel(label, action.command, preview.data) }, {
-          approved: () => settle({ decision: 'approved' }),
-          declined: () => settle({ decision: 'declined' }),
-        }));
-        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
-        if (outcome.decision !== 'approved') {
-          await appendToolResult('User declined: ' + sceneDeclineText(label, action.command, preview.data));
-          outcomes++;
-          continue;
+        // v0.21.4: auto-accept (Settings > Advanced, on by
+        // default) — the preview above still runs, so the
+        // staleness guards still apply, but the loop no longer
+        // waits for an Apply click on every scene write. The
+        // change stays revertible: the turn ledger, the prefab
+        // snapshots and the git backup are the safety net, and
+        // the revert bar is always shown afterwards.
+        if (!state.autoAcceptChanges) {
+          const outcome = await waitForLoopDecision((settle) => showSceneApprovalBar({ label: scenePreviewLabel(label, action.command, preview.data) }, {
+            approved: () => settle({ decision: 'approved' }),
+            declined: () => settle({ decision: 'declined' }),
+          }));
+          if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
+          if (outcome.decision !== 'approved') {
+            await appendToolResult('User declined: ' + sceneDeclineText(label, action.command, preview.data));
+            outcomes++;
+            continue;
+          }
         }
         // The real call: the identical command with dryRun:false,
         // plus the staleness guards from the preview — the
@@ -3312,6 +3370,14 @@ async function processAgentActions(actions) {
         // cares about.
         if (loopState) {
           loopState.unityWasAnswering = true;
+          // v0.21.4: a scene write that actually ran — the loop
+          // reads the scene back once before the summary. Prefab
+          // edits (modifyPrefab, set_property with a "prefab")
+          // and asset creates are not scene changes: their tool
+          // results already say what changed.
+          if (SCENE_WRITE_ACTIONS.indexOf(label) !== -1 && label !== 'modifyPrefab' && !(label === 'set_property' && action.command.prefab)) {
+            loopState.unitySceneMutated = true;
+          }
           if (label === 'createPrefab') {
             const p = action.command.path || ('Assets/Prefabs/' + String(action.command.name || '').replace(/\.prefab$/i, '') + '.prefab');
             noteTurnChange([p]);
@@ -4124,7 +4190,7 @@ function buildSystemPrompt(rulesets, skills) {
   // refusal — which is not true here. Kept short (~330 chars) so it
   // does not eat the rules budget; it is separate from the rulesets.
   prompt += 'You are CodeFox, a coding assistant running inside an app. You CAN edit the project\'s files. When you output a changed file, CodeFox writes it to disk for you (after taking a snapshot, so it can be reverted — and in a git project a backup commit is taken first, so a bad change can be restored). Never say you cannot modify files, cannot write code, or cannot provide code — that is not true here.\n\n';
-  prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. If you do not know something, say so instead of guessing.\n';
+  prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. Do only what was asked — don\'t create scripts, buttons, or extra objects the user didn\'t ask for. After an error, change your approach — repeating the same call that just failed will fail the same way. If you do not know something, say so instead of guessing.\n';
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
   const scan = (state.contextBudget && state.contextBudget.projectMapText)
     ? state.contextBudget.projectMapText
@@ -4221,13 +4287,13 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += 'Two patterns: (1) console-based test — a timed run, then read the report; (2) state probing — enter Play Mode WITHOUT a duration, wait, read values with read_component_values, then stop with {"action": "set_play_mode", "enabled": false}. To wait inside a turn, output a ```wait block with JSON {"seconds": 5} (at most 30 seconds — a bare number works too). It is just a sleep in the loop; no bridge call is involved.\n';
       prompt += 'Rule: stop Play Mode before finishing, unless the user asked to leave it running. Never edit code while the game is running — edits in Play Mode trigger recompiles that disrupt the run, so stop the game first, then touch code. Play Mode changes are lost when it stops.\n';
       prompt += '## Scene tools\n';
-      prompt += 'Scene and prefab writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject, modifyPrefab) are previewed by the app and approved by the user — output the command and carry on; the preview and approval happen without you, and a decline means the change did not happen. Every scene write of one turn shares one Ctrl+Z in Unity: create an object and configure it in the same turn and the whole thing reverts at once. Prefab edits are file transactions: the app snapshots the prefab before the edit, and the user can undo the whole agent turn afterwards from the sidebar (prefab files go back to their snapshots, scene changes undo as one Ctrl+Z).\n';
+      prompt += 'Scene and prefab writes run as soon as you output them — the app previews each one first (it reads the current values, so a stale call is refused instead of overwriting), but there is no approval click to wait for: output the command and carry on to the next step. Every change stays revertible — the user can undo the whole turn afterwards from the sidebar — so a wrong call is fixed by reverting, never by asking the user to click first. Every scene write of one turn shares one Ctrl+Z in Unity: create an object and configure it in the same turn and the whole thing reverts at once. Prefab edits are file transactions: the app snapshots the prefab before the edit, and the user can undo the whole agent turn afterwards from the sidebar (prefab files go back to their snapshots, scene changes undo as one Ctrl+Z).\n';
       prompt += 'Read before you write: read_component_values returns the exact serialized names set_property needs — view them first, never guess a property name. After a move, rename, or delete, paths change: every structural action returns pathChanges, and the app rewrites your queued calls and earlier tool results to the new paths. Always use the paths from the latest tool results — a path from an earlier result may be stale. A path that was deleted is answered directly ("was deleted earlier in this session") — do not re-try it.\n';
       prompt += '## Reading and editing files\n';
       prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
       prompt += '- view — read a file in line ranges, with line numbers: {"action": "view", "path": "Assets/Scripts/Player.cs", "start": 40, "end": 80}. Omit start/end to read from the top. At most 200 lines come back at once, and the result says so when it was cut short — view the next range if you need it.\n';
       prompt += '- grep — search plain text across the project (a substring, case-insensitive, not a regex): {"action": "grep", "pattern": "Health"}. Optionally narrow it with "paths": ["Assets/Scripts"] (folders or files). Results are file:line: matching line, at most 50 — narrow the pattern or the paths to see more. Library, .git, node_modules and the other generated folders are never searched. No match is a plain empty result, not an error.\n';
-      prompt += '- str_replace — replace ONE exact chunk of a file: {"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}. The old text must match EXACTLY ONCE: if it is not found, or it matches more than once, the edit fails plainly and you must view the file and copy the exact text (including indentation) or add more surrounding lines to make it unique. A str_replace is a real file change — CodeFox snapshots the file first and the user approves it like any other code write, and after the edit the project is compiled and the result comes back to you.\n';
+      prompt += '- str_replace — replace ONE exact chunk of a file: {"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}. The old text must match EXACTLY ONCE: if it is not found, or it matches more than once, the edit fails plainly and you must view the file and copy the exact text (including indentation) or add more surrounding lines to make it unique. A str_replace is a real file change — CodeFox snapshots the file first and applies it right away (changes are auto-applied in Agent mode and stay revertible from the sidebar), and after the edit the project is compiled and the result comes back to you.\n';
       prompt += 'After you change a .cs file (a whole-file write or a str_replace), CodeFox compiles the project with Unity\'s own compiler and the result comes back to you as a tool result before your next turn: "compile clean" means carry on; a failure lists the errors with file:line — fix the first error first, then the check runs again. If the first error is identical on two consecutive checks, stop and tell the user — the fix is not working. A project with no check available reports "no check available" — that is not a failure and not an error to fix. Prefab and asset changes are not compiled — the bridge already reports those.\n';
       prompt += 'Do not put a **File Path:** line before a ```file block — the block is a command, not a file.\n';
       prompt += '## Log triage\n';
@@ -8554,6 +8620,23 @@ async function resolveStrReplaceChanges(changes) {
   return { ok: true, changes: out };
 }
 
+// v0.21.4: a file block whose content is JSON with an "action"
+// field is a Unity command the model put under a File Path line,
+// not file content — the refusal should say so directly, instead
+// of letting the model conclude that .unity files cannot be
+// changed at all.
+function looksLikeUnityCommandJson(code) {
+  const t = String(code || '').trim();
+  // 123 is the opening curly brace — written as a code so the
+  // smoke test's brace-counting extractor is not confused by a
+  // literal brace inside a string.
+  if (t.charCodeAt(0) !== 123) return false;
+  try {
+    const p = JSON.parse(t);
+    return !!p && typeof p === 'object' && typeof p.action === 'string' && !!p.action;
+  } catch { return false; }
+}
+
 async function applyFileChanges(changes) {
   // v0.11.0: resolve str_replace changes into whole-file content
   // first, so the write path below — snapshots, the approval bar,
@@ -8577,7 +8660,21 @@ async function applyFileChanges(changes) {
   const allowed = [];
   for (const c of (changes || [])) {
     if (/\.(prefab|unity)$/i.test(c.path || '')) {
-      refused.push({ change: c, error: c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one, deleteAsset to delete one) instead. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
+      // v0.21.4: point at the right commands. A .unity file is
+      // the OPEN SCENE, not an asset: scene commands change it,
+      // and createPrefab / modifyPrefab only edit prefab assets
+      // on disk, never the open scene — the old message pointed
+      // every .unity refusal at createPrefab, which sent the model
+      // off to build prefabs for a scene task.
+      const isScene = /\.unity$/i.test(c.path || '');
+      let err = c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. ';
+      if (looksLikeUnityCommandJson(c.code)) {
+        err += 'That block\'s content is JSON with an "action" field — it is a Unity command, not file content. Put the JSON in a ```unity-command block (no **File Path:** line above it). ';
+      }
+      err += isScene
+        ? 'To change the OPEN SCENE, use a ```unity-command block with the scene commands: create_gameobject to create an object, set_property to set its values, add_component to add a component — example: ```unity-command\n{"action": "create_gameobject", "name": "Canvas", "components": ["Canvas", "CanvasScaler", "GraphicRaycaster"]}\n```. createPrefab / modifyPrefab only edit prefab assets on disk, never the open scene.'
+        : 'Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one, deleteAsset to delete one) instead. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE;
+      refused.push({ change: c, error: err });
     } else if (isEditorApiScriptChange(c)) {
       refused.push({ change: c, error: c.path + ': Editor-only Unity APIs (PrefabUtility, AssetDatabase, …) only work in scripts under Assets/Editor/ — and you do not need a generator script at all: use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one, deleteAsset to delete one) and Unity does it. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
     } else allowed.push(c);
