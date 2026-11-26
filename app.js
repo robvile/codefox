@@ -1863,20 +1863,69 @@ function postTurnVerifyDecision(opts) {
 // Parse ```git blocks (v0.10.0, Agent mode only): JSON
 // {"action": "status" | "diff" | "log" | "backup" | "restore", ...}.
 // Ask/Plan never parse these.
-function parseGitBlocks(text) {
+// Fenced-block extraction shared by every action parser (v0.21.3).
+// `lang` must not contain a capturing group (pass an alternation as
+// `(?:a|b)`): the body is capture 1 and the fence-line payload is
+// capture 2, and a capturing group in `lang` would shift both.
+// Small local models often put the payload on the fence line
+// instead of in the body:
+//   ```unity-command:{"action": "createPrefab", ...}```
+//   ```file:Assets/Scenes/MainMenu.unity```
+//   ```git:project-settings {"action": "status"}```
+// The old parsers only matched a body (```lang\n<body>```) and
+// silently found nothing — the model then "described" work it
+// never did, twice, before the loop gave up. Accept both forms: a
+// body wins when both are present; otherwise the fence-line payload
+// after `:` or a space. Returns [{ raw, index }] in order.
+function extractFencedPayloads(text, lang) {
   const out = [];
-  const re = /```git\s*\n([\s\S]*?)```/gi;
+  const re = new RegExp('```' + lang + '(?:\\s*\\n([\\s\\S]*?)```|[: ]([^`\\n]*?)\\s*```)', 'gi');
   let m;
   while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    const raw = (m[1] != null ? m[1] : (m[2] || '')).trim();
+    out.push({ raw, index: m.index });
+  }
+  return out;
+}
+
+// Loose JSON: the payload as written, else the JSON object inside
+// it (the model sometimes prefixes junk, e.g. `project-settings
+// {"action": "status"}`). Only used when the direct parse fails;
+// the result must still pass the caller's validity check.
+function tryParseJsonLoose(raw) {
+  try { return { parsed: JSON.parse(raw), error: null }; } catch (e) {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try { return { parsed: JSON.parse(raw.slice(start, end + 1)), error: null }; } catch (e2) { return { parsed: null, error: e.message }; }
+    }
+    return { parsed: null, error: e.message };
+  }
+}
+
+// A bare path where a ```file block belongs is a read: the model
+// wrote ```file:Assets/Scenes/MainMenu.unity meaning "look at this
+// file". Reads need no approval and never write, so treat it as a
+// view instead of a parse failure.
+function fileBlockFromBarePath(raw) {
+  const p = String(raw || '').trim();
+  if (/^[\w./\\:-]+$/.test(p) && (p.includes('/') || p.includes('\\') || p.includes('.'))) {
+    return { action: 'view', path: p };
+  }
+  return null;
+}
+
+function parseGitBlocks(text) {
+  const out = [];
+  for (const p of extractFencedPayloads(text, 'git')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     out.push({
       command: parsed,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: !!parsed && typeof parsed === 'object' && typeof parsed.action === 'string' && !!parsed.action,
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -1889,18 +1938,20 @@ function parseGitBlocks(text) {
 // parse these.
 function parseFileBlocks(text) {
   const out = [];
-  const re = /```file\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'file')) {
+    const r = tryParseJsonLoose(p.raw);
+    let parsed = r.parsed;
+    let error = r.error;
+    if (!parsed) {
+      const asView = fileBlockFromBarePath(p.raw);
+      if (asView) { parsed = asView; error = null; }
+    }
     out.push({
       command: parsed,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: !!parsed && typeof parsed === 'object' && typeof parsed.action === 'string' && !!parsed.action,
       error,
-      index: m.index,
+      index: p.index,
     });
   }
   return out;
@@ -1917,20 +1968,17 @@ function clampWaitSeconds(seconds) {
 }
 function parseWaitBlocks(text) {
   const out = [];
-  const re = /```wait\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'wait')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     const seconds = typeof parsed === 'number' ? parsed
       : (parsed && typeof parsed === 'object' ? parsed.seconds : null);
     out.push({
       seconds,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: clampWaitSeconds(seconds) != null,
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -1941,19 +1989,16 @@ function parseWaitBlocks(text) {
 // downloaded yet, the tool says so plainly instead of guessing.
 function parseDocsBlocks(text) {
   const out = [];
-  const re = /```docs\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'docs')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     const query = parsed && typeof parsed === 'object' ? parsed.query : null;
     out.push({
       query,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: typeof query === 'string' && !!query.trim(),
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -1967,22 +2012,19 @@ function parseDocsBlocks(text) {
 // refusal. A vision question is never a file write.
 function parseVisionBlocks(text) {
   const out = [];
-  const re = /```vision\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'vision')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     const image = parsed && typeof parsed === 'object' ? parsed.image : null;
     const question = parsed && typeof parsed === 'object' ? parsed.question : null;
     out.push({
       image,
       question,
       confirmSwap: !!(parsed && parsed.confirmSwap),
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: typeof image === 'string' && !!image.trim() && typeof question === 'string' && !!question.trim(),
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -2072,12 +2114,10 @@ function parsePackageSpecLine(line) {
 
 function parseUpmBlocks(text, lang) {
   const out = [];
-  const re = new RegExp('```' + lang + '\\s*\\n([\\s\\S]*?)```', 'gi');
-  let m;
-  while ((m = re.exec(text))) {
-    for (const line of m[1].split('\n')) {
+  for (const p of extractFencedPayloads(text, lang)) {
+    for (const line of p.raw.split('\n')) {
       const spec = parsePackageSpecLine(line);
-      if (spec) out.push({ ...spec, index: m.index });
+      if (spec) out.push({ ...spec, index: p.index });
     }
   }
   return out;
@@ -2085,11 +2125,8 @@ function parseUpmBlocks(text, lang) {
 
 function extractShellBlocksWithIndex(text) {
   const out = [];
-  const re = /```(powershell|pwsh|shell)\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const cmd = m[2].trim();
-    if (cmd) out.push({ command: cmd, index: m.index });
+  for (const p of extractFencedPayloads(text, '(?:powershell|pwsh|shell)')) {
+    if (p.raw) out.push({ command: p.raw, index: p.index });
   }
   return out;
 }
@@ -2099,22 +2136,19 @@ function extractShellBlocksWithIndex(text) {
 // parse these — the block is shown as text only there.
 function parseComfyuiBlocks(text) {
   const out = [];
-  const re = /```comfyui\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'comfyui')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     out.push({
       workflow: parsed ? (parsed.workflow || parsed.name || parsed.id || '') : '',
       inputs: (parsed && parsed.inputs && typeof parsed.inputs === 'object') ? parsed.inputs : {},
       // v0.17.0 — variations: "count" (or "variations"), 1–4.
       // Clamped by the variation plan, never trusted as-is.
       count: parsed ? (parsed.count != null ? parsed.count : (parsed.variations != null ? parsed.variations : 1)) : 1,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: !!parsed && !!(parsed.workflow || parsed.name || parsed.id),
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -2127,18 +2161,15 @@ function parseComfyuiBlocks(text) {
 // guid or a YAML component type again. Ask/Plan never parse these.
 function parseUnityCommandBlocks(text) {
   const out = [];
-  const re = /```unity-command\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let parsed = null;
-    let error = null;
-    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+  for (const p of extractFencedPayloads(text, 'unity-command')) {
+    const r = tryParseJsonLoose(p.raw);
+    const parsed = r.parsed;
     out.push({
       command: parsed,
-      raw: m[1].trim(),
+      raw: p.raw,
       valid: !!parsed && typeof parsed === 'object' && !!parsed.action,
-      error,
-      index: m.index,
+      error: r.error,
+      index: p.index,
     });
   }
   return out;
@@ -8079,11 +8110,8 @@ function appendShellResultTo(el, cmd, res) {
 // Run / Dismiss bar instead.
 function extractShellBlocks(text) {
   const out = [];
-  const re = /```(powershell|pwsh|shell)\s*\n([\s\S]*?)```/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const cmd = m[2].trim();
-    if (cmd) out.push(cmd);
+  for (const p of extractFencedPayloads(text, '(?:powershell|pwsh|shell)')) {
+    if (p.raw) out.push(p.raw);
   }
   return out;
 }
@@ -8237,6 +8265,18 @@ function extractFileChanges(responseText) {
     const fenceMatch = line.match(/^```\s*(\S*)\s*$/);
     if (fenceMatch) {
       const fenceLang = (fenceMatch[1] || '').toLowerCase();
+      // Single-line fenced block (v0.21.3): the payload sits on the
+      // fence line and the block closes on the same line, e.g.
+      // ```unity-command:{"action": "createPrefab", ...}```
+      // or ```file:Assets/Scenes/MainMenu.unity```. It is a complete
+      // action block, not a file: skip it without setting a pending
+      // path and without swallowing the lines after it (the old code
+      // read them as the file's "code" and produced a spurious
+      // "0 written, 1 failed" refusal).
+      if ((fenceMatch[1] || '').endsWith('```')) {
+        pendingPath = null;
+        continue;
+      }
       // ```file:<path> (v0.5.2): the path is the fence itself, e.g.
       // ```file:Assets/Editor/CodeFoxBridge.cs — same meaning as a
       // **File Path:** line above the block. Use the raw capture,
@@ -8245,7 +8285,14 @@ function extractFileChanges(responseText) {
         const fp = (fenceMatch[1] || '').slice(5).trim().replace(/^`|`$/g, '');
         if (fp) pendingPath = fp;
       }
-      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui' || fenceLang === 'git' || fenceLang === 'file') {
+      // Action blocks, including fence-line forms (v0.21.3): a
+      // ```unity-command:{...}``` block is a command, not a file —
+      // same as the body form. The base language is the part before
+      // any `:` or space. `file` is excluded on purpose: a
+      // ```file:<path> block with a code body is the v0.5.2
+      // file-write form, handled above.
+      const baseLang = fenceLang.split(/[: ]/)[0];
+      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui' || fenceLang === 'git' || fenceLang === 'file' || ['powershell', 'pwsh', 'shell', 'upm-install', 'upm-remove', 'unity-command', 'comfyui', 'git'].includes(baseLang)) {
         let j = i + 1;
         while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;
         i = j;

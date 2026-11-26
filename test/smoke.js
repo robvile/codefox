@@ -23,10 +23,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.21.2.
+// 2. package.json version is 0.21.3.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.21.2', pkg.version === '0.21.2', 'got ' + pkg.version);
-check('sidebar footer shows 0.21.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.2 — Local'));
+check('package.json version is 0.21.3', pkg.version === '0.21.3', 'got ' + pkg.version);
+check('sidebar footer shows 0.21.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.3 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2445,11 +2445,13 @@ const shouldBackupSrc = extractFunction(appJs, 'shouldTakeTurnBackup');
 const changeMakingSrc = extractFunction(appJs, 'isChangeMakingAction');
 const verifyDecisionSrc = extractFunction(appJs, 'postTurnVerifyDecision');
 const parseGitSrc = extractFunction(appJs, 'parseGitBlocks');
+const fencePayloadSrc = extractFunction(appJs, 'extractFencedPayloads');
+const looseJsonSrc = extractFunction(appJs, 'tryParseJsonLoose');
 check('git loop helpers can be extracted for testing',
-  !!summarizeSrc && !!shouldBackupSrc && !!changeMakingSrc && !!verifyDecisionSrc && !!parseGitSrc);
-if (summarizeSrc && shouldBackupSrc && changeMakingSrc && verifyDecisionSrc && parseGitSrc) {
+  !!summarizeSrc && !!shouldBackupSrc && !!changeMakingSrc && !!verifyDecisionSrc && !!parseGitSrc && !!fencePayloadSrc && !!looseJsonSrc);
+if (summarizeSrc && shouldBackupSrc && changeMakingSrc && verifyDecisionSrc && parseGitSrc && fencePayloadSrc && looseJsonSrc) {
   const gitHelpers = new Function(
-    summarizeSrc + '\n' + shouldBackupSrc + '\n' + changeMakingSrc + '\n' + verifyDecisionSrc + '\n' + parseGitSrc
+    summarizeSrc + '\n' + shouldBackupSrc + '\n' + changeMakingSrc + '\n' + verifyDecisionSrc + '\n' + parseGitSrc + '\n' + fencePayloadSrc + '\n' + looseJsonSrc
     + '\nreturn { summarizeForBackup, shouldTakeTurnBackup, isChangeMakingAction, postTurnVerifyDecision, parseGitBlocks };')();
   check('backup summary cleans the request to one 80-char line',
     gitHelpers.summarizeForBackup('  fix   the\nprefab  ') === 'fix the prefab'
@@ -2760,9 +2762,10 @@ if (fileTextSrc && consoleTextSrc) {
 const parseFileSrc = extractFunction(appJs, 'parseFileBlocks');
 const changeMaking11Src = extractFunction(appJs, 'isChangeMakingAction');
 const safePathSrc = extractFunction(appJs, 'isSafeProjectPath');
-check('file-block helpers are extractable for testing', !!parseFileSrc && !!changeMaking11Src && !!safePathSrc);
-if (parseFileSrc && changeMaking11Src && safePathSrc) {
-  const helpers11 = new Function(parseFileSrc + '\n' + changeMaking11Src + '\n' + safePathSrc + '\nreturn { parseFileBlocks, isChangeMakingAction, isSafeProjectPath };')();
+const barePathSrc = extractFunction(appJs, 'fileBlockFromBarePath');
+check('file-block helpers are extractable for testing', !!parseFileSrc && !!changeMaking11Src && !!safePathSrc && !!fencePayloadSrc && !!looseJsonSrc && !!barePathSrc);
+if (parseFileSrc && changeMaking11Src && safePathSrc && fencePayloadSrc && looseJsonSrc && barePathSrc) {
+  const helpers11 = new Function(fencePayloadSrc + '\n' + looseJsonSrc + '\n' + barePathSrc + '\n' + parseFileSrc + '\n' + changeMaking11Src + '\n' + safePathSrc + '\nreturn { parseFileBlocks, isChangeMakingAction, isSafeProjectPath };')();
   check('parseFileBlocks parses view/grep/str_replace JSON, rejects bad JSON',
     (() => {
       const blocks = helpers11.parseFileBlocks('```file\n{"action": "view", "path": "Assets/Scripts/Player.cs", "start": 1, "end": 20}\n```\n```file\n{"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "a", "new": "b"}\n```\n```file\nnot json\n```\n');
@@ -2932,7 +2935,7 @@ check('bridge version pins are 0.16.2 everywhere (MIN_TRANSPORT_VERSION stays 0.
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.21.2')
+  && readme.includes('readConsole') && readme.includes('version-0.21.3')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3262,7 +3265,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.21.2', readme.includes('version-0.21.2'));
+check('README badge reads 0.21.3', readme.includes('version-0.21.3'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3380,9 +3383,9 @@ check('README documents the .bridge/ transport, the console buffer, and the Unit
 // the heartbeat fields are plain Node and are tested directly.
 const waitParserSrc = extractFunction(appJs, 'parseWaitBlocks');
 const waitClampSrc = extractFunction(appJs, 'clampWaitSeconds');
-check('app.js wait parser is extractable for testing', !!waitParserSrc && !!waitClampSrc);
-if (waitParserSrc && waitClampSrc) {
-  const parseWait = new Function(waitClampSrc + '\n' + waitParserSrc + '\nreturn parseWaitBlocks;')();
+check('app.js wait parser is extractable for testing', !!waitParserSrc && !!waitClampSrc && !!fencePayloadSrc && !!looseJsonSrc);
+if (waitParserSrc && waitClampSrc && fencePayloadSrc && looseJsonSrc) {
+  const parseWait = new Function(fencePayloadSrc + '\n' + looseJsonSrc + '\n' + waitClampSrc + '\n' + waitParserSrc + '\nreturn parseWaitBlocks;')();
   const clampWait = new Function(waitClampSrc + '\nreturn clampWaitSeconds;')();
   check('wait clamp: positive seconds pass, 0/negative/non-numbers fail, over 30 clamps to 30',
     clampWait(5) === 5 && clampWait(30) === 30 && clampWait(120) === 30 && clampWait(0.5) === 0.5
@@ -3814,9 +3817,9 @@ if (promptSrc) {
 
   // The ```comfyui block carries a variations count.
   const parseBlocksSrc = extractFunction(appJs, 'parseComfyuiBlocks');
-  check('parseComfyuiBlocks is extractable', !!parseBlocksSrc);
-  if (parseBlocksSrc) {
-    const parse = new Function(parseBlocksSrc + '\nreturn parseComfyuiBlocks;')();
+  check('parseComfyuiBlocks is extractable', !!parseBlocksSrc && !!fencePayloadSrc && !!looseJsonSrc);
+  if (parseBlocksSrc && fencePayloadSrc && looseJsonSrc) {
+    const parse = new Function(fencePayloadSrc + '\n' + looseJsonSrc + '\n' + parseBlocksSrc + '\nreturn parseComfyuiBlocks;')();
     const withCount = parse('```comfyui\n{"workflow": "hero", "count": 3, "inputs": {}}\n```');
     const withVariations = parse('```comfyui\n{"workflow": "hero", "variations": 2, "inputs": {}}\n```');
     const plain = parse('```comfyui\n{"workflow": "hero", "inputs": {}}\n```');
@@ -3911,18 +3914,18 @@ if (promptSrc) {
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
     && bridgeCs.includes('// CodeFoxBridge version: 0.16.2'));
 
-  // Version pins and packaging for 0.21.2.
+  // Version pins and packaging for 0.21.3.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.21.2 and build.files includes the three split modules + context-budget.js',
-    pkg.version === '0.21.2'
+  check('package.json is 0.21.3 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.21.3'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js')
     && pkg.build.files.includes('context-budget.js')
     && pkg.build.files.includes('turn-ledger.js'));
-  check('index.html footer and README badge are 0.21.2, CHANGELOG keeps the 0.21.1 entry',
-    indexHtml.includes('CodeFox 0.21.2 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.2-blue')
+  check('index.html footer and README badge are 0.21.3, CHANGELOG keeps the 0.21.1 entry',
+    indexHtml.includes('CodeFox 0.21.3 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.3-blue')
     && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.21.1 — 2026-11-26'));
 }
 
@@ -4663,8 +4666,8 @@ check('mcp-server: classifyUnityAction allows reads and denies writes',
   && MCP.classifyUnityAction('set_property') === 'mutating'
   && MCP.classifyUnityAction('recompile_and_report_errors') === 'mutating');
 check('v0.21.0 wiring: version pins, script tags, IPCs, prompt sections, migration',
-  pkg.version === '0.21.2'
-  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.2 — Local')
+  pkg.version === '0.21.3'
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.3 — Local')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="docs-search.js"></script>')
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="model-profiles.js"></script>')
   && pkg.build.files.includes('docs-search.js')
@@ -5436,6 +5439,132 @@ check('v0.21.2 wiring: bridge is 0.16.2 (the API fixes), not 0.17.0',
   check('bridge version is 0.16.2 everywhere pinned',
     cs.includes('// CodeFoxBridge version: 0.16.2') && cs.includes('BridgeVersion = "0.16.2"')
     && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.2'"));
+}
+
+// 48. v0.21.3 — tolerant action-block parsing: the model puts the
+// payload on the fence line instead of in the body, and the old
+// parsers silently found nothing — Rob's first live test (a
+// MainMenu scene: camera + canvas) "didn't do anything" because
+// every ```unity-command block was written as
+// ```unity-command:{"action": ...}```. The loop then enforced,
+// the model retried in the same form, and the loop gave up.
+// Every action parser now accepts the fence-line form, a loose
+// JSON substring, and (for ```file) a bare path as a view — and
+// the file extractor no longer swallows the lines after a
+// single-line fence-line block as a spurious file change.
+{
+  const fencePayload48Src = extractFunction(appJs, 'extractFencedPayloads');
+  const looseJson48Src = extractFunction(appJs, 'tryParseJsonLoose');
+  const barePath48Src = extractFunction(appJs, 'fileBlockFromBarePath');
+  const unity48Src = extractFunction(appJs, 'parseUnityCommandBlocks');
+  const file48Src = extractFunction(appJs, 'parseFileBlocks');
+  const git48Src = extractFunction(appJs, 'parseGitBlocks');
+  const comfy48Src = extractFunction(appJs, 'parseComfyuiBlocks');
+  const docs48Src = extractFunction(appJs, 'parseDocsBlocks');
+  const vision48Src = extractFunction(appJs, 'parseVisionBlocks');
+  const wait48Src = extractFunction(appJs, 'parseWaitBlocks');
+  const clamp48Src = extractFunction(appJs, 'clampWaitSeconds');
+  const upm48Src = extractFunction(appJs, 'parseUpmBlocks');
+  const pkgSpec48Src = extractFunction(appJs, 'parsePackageSpecLine');
+  const pkgName48Src = extractFunction(appJs, 'isValidPackageName');
+  const pkgVer48Src = extractFunction(appJs, 'isValidPackageVersion');
+  const shellIdx48Src = extractFunction(appJs, 'extractShellBlocksWithIndex');
+  const shell48Src = extractFunction(appJs, 'extractShellBlocks');
+  const agent48Src = extractFunction(appJs, 'parseAgentActions');
+  const fileChanges48Src = extractFunction(appJs, 'extractFileChanges');
+  check('fence-line helpers are extractable for testing',
+    !!fencePayload48Src && !!looseJson48Src && !!barePath48Src && !!unity48Src && !!file48Src
+    && !!git48Src && !!comfy48Src && !!docs48Src && !!vision48Src && !!wait48Src && !!clamp48Src
+    && !!upm48Src && !!pkgSpec48Src && !!pkgName48Src && !!pkgVer48Src && !!shellIdx48Src
+    && !!shell48Src && !!agent48Src && !!fileChanges48Src && !!codeExtsMatch);
+  if (fencePayload48Src && looseJson48Src && barePath48Src && unity48Src && file48Src
+    && git48Src && comfy48Src && docs48Src && vision48Src && wait48Src && clamp48Src
+    && upm48Src && pkgSpec48Src && pkgName48Src && pkgVer48Src && shellIdx48Src
+    && shell48Src && agent48Src && fileChanges48Src && codeExtsMatch) {
+    const all48 = fencePayload48Src + '\n' + looseJson48Src + '\n' + barePath48Src + '\n'
+      + unity48Src + '\n' + file48Src + '\n' + git48Src + '\n' + comfy48Src + '\n' + docs48Src + '\n'
+      + vision48Src + '\n' + wait48Src + '\n' + clamp48Src + '\n' + upm48Src + '\n' + pkgSpec48Src + '\n'
+      + pkgName48Src + '\n' + pkgVer48Src + '\n' + shellIdx48Src + '\n' + shell48Src + '\n'
+      + agent48Src + '\n' + fileChanges48Src;
+    const p48 = new Function('CODE_EXTS', all48 + '\nreturn { parseUnityCommandBlocks, parseFileBlocks, parseGitBlocks, parseComfyuiBlocks, parseDocsBlocks, parseVisionBlocks, parseWaitBlocks, parseUpmBlocks, extractShellBlocksWithIndex, extractShellBlocks, parseAgentActions, extractFileChanges };')(codeExtsMatch[1]);
+    // Rob's MainMenu reply, verbatim shapes: fence-line unity-command
+    // blocks, a file:path read, a git:project-settings status, plus
+    // the body forms the prompt already teaches.
+    const mainMenuReply = '```unity-command:{"action": "create_gameobject", "name": "MainMenuContainer", "primitive": "Cube", "position": [0, 0, 0]}```\n\n'
+      + '```unity-command:{"action": "set_property", "path": "Main Camera", "component": "Camera", "changes": [{"property": "orthographic", "value": true}]}```\n\n'
+      + '```file:Assets/Scenes/MainMenu.unity```\n\n'
+      + '```git:project-settings {"action": "status"}```\n\n'
+      + '```unity-command\n{"action": "create_gameobject", "name": "Canvas", "parent": "MainMenuContainer"}\n```\n\n'
+      + '```file\n{"action": "view", "path": "Assets/Scripts/Player.cs"}\n```';
+    check('parseAgentActions turns Rob\'s MainMenu reply into actions in order, no spurious file change',
+      (() => {
+        const actions = p48.parseAgentActions(mainMenuReply);
+        const types = actions.map(a => a.type);
+        return actions.length === 6
+          && types.join(',') === 'unity-command,unity-command,file,git,unity-command,file'
+          && actions.filter(a => a.type === 'unity-command').every(a => a.valid)
+          && actions[0].command.name === 'MainMenuContainer'
+          && actions[2].command.action === 'view' && actions[2].command.path === 'Assets/Scenes/MainMenu.unity'
+          && actions[3].command.action === 'status'
+          && actions[5].command.action === 'view';
+      })());
+    check('unity-command parser accepts colon, space, two-line and body forms',
+      (() => {
+        const b = p48.parseUnityCommandBlocks(
+          '```unity-command:{"action": "a"}```\n'
+          + '```unity-command {"action": "b"}```\n'
+          + '```unity-command:{"action": "c"}\n```\n'
+          + '```unity-command\n{"action": "d"}\n```');
+        return b.length === 4 && b.every(x => x.valid)
+          && b.map(x => x.command.action).join('') === 'abcd';
+      })());
+    check('file parser: fence-line bare path is a view, fence-line JSON parses, bad JSON still fails',
+      (() => {
+        const b = p48.parseFileBlocks('```file:Assets/Scenes/MainMenu.unity```\n'
+          + '```file:{"action": "grep", "pattern": "Health"}```\n'
+          + '```file\nnot json\n```');
+        return b.length === 3
+          && b[0].valid && b[0].command.action === 'view' && b[0].command.path === 'Assets/Scenes/MainMenu.unity'
+          && b[1].valid && b[1].command.action === 'grep'
+          && !b[2].valid && !!b[2].error;
+      })());
+    check('git parser: fence-line junk prefix parses via the JSON substring fallback',
+      (() => {
+        const b = p48.parseGitBlocks('```git:project-settings {"action": "status"}```');
+        return b.length === 1 && b[0].valid && b[0].command.action === 'status';
+      })());
+    check('docs/vision/wait/comfyui parsers accept the fence-line form',
+      (() => {
+        const d = p48.parseDocsBlocks('```docs:{"query": "Transform.TransformPoint"}```');
+        const v = p48.parseVisionBlocks('```vision:{"image": "Assets/shot.png", "question": "Is it visible?"}```');
+        const w = p48.parseWaitBlocks('```wait:5```');
+        const c = p48.parseComfyuiBlocks('```comfyui:{"workflow": "hero", "inputs": {}}```');
+        return d.length === 1 && d[0].valid && d[0].query === 'Transform.TransformPoint'
+          && v.length === 1 && v[0].valid
+          && w.length === 1 && w[0].valid && w[0].seconds === 5
+          && c.length === 1 && c[0].valid && c[0].workflow === 'hero';
+      })());
+    check('upm and shell parsers accept the fence-line form',
+      (() => {
+        const u = p48.parseUpmBlocks('```upm-install:com.unity.textmeshpro@3.0.6```', 'upm-install');
+        const s = p48.extractShellBlocksWithIndex('```powershell:git status```');
+        const s2 = p48.extractShellBlocks('```shell:ls```');
+        return u.length === 1 && u[0].valid && u[0].name === 'com.unity.textmeshpro'
+          && s.length === 1 && s[0].command === 'git status'
+          && s2.length === 1 && s2[0] === 'ls';
+      })());
+    check('file extractor: single-line fence-line blocks are not files, v0.5.2 file:path write still works',
+      (() => {
+        const ex = p48.extractFileChanges;
+        const single = ex('```file:Assets/Scenes/MainMenu.unity```\nSome text\n```unity-command:{"action": "create_gameobject", "name": "X"}```\n');
+        const afterPath = ex('**File Path:** `Assets/Scripts/Player.cs`\n```unity-command:{"action": "createPrefab", "name": "ImageContainer"}```\n');
+        const write = ex('```file:Assets/Editor/CodeFoxBridge.cs\npublic class X {}\n```\n');
+        return single.length === 0 && afterPath.length === 0
+          && write.length === 1 && write[0].path === 'Assets/Editor/CodeFoxBridge.cs' && write[0].code.includes('public class X');
+      })());
+  }
+  check('app.js has the fence-line parsers wired into the loop',
+    appJs.includes('extractFencedPayloads') && appJs.includes('tryParseJsonLoose') && appJs.includes('fileBlockFromBarePath'));
 }
 
 function finish() {
