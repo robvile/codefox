@@ -1172,6 +1172,30 @@ function parseComfyuiBlocks(text) {
   return out;
 }
 
+// Unity bridge commands (v0.9.0, Agent mode only): ```unity-command
+// with JSON {"action": "createPrefab", ...}. This is the ONLY way
+// the model creates or changes prefabs — Unity writes the files
+// itself through the bridge, so the model can never invent a script
+// guid or a YAML component type again. Ask/Plan never parse these.
+function parseUnityCommandBlocks(text) {
+  const out = [];
+  const re = /```unity-command\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    out.push({
+      command: parsed,
+      raw: m[1].trim(),
+      valid: !!parsed && typeof parsed === 'object' && !!parsed.action,
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
+
 // All actions in one reply, in the order they appear: file changes
 // (one action for the whole set, applied together), one action per
 // shell block, one action per package line.
@@ -1194,6 +1218,9 @@ function parseAgentActions(text) {
   }
   for (const b of parseComfyuiBlocks(text)) {
     actions.push({ type: 'comfyui', workflow: b.workflow, inputs: b.inputs, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
+  for (const b of parseUnityCommandBlocks(text)) {
+    actions.push({ type: 'unity-command', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
@@ -1610,6 +1637,36 @@ async function processAgentActions(actions) {
         await appendToolResult('Tool result — ComfyUI: generation with "' + wf.name + '" failed: ' + res.error);
       }
       outcomes++;
+    } else if (action.type === 'unity-command') {
+      // Unity bridge command (v0.9.0, Agent mode only). Success and
+      // failure both come back as tool results, so the model can
+      // correct itself next round — an unknown type is a cue to ask
+      // Unity with listComponentTypes, not to guess another name.
+      const label = action.command && action.command.action ? action.command.action : 'unity-command';
+      if (!action.valid) {
+        await appendToolResult('Tool result — Unity command: could not parse the ```unity-command block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"action": "createPrefab", ...}.');
+        outcomes++;
+        continue;
+      }
+      if (!state.projectPath) {
+        await appendToolResult('Tool result — Unity command "' + label + '": no project folder set — pick a project folder in Settings first.');
+        outcomes++;
+        continue;
+      }
+      if (loopState) setLoopStatus(roundLabel() + 'running Unity command (' + label + ')…');
+      const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: action.command });
+      if (res && res.ok) {
+        let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
+          + (res.path ? ' (' + res.path + ')' : '');
+        if (res.data != null) text += '\n' + JSON.stringify(res.data);
+        await appendToolResult(text);
+        if (loopState) setLoopStatus(roundLabel() + 'ran Unity command (' + label + ')');
+      } else {
+        await appendToolResult('Tool result — Unity command "' + label + '" failed: ' + ((res && (res.error || res.message)) || 'unknown error'));
+      }
+      outcomes++;
     }
   }
   return outcomes;
@@ -1788,7 +1845,23 @@ function buildSystemPrompt(rulesets) {
     prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
     prompt += 'You can also generate images, video, or audio with ComfyUI, right here in this chat: when the user asks for a generation, output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — use the workflow the user named, or the best match from the Workflow Library when they did not name one, and say which workflow you used. The result appears in the chat with an offer to import it into the project — do not import it yourself from the chat flow, the user decides that on the message. Only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
-    prompt += 'New Unity-native asset files you create (prefabs, scenes, materials, animations — files that contain no code) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
+    prompt += 'New Unity-native asset files you create (materials, animations, and other asset files — files that contain no code, but never prefabs or scenes) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
+    if (state.projectScan && state.projectScan.unityVersion) {
+      // Unity — prefabs and components (v0.9.0). The model never
+      // hand-writes .prefab / .unity files: it invented script guids
+      // and component types doing that ("Unknown type 'Image'").
+      // Unity writes those files itself, through the bridge, and
+      // reflection over the loaded assemblies is the catalogue of
+      // what actually exists in this install.
+      prompt += '## Unity — prefabs and components\n';
+      prompt += 'Never hand-write .prefab or .unity files — the file writer refuses them. To create or change a prefab, output a ```unity-command block with JSON and Unity writes the file itself. The bridge runs the command in the open Unity project and the result comes back to you as a tool result, so a failure tells you what to fix.\n';
+      prompt += 'Actions:\n';
+      prompt += '- createPrefab — build a prefab from a GameObject tree. Example (an Image prefab): ```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```\n';
+      prompt += '- TextMeshPro text works the same way, with type "TextMeshProUGUI": ```unity-command\n{"action": "createPrefab", "name": "TitleText", "root": {"name": "TitleText", "components": [{"type": "RectTransform", "props": {"sizeDelta": [400, 60]}}, {"type": "TextMeshProUGUI", "props": {"text": "Hello"}}]}}\n```\nThe TextMeshPro package must be in the project — if it is not, the bridge fails plainly and you say so instead of inventing another way.\n';
+      prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). Example — add a ScrollRect to a prefab that already has a Viewport child (with RectMask2D and an Image) and a Content child under it: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ScrollPanel.prefab", "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name.\n';
+      prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
+      prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
+    }
   }
   return prompt;
 }
@@ -4450,7 +4523,7 @@ function renderAdvancedPane(body) {
       <p class="settings-note">Keep project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo.</p>
       <label class="settings-toggle-row"><span>Auto-apply new Unity asset files</span>
         <span class="switch"><input type="checkbox" ${state.autoApplyUnityAssets ? 'checked' : ''} onchange="setShellToggle('auto_apply_unity_assets', this.checked)"><span class="slider"></span></span></label>
-      <p class="settings-note">When the assistant creates a new Unity-native file — a prefab, scene, material, animation or similar — CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. Code files (.cs, .shader, .js, .ts) and edits to existing files still ask first, unless auto-accept is on. The revert bar is always shown afterwards, so you can still undo.</p>
+      <p class="settings-note">When the assistant creates a new Unity-native file — a material, animation or similar asset — CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. Prefabs and scenes are different: Unity builds those itself through the bridge, so they are never written by hand. Code files (.cs, .shader, .js, .ts) and edits to existing files still ask first, unless auto-accept is on. The revert bar is always shown afterwards, so you can still undo.</p>
       <h3 class="settings-subhead">Auto-approved commands</h3>
       <p class="settings-note">Commands starting with one of these run automatically when Auto Mode is on. Anything else asks first.</p>
       <div class="chip-row">${state.shellAutoApprove.map((c, i) => `<span class="chip">${escHtml(c)} <span class="chip-x" onclick="removeAutoApprove(${i})">✕</span></span>`).join('')}</div>
@@ -4491,7 +4564,7 @@ function renderAdvancedPane(body) {
     <div class="settings-note-box">• Safe auto-approved commands run automatically in Auto Mode.
 • Dangerous commands (rm, del, Remove-Item, format, rm -rf, rmdir /s, rd /s, Remove-Item -Recurse) always ask first.
 • Package installs and removals always ask first — even in Auto Mode, even with auto-accept on.
-• New Unity asset files (prefabs, scenes, materials…) are written automatically after a snapshot — revert is always available afterwards.
+• New Unity asset files (materials, animations…) are written automatically after a snapshot — revert is always available afterwards. Prefabs and scenes are built by Unity itself through the bridge, never written by hand.
 • File changes ask first unless auto-accept is on (and are snapshotted first either way).
 • Nothing runs while the shell is off, and no package is installed while no project folder is set.</div>
     <h3 class="settings-subhead">Editor Integration</h3>
@@ -4888,6 +4961,12 @@ async function isAutoApplyAssetSet(changes) {
 async function handleFileChanges(changes) {
   if (await isAutoApplyAssetSet(changes)) {
     const summary = await applyFileChanges(changes);
+    if (summary.written === 0) {
+      // v0.9.0: a pure .prefab / .unity set is refused, not written
+      // — say so plainly instead of claiming a snapshot was taken.
+      addSystemMessage('Did not write: ' + (summary.errors.join('; ') || 'nothing was written.'));
+      return;
+    }
     addSystemMessage('Applied ' + summary.written + ' new Unity asset file'
       + (summary.written !== 1 ? 's' : '') + ' automatically ('
       + changes.map(c => c.path.split(/[\/\\]/).pop()).join(', ')
@@ -4957,6 +5036,29 @@ function showApplyBar(changes, onDecision) {
 }
 
 async function applyFileChanges(changes) {
+  // v0.9.0: Unity writes its own files. A .prefab or .unity write is
+  // refused here — the model must use a ```unity-command block
+  // (createPrefab / modifyPrefab) instead, so Unity writes the YAML
+  // itself and the model can never invent a script guid or a
+  // component type again. The refusal is a failed entry in the
+  // summary, so the caller's tool result carries it back to the
+  // model; it is never a silent skip. Nothing is snapshotted for a
+  // refused file, and no revert bar appears when nothing was written.
+  const refused = [];
+  const allowed = [];
+  for (const c of (changes || [])) {
+    if (/\.(prefab|unity)$/i.test(c.path || '')) refused.push(c);
+    else allowed.push(c);
+  }
+  const refusalErrors = refused.map(c => c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead.');
+  if (!allowed.length) {
+    const bar0 = document.getElementById('apply-bar');
+    if (bar0) bar0.remove();
+    if (refused.length) showToast(`⚠ ${refused.length} file${refused.length > 1 ? 's' : ''} not written — Unity writes prefabs and scenes itself (use a unity-command block)`);
+    return { written: 0, failed: refused.length, errors: refusalErrors, snapshotId: null, label: (changes || []).map(c => c.path.split(/[\/]/).pop()).join(', ') };
+  }
+  changes = allowed;
+
   const bar = document.getElementById('apply-bar');
   if (bar) {
     const btn = bar.querySelector('.btn-teal');
@@ -5005,8 +5107,8 @@ async function applyFileChanges(changes) {
   }
 
   let written = 0;
-  let failed = 0;
-  const errors = [];
+  let failed = refused.length;
+  const errors = refusalErrors.slice();
 
   for (const change of changes) {
     const fullPath = resolvePath(change.path);
@@ -5028,7 +5130,9 @@ async function applyFileChanges(changes) {
   }
 
   // ── Step 4: Show revert bar ──────────────────────────────────────
-  showRevertBar(snapshotId, label, backedUp.length, newFiles.length);
+  // Only when something was actually written — a set that was
+  // refused in full returns before any snapshot exists.
+  if (written > 0) showRevertBar(snapshotId, label, backedUp.length, newFiles.length);
   // The new snapshot should appear in the sidebar straight away,
   // so it can be reverted from there even after this bar is gone.
   refreshSidebar().catch(() => {});

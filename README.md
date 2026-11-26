@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.8.4-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.9.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -36,7 +36,7 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 - **Error diagnosis** — paste a Unity console error or log and get a plain-language explanation, the likely file and line, and the smallest fix to try first.
 - **Animator + UI generation** — ask the model to generate Editor scripts that build an Animator Controller or a UI Canvas in Unity.
 - **Asset moves that preserve GUIDs** — moving a file through CodeFox moves its `.meta` file with it.
-- **Unity integration** — includes an Editor companion script that auto-refreshes Unity's AssetDatabase when files change, and can execute commands (refresh, create an Animator Controller, create a UI Canvas) written to `Assets/.codefox-command.json`.
+- **Unity integration** — includes an Editor companion script that auto-refreshes Unity's AssetDatabase when files change, and can execute commands (refresh, create an Animator Controller, create a UI Canvas, and — since v0.9.0 — create and change prefabs, and list/describe the component types in your Unity install) written to `Assets/.codefox-command.json`.
 
 ---
 
@@ -174,7 +174,7 @@ Click **▶ Execute plan** — CodeFox creates a dedicated thread, sends the pla
 
 ### Apply + Revert
 - **Apply** — writes files to disk (creating parent folders as needed), triggers Unity refresh (if configured), saves a snapshot
-- **Auto-apply for new Unity assets** — when the assistant creates a NEW Unity-native file (a prefab, scene, material, animation, controller, or similar — a file that contains no code), CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. A simple "make me a prefab" request finishes in one turn. Code files (.cs, .shader, .js, .ts) and edits to files that already exist still show the Apply bar first, unless auto-accept is on. If the change set is mixed — any code file, or any edit to an existing file — the whole set asks first; auto-apply never writes half a set. Turn it off in Settings → Advanced → "Auto-apply new Unity asset files" (`auto_apply_unity_assets`, default on).
+- **Auto-apply for new Unity assets** — when the assistant creates a NEW Unity-native file (a material, animation, controller, or similar — a file that contains no code), CodeFox writes it straight away after taking a snapshot, without asking you to click Apply. Code files (.cs, .shader, .js, .ts) and edits to files that already exist still show the Apply bar first, unless auto-accept is on. If the change set is mixed — any code file, or any edit to an existing file — the whole set asks first; auto-apply never writes half a set. Turn it off in Settings → Advanced → "Auto-apply new Unity asset files" (`auto_apply_unity_assets`, default on). Prefabs and scenes are never written by hand: the assistant creates and changes them through the Unity bridge (```unity-command blocks), and Unity writes the files itself — see "Unity integration" below.
 - **Review diff** — shows added/removed/unchanged lines per file before you apply
 - **Revert** — restores all modified files from the snapshot, and deletes files that were newly created by the apply. Triggers Unity refresh. The revert bar appears after EVERY apply — manual Apply, auto-accept, or auto-apply — and stays there until you click Revert or Keep. It never auto-dismisses, and a new chat message does not replace it.
 - **Keep changes** — an explicit click that discards the snapshot, so the change can no longer be reverted. Nothing discards a snapshot automatically: not closing the app, not starting a new conversation. Only a Keep click does.
@@ -196,7 +196,7 @@ In **Agent** mode only (Ask and Plan never loop), CodeFox runs a loop after each
 - Safe auto-approved commands run automatically in Auto Mode.
 - Dangerous commands always ask: `rm`, `del`, `Remove-Item`, `format`, `rm -rf`, `rmdir /s`, `rd /s`, `Remove-Item -Recurse` — even in Auto Mode, even if they match an auto-approved prefix.
 - Package installs and removals always ask — even in Auto Mode, even with auto-accept on. There is no way to auto-approve them.
-- New Unity asset files (prefabs, scenes, materials…) are written automatically after a snapshot — revert is always available afterwards.
+- New Unity asset files (materials, animations…) are written automatically after a snapshot — revert is always available afterwards. Prefabs and scenes are built by Unity itself through the bridge, never written by hand.
 - File changes ask unless auto-accept is on (and are snapshotted first either way).
 - Nothing runs while the shell is off, and no package is installed while no project folder is set.
 
@@ -314,6 +314,8 @@ Unity compiles it automatically. It watches for file changes from CodeFox and ca
 
 It also watches `Assets/.codefox-command.json`. When a command file appears, the bridge executes it, writes the result to `Assets/.codefox-result.json`, and deletes the command file. Supported actions: `refresh`, `createAnimatorController`, and `createUICanvas` (see the comments at the top of `CodeFoxBridge.cs` for the JSON format).
 
+**Prefabs are built by Unity, never hand-written.** Asking for a prefab used to mean the model wrote `.prefab` YAML by hand — and it invented things doing that: a made-up script guid, a YAML node literally named `Image:` (Unity: "Unknown type 'Image'"), Button fields on an Image, and no CanvasRenderer. Since v0.9.0 the file writer refuses `.prefab` and `.unity` writes outright, and the assistant creates and changes prefabs with ```unity-command blocks instead: `createPrefab` builds a GameObject tree with Unity's own `AddComponent` (the bridge resolves each component type by reflection over the loaded assemblies, sets properties from JSON, adds a CanvasRenderer when a Graphic needs one, and saves with `PrefabUtility.SaveAsPrefabAsset`); `modifyPrefab` adds, removes, or sets properties on a prefab that already exists; `listComponentTypes` lists every component type this Unity install actually has; `describeComponent` lists what can be set on one. If the assistant does not know whether a component exists or what it accepts, it asks Unity first — it never guesses a type name, a property name, or a script guid. A ScrollRect, for example, is added with its required structure (ScrollRect on the object, a Viewport child with RectMask2D + Image, a Content child under it, `viewport`/`content` set to those children by name). The bridge commands run through the Agent loop like any other tool: the result comes back as a tool result, so an unknown type is a cue to ask the catalogue, not to work around it.
+
 Menu items added in Unity: **CodeFox > Refresh**, **CodeFox > Run EditMode Tests** (opens the Test Runner), **CodeFox > Open Project Folder**.
 
 ---
@@ -374,7 +376,7 @@ Per-ruleset enabled toggles and priorities (higher = sent first), a **prompt bud
 
 - **Shell Tool** — off by default. When off, no command can run from the app at all and the rest of the section is greyed out. When on, CodeFox runs PowerShell commands (PowerShell on Windows, the system shell elsewhere) in the project folder, with a 60-second timeout.
 - **Auto Mode** — when on, commands that match your auto-approved list run automatically. Everything else asks first, via a Run / Dismiss bar under the assistant's reply.
-- **Approvals** — **Auto-accept project changes** keeps project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo. **Auto-apply new Unity asset files** (`auto_apply_unity_assets`, default on) writes new Unity-native files (prefabs, scenes, materials…) straight away after a snapshot, without an Apply click; code files and edits to existing files still ask first.
+- **Approvals** — **Auto-accept project changes** keeps project changes automatically when the assistant finishes a response. Changes are still snapshotted first, and the revert bar is always shown so you can undo. **Auto-apply new Unity asset files** (`auto_apply_unity_assets`, default on) writes new Unity-native files (materials, animations…) straight away after a snapshot, without an Apply click; code files and edits to existing files still ask first. Prefabs and scenes are never written by hand — Unity builds those itself through the bridge.
 - **Auto-approved commands** — editable list of command prefixes (defaults: `git status`, `git diff`, `npm test`, `npm run test`, `dotnet build`, `dotnet test`).
 - **Excluded File Types** — file types hidden from project scans and file search (defaults include `meta`, `mat`, `anim`, `controller`, `png`, `jpg`, `asset`, `package-lock.json`, and more), with Add and Restore default.
 - **Run a command** — a manual input + Run button + output area to test the shell tool directly.

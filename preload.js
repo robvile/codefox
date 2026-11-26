@@ -187,6 +187,10 @@ contextBridge.exposeInMainWorld('rb', {
     listPackages: (projectPath) => ipcRenderer.invoke('unity:listPackages', projectPath),
     addPackage: (payload) => ipcRenderer.invoke('unity:addPackage', payload || {}),
     removePackage: (payload) => ipcRenderer.invoke('unity:removePackage', payload || {}),
+    // Run one command through the Unity bridge (v0.9.0) — prefabs
+    // are created and changed in Unity itself, never by writing
+    // .prefab YAML by hand. See unity-command.js.
+    runCommand: (payload) => ipcRenderer.invoke('unity:command', payload || {}),
   },
   shell: {
     run: (payload) => ipcRenderer.invoke('shell:run', payload || {}),

@@ -5,6 +5,7 @@ const http = require('http');
 const { spawn, execFile } = require('child_process');
 const upm = require('./upm-manifest');
 const unityBridge = require('./unity-bridge');
+const unityCommand = require('./unity-command');
 const comfyui = require('./comfyui');
 // Static data the renderer needs (v0.6.4) — see 'app:staticData'
 // below. The main process is plain Node and can require these;
@@ -1120,6 +1121,17 @@ function updateManifest(projectPath, mutator) {
 ipcMain.handle('unity:refresh', async (_, projectPath) => {
   // Touches a sentinel file that the Unity Editor script watches
   return writeRefreshTrigger(projectPath);
+});
+
+// Run one command through the Unity bridge (v0.9.0): the bridge
+// polls Assets/.codefox-command.json and answers in
+// Assets/.codefox-result.json. The runner (unity-command.js) owns
+// the missing-bridge check, the 60-second wait, and the plain
+// failure messages — this handler only picks the project folder.
+ipcMain.handle('unity:command', async (_, payload) => {
+  const root = (payload && payload.projectPath) || readSetting('project_path', '');
+  const command = payload && payload.command;
+  return unityCommand.runUnityCommand(root, command);
 });
 
 // Copies the bundled companion script into the project's Assets/Editor

@@ -78,4 +78,39 @@ function revertBackupFile(backup, sentinel, fs) {
   } catch (e) { return null; }
 }
 
-module.exports = { UNITY_ASSET_EXTS, extOf, isUnityAssetPath, isAutoApplyAssetSet, revertBackupFile };
+// Files Unity itself owns and CodeFox must never hand-write
+// (v0.9.0): prefabs and scenes are created and changed through the
+// Unity bridge (```unity-command blocks: createPrefab /
+// modifyPrefab), never by writing YAML — hand-writing them is how
+// the model invented a script guid, a YAML node literally named
+// "Image:", and Button fields on an Image. app.js applyFileChanges
+// refuses these files with handWrittenUnityRefusal below; the
+// refusal is a failed entry in its summary, so the caller's tool
+// result carries it back to the model — never a silent skip.
+const HAND_WRITTEN_UNITY_EXTS = ['.prefab', '.unity'];
+
+function isHandWrittenUnityFile(p) {
+  return HAND_WRITTEN_UNITY_EXTS.indexOf(extOf(p)) !== -1;
+}
+
+// Split a change set into the files applyFileChanges may write and
+// the ones it must refuse (Unity writes those itself through the
+// bridge). Returns { allowed, refused }.
+function partitionHandWrittenUnityFiles(changes) {
+  const allowed = [];
+  const refused = [];
+  for (const c of (changes || [])) {
+    if (c && isHandWrittenUnityFile(c.path)) refused.push(c);
+    else allowed.push(c);
+  }
+  return { allowed, refused };
+}
+
+// The refusal text applyFileChanges returns for a refused file —
+// it names the file and tells the model, in plain words, what to
+// do instead.
+function handWrittenUnityRefusal(filePath) {
+  return filePath + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead.';
+}
+
+module.exports = { UNITY_ASSET_EXTS, HAND_WRITTEN_UNITY_EXTS, extOf, isUnityAssetPath, isAutoApplyAssetSet, revertBackupFile, isHandWrittenUnityFile, partitionHandWrittenUnityFiles, handWrittenUnityRefusal };

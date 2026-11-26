@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.8.4.
+// 2. package.json version is 0.9.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.8.4', pkg.version === '0.8.4', 'got ' + pkg.version);
-check('sidebar footer shows 0.8.4', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.4 — Local'));
+check('package.json version is 0.9.0', pkg.version === '0.9.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.9.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.5.2 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.5.2') && bridgeCs.includes('BridgeVersion = "0.5.2"'));
-check('embedded bridge has the 0.5.2 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.5.2'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.5.2',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.5.2');
+check('bridge .cs has the 0.9.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.9.0') && bridgeCs.includes('BridgeVersion = "0.9.0"'));
+check('embedded bridge has the 0.9.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.9.0');
 check('unity-bridge.js has version helpers',
   typeof bridge.getInstalledBridgeVersion === 'function'
   && typeof bridge.isBridgeUpdateAvailable === 'function'
@@ -479,9 +479,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.5.2' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.5.2 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.5.2');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.9.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.9.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -1869,6 +1869,71 @@ check('Available only defaults ON, is persisted, and Clear resets to it',
 check('CHANGELOG has the 0.8.4 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.4 — 2026-11-25'));
 
+// 29. v0.9.0 — Unity builds prefabs through the bridge; the model
+// never hand-writes .prefab / .unity YAML again. Rob's imagecontainer
+// prefab is the proof: the model invented a script guid, a YAML node
+// literally named "Image:", Button fields on an Image, and no
+// CanvasRenderer. Unity writes those files itself now, and the file
+// writer refuses .prefab / .unity writes outright.
+check('bridge .cs has the four v0.9.0 actions',
+  bridgeCs.includes('case "createPrefab":') && bridgeCs.includes('case "modifyPrefab":')
+  && bridgeCs.includes('case "listComponentTypes":') && bridgeCs.includes('case "describeComponent":'));
+check('bridge .cs builds prefabs through Unity APIs, never YAML',
+  bridgeCs.includes('PrefabUtility.SaveAsPrefabAsset') && bridgeCs.includes('PrefabUtility.LoadPrefabContents')
+  && bridgeCs.includes('PrefabUtility.UnloadPrefabContents') && bridgeCs.includes('AddComponent(type)')
+  && bridgeCs.includes('ResolveComponentType') && bridgeCs.includes('GetComponent<CanvasRenderer>'));
+check('embedded bridge has the four v0.9.0 actions',
+  bridgeSrc.BRIDGE_SOURCE.includes('case "createPrefab":')
+  && bridgeSrc.BRIDGE_SOURCE.includes('case "modifyPrefab":')
+  && bridgeSrc.BRIDGE_SOURCE.includes('case "listComponentTypes":')
+  && bridgeSrc.BRIDGE_SOURCE.includes('case "describeComponent":'));
+check('main.js has unity:command IPC backed by unity-command.js',
+  mainJs.includes("ipcMain.handle('unity:command'") && mainJs.includes("require('./unity-command')")
+  && mainJs.includes('runUnityCommand'));
+check('preload.js exposes rb.unity.runCommand',
+  preloadJs.includes('runCommand') && preloadJs.includes("ipcRenderer.invoke('unity:command'"));
+check('package.json build.files includes unity-command.js',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('unity-command.js'));
+check('app.js parses unity-command blocks and runs them in the agent loop',
+  appJs.includes('parseUnityCommandBlocks') && appJs.includes("type: 'unity-command'")
+  && appJs.includes('rb.unity.runCommand') && appJs.includes('Unity command'));
+check('applyFileChanges refuses .prefab/.unity with the unity-command wording',
+  appJs.includes('does not write .prefab or .unity files by hand')
+  && appJs.includes('unity-command block (createPrefab')
+  && appJs.includes('snapshotId: null'));
+check('system prompt has the Unity bridge-command section and the never-guess rule',
+  appJs.includes('Unity — prefabs and components')
+  && appJs.includes('Never hand-write .prefab or .unity files')
+  && appJs.includes('listComponentTypes / describeComponent')
+  && appJs.includes('never guess a type name, a property name, or a script guid')
+  && appJs.includes('TextMeshProUGUI') && appJs.includes('ScrollRect'));
+check('README documents the bridge-command prefab workflow and the Unity-writes-prefabs rule',
+  readme.includes('Prefabs are built by Unity, never hand-written')
+  && readme.includes('createPrefab') && readme.includes('modifyPrefab')
+  && readme.includes('listComponentTypes') && readme.includes('describeComponent'));
+check('CHANGELOG has the 0.9.0 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.0 — 2026-11-26'));
+// Functional: the refusal predicate (unity-assets.js) refuses
+// .prefab/.unity and accepts .cs/.mat, and the refusal names the
+// file and points at the unity-command block.
+check('refusal: .prefab and .unity refused, .cs and .mat accepted',
+  assets.isHandWrittenUnityFile('Assets/Prefabs/X.prefab')
+  && assets.isHandWrittenUnityFile('Assets/Scenes/Main.unity')
+  && assets.isHandWrittenUnityFile('Assets/Prefabs/Y.PREFAB')
+  && !assets.isHandWrittenUnityFile('Assets/Scripts/Player.cs')
+  && !assets.isHandWrittenUnityFile('Assets/Mats/Red.mat'));
+check('refusal: partition splits a mixed set, refusal names the file and the unity-command block',
+  (() => {
+    const p = assets.partitionHandWrittenUnityFiles([
+      { path: 'Assets/Prefabs/X.prefab' }, { path: 'Assets/Scenes/Main.unity' },
+      { path: 'Assets/Scripts/Player.cs' }, { path: 'Assets/Mats/Red.mat' },
+    ]);
+    const r = assets.handWrittenUnityRefusal('Assets/Prefabs/X.prefab');
+    return p.refused.length === 2 && p.allowed.length === 2
+      && p.refused.every(c => /\.prefab$|\.unity$/.test(c.path))
+      && r.includes('Assets/Prefabs/X.prefab') && r.includes('unity-command block (createPrefab');
+  })());
+
 // v0.8.3 — tuned LM Studio model loading. The defaults are global:
 // one object, no per-model table, and the load body is built only
 // from it, so no model can silently drop a setting.
@@ -2147,6 +2212,65 @@ const mockServer = http.createServer((req, res) => {
       appJs.includes('s-lm-context') && appJs.includes('Loaded context: ')
       && appJs.includes('function updateLoadedContextLine')
       && mainJs.includes('loadedContextLength') && mainJs.includes('loadState') && mainJs.includes("'not-loaded'"));
+  }
+  // v0.9.0 — unity:command runner: writes the command file, parses
+  // the result file, plain failures for a missing bridge, a timeout,
+  // and a malformed result. The stub fs pretends to be the bridge:
+  // when the command file is written, the result file appears.
+  {
+    const unityCommand = require(path.join(root, 'unity-command.js'));
+    const proj = path.join(os.tmpdir(), 'codefox-unity-cmd-proj');
+    const cmdPath = path.join(proj, 'Assets', '.codefox-command.json');
+    const resPath = path.join(proj, 'Assets', '.codefox-result.json');
+    const makeStubFs = (onCommand) => {
+      const files = new Map();
+      return {
+        files,
+        existsSync: (p) => files.has(p),
+        writeFileSync: (p, c) => { files.set(p, c); if (p === cmdPath && onCommand) onCommand(files); },
+        readFileSync: (p) => files.get(p),
+        unlinkSync: (p) => { files.delete(p); },
+      };
+    };
+    const noSleep = async () => {};
+    // (a) Happy path: command written, result parsed, result file consumed.
+    const stubOk = makeStubFs((files) => {
+      files.set(resPath, JSON.stringify({ ok: true, message: 'Prefab created.', path: 'Assets/Prefabs/ImageContainer.prefab' }));
+    });
+    const okRes = await unityCommand.runUnityCommand(proj, { action: 'createPrefab', name: 'ImageContainer' },
+      { fs: stubOk, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
+    const writtenCmd = JSON.parse(stubOk.files.get(cmdPath) || '{}');
+    check('unity:command writes the command file and returns the parsed result',
+      okRes.ok === true && okRes.message === 'Prefab created.' && okRes.path === 'Assets/Prefabs/ImageContainer.prefab'
+      && writtenCmd.action === 'createPrefab' && writtenCmd.name === 'ImageContainer'
+      && !stubOk.files.has(resPath));
+    // (b) A bridge failure comes back as a plain error.
+    const stubFail = makeStubFs((files) => {
+      files.set(resPath, JSON.stringify({ ok: false, message: "Unknown component type 'Nope'. Use listComponentTypes to see what this Unity install has." }));
+    });
+    const failRes = await unityCommand.runUnityCommand(proj, { action: 'createPrefab', name: 'X' },
+      { fs: stubFail, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
+    check('unity:command returns a bridge failure as a plain error',
+      failRes.ok === false && /Unknown component type 'Nope'/.test(failRes.error || ''));
+    // (c) Timeout: no result file ever appears.
+    const stubQuiet = makeStubFs(null);
+    const timeoutRes = await unityCommand.runUnityCommand(proj, { action: 'listComponentTypes' },
+      { fs: stubQuiet, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 10, pollMs: 1 });
+    check('unity:command timeout returns the plain "Unity did not answer" message',
+      timeoutRes.ok === false && /did not answer in 60 seconds/.test(timeoutRes.error || ''));
+    // (d) Malformed result JSON.
+    const stubBad = makeStubFs((files) => { files.set(resPath, 'this is not json{'); });
+    const badRes = await unityCommand.runUnityCommand(proj, { action: 'refresh' },
+      { fs: stubBad, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
+    check('unity:command malformed result returns a plain unreadable-result error',
+      badRes.ok === false && /could not read/.test(badRes.error || ''));
+    // (e) Missing bridge: the install hint, before any file is touched.
+    const stubNone = makeStubFs(null);
+    const missingRes = await unityCommand.runUnityCommand(proj, { action: 'refresh' },
+      { fs: stubNone, bridgeInstalled: () => false, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
+    check('unity:command with no bridge returns the install hint and writes nothing',
+      missingRes.ok === false && /not installed in this project/.test(missingRes.error || '')
+      && /install it in Settings/.test(missingRes.error || '') && !stubNone.files.has(cmdPath));
   }
   // Bulk approve: run the REAL approveAllComfyuiWorkflows from
   // app.js (extracted by brace matching, not a copy) against a

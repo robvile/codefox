@@ -1,6 +1,6 @@
 {
   "name": "codefox",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
@@ -42,6 +42,7 @@
       "mcp-presets.js",
       "unity-bridge.js",
       "unity-bridge-source.js",
+      "unity-command.js",
       "unity-companion/**/*",
       "node_modules/**/*",
       "build/icon.png",
