@@ -170,9 +170,16 @@ contextBridge.exposeInMainWorld('rb', {
     chat: (payload) => ipcRenderer.invoke('llm:chat', payload),
     onChunk: (cb) => ipcRenderer.on('llm:stream-chunk', (_, chunk) => cb(chunk)),
     onDone: (cb) => ipcRenderer.on('llm:stream-done', () => cb()),
+    // v0.19.0: the server's numbers for the calibrated counter —
+    // usage.prompt_tokens and finish_reason, sent once per stream
+    // by the main process (see lmStudioChat / ollamaChat). Absent
+    // when the server does not report them; the renderer then
+    // estimates and never invents a number.
+    onMeta: (cb) => ipcRenderer.on('llm:stream-meta', (_, meta) => cb(meta)),
     removeListeners: () => {
       ipcRenderer.removeAllListeners('llm:stream-chunk');
       ipcRenderer.removeAllListeners('llm:stream-done');
+      ipcRenderer.removeAllListeners('llm:stream-meta');
       ipcRenderer.removeAllListeners('ollama:stream-chunk');
       ipcRenderer.removeAllListeners('ollama:stream-done');
     }

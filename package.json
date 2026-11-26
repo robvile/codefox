@@ -1,6 +1,6 @@
 {
   "name": "codefox",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
@@ -58,6 +58,7 @@
       "git-backup.js",
       "file-tools.js",
       "log-triage.js",
+      "context-budget.js",
       "skill-files.js",
       "skills/**/*",
       "eval/**/*",

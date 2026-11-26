@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'context-budget.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.18.0.
+// 2. package.json version is 0.19.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.18.0', pkg.version === '0.18.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.18.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.18.0 — Local'));
+check('package.json version is 0.19.0', pkg.version === '0.19.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.19.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.19.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2925,7 +2925,7 @@ check('bridge version pins are 0.15.0 everywhere (MIN_TRANSPORT_VERSION stays 0.
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.18.0')
+  && readme.includes('readConsole') && readme.includes('version-0.19.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3255,7 +3255,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.18.0', readme.includes('version-0.18.0'));
+check('README badge reads 0.19.0', readme.includes('version-0.19.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3904,17 +3904,18 @@ if (promptSrc) {
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
     && bridgeCs.includes('// CodeFoxBridge version: 0.15.0'));
 
-  // Version pins and packaging for 0.18.0.
+  // Version pins and packaging for 0.19.0.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.18.0 and build.files includes the three split modules',
-    pkg.version === '0.18.0'
+  check('package.json is 0.19.0 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.19.0'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
-    && pkg.build.files.includes('comfyui-scan.js'));
-  check('index.html footer, README badge, and CHANGELOG have the 0.18.0 entry',
-    indexHtml.includes('CodeFox 0.18.0 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.18.0-blue')
-    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.18.0 — 2026-11-26'));
+    && pkg.build.files.includes('comfyui-scan.js')
+    && pkg.build.files.includes('context-budget.js'));
+  check('index.html footer, README badge, and CHANGELOG have the 0.19.0 entry',
+    indexHtml.includes('CodeFox 0.19.0 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.19.0-blue')
+    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.19.0 — 2026-11-26'));
 }
 
 // 42. v0.18.0 — the eval harness: YAML tasks, programmatic
@@ -4116,6 +4117,189 @@ if (promptSrc) {
   check('eval: auto-accept is per-task — on for auto, off for deny',
     driverJs.includes("state.autoAcceptChanges = (policy === 'auto')"));
 }
+
+// 43. v0.19.0 — context budgeting: calibrated counting, the
+// elide/summarize/drop triggers, the deterministic ledger and
+// project map, prefix-cache-aware batch compaction, the meter,
+// and the wiring at every model call site. Bridge unchanged at
+// 0.15.0.
+const CB = require('../context-budget');
+const cbMsg = (role, content) => ({ role, content });
+check('context-budget: estimateTokens divides by the ratio', CB.estimateTokens('hello world', 3) === 4 && CB.estimateTokens('x'.repeat(9000), 3) === 3000);
+check('context-budget: calibrateCharsPerToken blends toward the observed ratio and clamps [2,6]',
+  CB.calibrateCharsPerToken(3, [{ chars: 4000, actualTokens: 1000 }]) === 3.5
+  // The observed ratio is clamped to [2,6] BEFORE blending, so a
+  // wild reading can only pull the running value halfway to the
+  // clamp: 100/1000 = 0.1 → 2 → (3+2)/2 = 2.5; 12 → 6 → 4.5.
+  && CB.calibrateCharsPerToken(3, [{ chars: 100, actualTokens: 1000 }]) === 2.5
+  && CB.calibrateCharsPerToken(3, [{ chars: 12000, actualTokens: 1000 }]) === 4.5
+  && CB.calibrateCharsPerToken(3, []) === 3);
+check('context-budget: outputReserveFor is the configured max, capped at half the window',
+  CB.outputReserveFor(4096, 16384) === 4096 && CB.outputReserveFor(4096, null) === 4096
+  && CB.outputReserveFor(8192, 8192) === 4096);
+check('context-budget: result caps scale with the window (600 @ 8k, 2000 @ 32k)',
+  CB.capResultTokens(8192) === 600 && CB.capResultTokens(32768) === 2000
+  && CB.capResultTokens(16384) > 600 && CB.capResultTokens(16384) < 2000);
+check('context-budget: triggers are none/elide/summarize/drop at u 0.5/0.65/0.8/0.95 (0.9 itself is still summarize — drop needs u > 0.9)',
+  CB.compactionAction(0.5) === 'none' && CB.compactionAction(0.65) === 'elide'
+  && CB.compactionAction(0.8) === 'summarize' && CB.compactionAction(0.95) === 'drop'
+  && CB.compactionAction(0.6) === 'elide' && CB.compactionAction(0.75) === 'summarize' && CB.compactionAction(0.9) === 'summarize');
+// isElidableToolResult / elideToolResult take the result TEXT,
+// not the message object (compactHistory passes .content).
+check('context-budget: isElidableToolResult — reads yes, writes/failed no',
+  CB.isElidableToolResult('Tool result — Unity command "readConsole": ok')
+  && CB.isElidableToolResult('View Assets/Scripts/Player.cs — lines 1–20 of 40:')
+  && CB.isElidableToolResult('Compile check: compile clean')
+  && !CB.isElidableToolResult('Tool result — Unity command "set_property": ok')
+  && !CB.isElidableToolResult('Tool result — Unity command "readConsole": failed')
+  && !CB.isElidableToolResult('please continue'));
+check('context-budget: elideToolResult keeps the first line plus a re-run stub',
+  CB.elideToolResult('Tool result — Unity command "readConsole": 12 entries\nline two\nline three').includes('[elided')
+  && CB.elideToolResult('Tool result — Unity command "readConsole": 12 entries\nline two\nline three').startsWith('Tool result — Unity command "readConsole": 12 entries')
+  && CB.elideToolResult('short') === 'short [elided — 5 chars, re-run to see]');
+check('context-budget: groupMessages keeps turns atomic and system messages singleton',
+  (() => {
+    const groups = CB.groupMessages([
+      cbMsg('system', 'you are codefox'),
+      cbMsg('user', 'make a player'),
+      cbMsg('assistant', '```file\n{"path":"Player.cs"}```'),
+      cbMsg('user', 'Tool result — File Player.cs: written'),
+      cbMsg('user', 'now add health'),
+      cbMsg('assistant', 'done'),
+    ]);
+    // 3 groups: the system singleton, turn 1 (user + assistant +
+    // its tool result), turn 2 (user + assistant).
+    return groups.length === 3 && groups[0].kind === 'system' && groups[1].messages.length === 3
+      && groups[2].messages.length === 2;
+  })());
+check('context-budget: buildMutationLedger is deterministic, from assistant output only',
+  (() => {
+    const ledger = CB.buildMutationLedger([
+      cbMsg('user', '**File Path:** `Assets/Scripts/UserSaid.cs`'),
+      cbMsg('assistant', '**File Path:** `Assets/Scripts/Player.cs`\n```unity-command\n{"action":"set_property","path":"Player","property":"m_Mass"}```'),
+      cbMsg('assistant', 'I also made Assets/Scripts/NotCounted.cs in prose — not a file block.'),
+    ]);
+    return ledger.entries.length === 2 && ledger.entries[0].includes('Player.cs') && ledger.entries[1].includes('set_property');
+  })());
+check('context-budget: buildWorkingMemoryNote carries goal, done, and failed approaches',
+  (() => {
+    const note = CB.buildWorkingMemoryNote([
+      { messages: [cbMsg('user', 'add a player controller'), cbMsg('assistant', '**File Path:** `Player.cs`')] },
+      // Tool results are role "user" in the transcript — that is
+      // what isToolResultMessage matches on.
+      { messages: [cbMsg('user', 'that broke the build'), cbMsg('user', 'Tool result — Unity command "recompile_and_report_errors": failed: CS1002')] },
+    ]);
+    return note.includes('Goal: add a player controller') && note.includes('Player.cs')
+      && note.includes('Failed approaches') && note.includes('CS1002');
+  })());
+check('context-budget: compactHistory summarizes a long history and keeps the newest turns',
+  (() => {
+    const msgs = [];
+    for (let t = 0; t < 6; t++) {
+      msgs.push(cbMsg('user', 'do thing ' + t + ' ' + 'x'.repeat(200)));
+      msgs.push(cbMsg('assistant', 'reply ' + t + ' ' + 'y'.repeat(2000)));
+      msgs.push(cbMsg('user', 'Tool result — Unity command "readConsole": ' + 'z'.repeat(3000)));
+    }
+    const res = CB.compactHistory(msgs, { loadedContext: 8192, outputReserve: 1024, promptTokens: 1000 });
+    return res.action === 'summarize' && res.messages.length < msgs.length
+      && res.messages.some(m => m.content.includes('[Context note'))
+      && res.messages.slice(-3).some(m => m.content.includes('do thing 5'))
+      && res.log.groupsSummarized > 0 && res.log.resultsElided > 0;
+  })());
+check('context-budget: compactHistory never splits a tool call from its result, and never drops system messages',
+  (() => {
+    // Four big turns: the oldest two are compactable, the newest
+    // two are protected. A summarized turn is replaced as a whole
+    // by the note — its ```file block and its tool result leave
+    // together, so in the output either both are present (the turn
+    // survived) or neither is (it was summarized).
+    const msgs = [cbMsg('system', 'you are codefox')];
+    for (let t = 0; t < 4; t++) {
+      msgs.push(cbMsg('user', 'make thing ' + t));
+      msgs.push(cbMsg('assistant', '```file\n{"path":"Thing' + t + '.cs"}```\n' + 'x'.repeat(3000)));
+      msgs.push(cbMsg('user', 'Tool result — File Thing' + t + '.cs: written'));
+    }
+    const res = CB.compactHistory(msgs, { loadedContext: 4096, outputReserve: 512, promptTokens: 500 });
+    const text = res.messages.map(m => m.content).join('\n');
+    const hasCall = text.includes('```file');
+    const hasResult = text.includes('Tool result — File');
+    return res.messages[0].role === 'system' && hasCall === hasResult
+      && res.log.groupsSummarized >= 1 && res.messages.some(m => m.content.includes('[Context note'));
+  })());
+check('context-budget: compactHistory reports floorHit when only protected turns remain',
+  (() => {
+    const msgs = [];
+    for (let t = 0; t < 10; t++) {
+      msgs.push(cbMsg('user', 'q' + t + ' ' + 'x'.repeat(500)));
+      msgs.push(cbMsg('assistant', 'a' + t + ' ' + 'y'.repeat(8000)));
+    }
+    const res = CB.compactHistory(msgs, { loadedContext: 8192, outputReserve: 1024, promptTokens: 1000 });
+    return res.log.floorHit === true && res.messages.length >= 4
+      && res.messages[res.messages.length - 1].content.includes('a9');
+  })());
+check('context-budget: buildProjectMap detects URP + new Input System, caps at 1500 tokens',
+  (() => {
+    const map = CB.buildProjectMap({
+      unityVersion: '6000.3.9f1',
+      packages: { 'com.unity.render-pipelines.universal': '17.0.0', 'com.unity.inputsystem': '1.7.0' },
+      tree: { Assets: 120 },
+      scripts: ['Assets/Scripts/Player.cs'],
+      scriptCount: 1,
+      scenes: [{ path: 'Assets/Scenes/Main.unity', gameObjects: ['Player'] }],
+      prefabs: [{ path: 'Assets/Prefabs/Enemy.prefab' }],
+    });
+    // The cap only bites when the rendered map exceeds ~4500
+    // chars, so the big map uses long paths: 60 of them at ~90
+    // chars each would blow past the cap, and the list shrinks
+    // until it fits.
+    const big = CB.buildProjectMap({
+      unityVersion: '6000.3.9f1', packages: {}, tree: {},
+      scripts: Array.from({ length: 500 }, (_, i) => 'Assets/Scripts/Module01234567890123456789/DeeplyNestedScriptName01234567890123456789_' + i + '.cs'),
+      scriptCount: 500, scenes: [], prefabs: [],
+    });
+    return map.text.includes('Unity 6000.3.9f1') && map.text.includes('Render pipeline: URP')
+      && map.text.includes('new Input System') && map.pipeline === 'URP'
+      && CB.estimateTokens(big.text, 3) <= 1500 && big.truncated === true && big.scripts.length < 60;
+  })());
+check('context-budget: diffProjectMap reports added/removed scripts and package changes',
+  (() => {
+    const a = CB.buildProjectMap({ unityVersion: '1', packages: { 'com.unity.inputsystem': '1.7.0' }, tree: {}, scripts: ['A.cs'], scriptCount: 1, scenes: [], prefabs: [] });
+    const b = CB.buildProjectMap({ unityVersion: '2', packages: { 'com.unity.inputsystem': '1.8.0' }, tree: {}, scripts: ['A.cs', 'B.cs'], scriptCount: 2, scenes: [], prefabs: [] });
+    const d = CB.diffProjectMap(a, b);
+    return d.lines.some(l => l.includes('+') && l.includes('B.cs'))
+      && d.lines.some(l => l.includes('com.unity.inputsystem') && l.includes('1.8.0'))
+      && d.lines.some(l => l.includes('Unity version'));
+  })());
+check('context-budget: meterSegments splits the window and sums to the loaded context',
+  (() => {
+    const m = CB.meterSegments({ systemTokens: 1200, mapTokens: 800, historyTokens: 3000, resultTokens: 1800, loadedContext: 16384, outputReserve: 4096 });
+    const total = m.segments.reduce((s, x) => s + x.tokens, 0);
+    return m.used === 9096 && m.free === 7288 && total === 16384 && m.known === true
+      && m.segments.find(s => s.key === 'results').tokens === 1800;
+  })());
+check('context-budget: parseStreamMeta reads LM Studio usage and Ollama done counts, nulls otherwise',
+  (() => {
+    const lm = CB.parseStreamMeta({ usage: { prompt_tokens: 1234 }, choices: [{ finish_reason: 'stop' }] });
+    const ol = CB.parseStreamMeta({ prompt_eval_count: 99, done_reason: 'length', done: true });
+    const none = CB.parseStreamMeta({ choices: [{ delta: { content: 'hi' } }] });
+    return lm.promptTokens === 1234 && lm.finishReason === 'stop'
+      && ol.promptTokens === 99 && ol.finishReason === 'length'
+      && none.promptTokens === null && none.finishReason === null;
+  })());
+check('context-budget wiring: every model call goes through messagesForModel; stream meta flows main → preload → renderer',
+  appJs.includes('messagesForModel(systemPrompt)') && appJs.includes('messagesForModel(loopState.systemPrompt)')
+  && (appJs.match(/messagesForModel\(/g) || []).length >= 4
+  && mainJs.includes("stream_options: { include_usage: true }") && mainJs.includes("event.sender.send('llm:stream-meta'")
+  && fs.readFileSync(path.join(root, 'preload.js'), 'utf8').includes('onMeta')
+  && appJs.includes('noteStreamMeta(streamMeta') && appJs.includes('function newContextBudget')
+  && appJs.includes('refreshProjectMapIfDirty()') && appJs.includes('foldPendingProjectMap()')
+  && appJs.includes('updateContextMeter()') && appJs.includes('contextBudget: null'));
+check('context-budget wiring: meter markup + module script in index.html, module in build.files',
+  fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('id="context-meter"')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="context-budget.js"></script>')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('id="ctx-seg-history"')
+  && pkg.build.files.includes('context-budget.js')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.19.0 — 2026-11-26'));
 
 (async () => {
   // v0.14.0 runner: runUnityCommand against an injected fs and

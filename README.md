@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.18.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.19.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -195,6 +195,16 @@ The assistant reads before it edits — it views the exact lines, then replaces 
 When you paste a log (Editor.log, Player.log, a build log, a crash log) or ask why the editor is showing many errors, CodeFox switches into triage mode automatically: it finds the root cause instead of fixing things one by one. Triage is strictly read-only — it never changes a file, scene, prefab, asset or setting, never enters play mode, never recompiles or reimports while reading, so the evidence is never cleared. It reads the log in ranges (start, then end, then narrows toward the first error), reads the Unity console (Error first, then Warning separately), groups repeated entries, separates your code from engine and package frames, and views the exact source lines before naming a cause. The report is short: root cause, up to 5 quoted log lines as evidence, the file:line, confidence and what is missing to raise it, other issues grouped with counts, one line of ignored noise, and the suggested fix described — not applied. The fix itself comes after, as a normal turn. If the cause cannot be established, the report ends with a "Request for more information" block naming every file it needs (with Windows and macOS paths) in one go. A single error that can be read directly is not a triage turn — that stays a normal fix turn.
 
 Log files it may ask for: Editor.log is `%LOCALAPPDATA%\Unity\Editor\` (Windows) or `~/Library/Logs/Unity/` (macOS); Player.log is `%USERPROFILE%\AppData\LocalLow\<Company>\<Product>\` (Windows) or `~/Library/Logs/<Company>/<Product>/` (macOS); project logs are in `<Project>/Logs/`; after an editor crash, Editor-prev.log from the same folder as Editor.log.
+
+### Context budgeting
+
+The model reads a small local window, so CodeFox budgets it. Every turn the model sees a working set, compacted to the loaded context window — the full transcript is untouched in the app and the database, only what is sent is trimmed. The chat view shows a context meter above the input: a bar split by segment (system prompt, project map, history, tool results, reply reserve) with the used percentage and token counts; hovering shows the exact split. When the loaded window is unknown it says so plainly instead of inventing a number ("assuming 16384 — verify the model in Settings to measure the window").
+
+How it compacts: below 60% of the window nothing happens; at 60–75% stale tool results (console reads, file views, listings, clean compile checks) become one-line stubs that can be re-run; at 75–90% older turns are replaced by one working-memory note (goal, decisions, what is done, what is still open, the failed approaches); above 90% the oldest turns are dropped outright. The last two turns are never touched, system messages are never dropped, and a tool call is never split from its result. What changed in a turn is recorded in a ledger generated from the model's own output, never re-summarized by the model. Summarize and drop are announced in the transcript with one system message; every compaction is logged.
+
+The project summary in the system prompt is a deterministic map (Unity version, render pipeline, input system, packages, folders, scripts, scenes, prefabs), capped at ~1500 tokens and frozen between compactions so the cached prompt prefix stays intact. After a file or scene change, the next turn starts with one short delta note ("Map update: + Scripts/EnemyAI.cs"); the map itself is rewritten only at a compaction boundary or a manual scan.
+
+The counting is calibrated, not guessed: when the server reports prompt tokens (LM Studio's `usage`, Ollama's `prompt_eval_count`), that number is ground truth and the chars-per-token estimate is relearned from it; only the messages since the last exact reading are estimated, with a ~15% safety margin. A reply cut off by the window is told plainly once, so the model can ask to continue.
 
 ### Play testing
 

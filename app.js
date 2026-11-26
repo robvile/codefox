@@ -45,6 +45,12 @@ let state = {
   unityExePath: '',
   chatMode: 'agent',     // 'ask' | 'plan' | 'agent'
   projectScan: null,     // cached result of project:scan
+  // v0.19.0 — context budgeting: calibrated counting, compaction
+  // decisions, the deterministic project map, and the meter. The
+  // full transcript stays in state.messages and the database;
+  // compaction only ever changes the working set sent to the model.
+  // Created in init(); reset per thread in loadThread().
+  contextBudget: null,
   autoAccept: false,
   // Settings (v0.4.0) — loaded from the settings table in init().
   settingsSection: 'model',
@@ -431,6 +437,13 @@ async function checkBridge() {
 async function init() {
   // Bridge self-check first — see checkBridge above.
   if (!(await checkBridge())) return;
+  // Context budgeting (v0.19.0): the tracker is created once per
+  // session; the compaction log is restored from the last session.
+  state.contextBudget = newContextBudget();
+  try {
+    const saved = JSON.parse(await rb.db.getSetting('context_compaction_log') || '[]');
+    if (Array.isArray(saved)) state.contextBudget.compactionLog = saved.slice(-20);
+  } catch {}
   // Projects first — the DB migration in main.js guarantees at least one.
   state.projects = await rb.project.list();
   const activeId = await rb.db.getSetting('active_project_id');
@@ -949,6 +962,11 @@ async function loadThread(id) {
   const msgs = await rb.db.getAll('messages');
   state.messages = msgs.filter(m => Number(m.thread_id) === numId).reverse();
   console.log('[loadThread] messages:', state.messages.length, '— calling setMode chat');
+  // v0.19.0: a new thread is a new budget — the per-thread
+  // tracker resets (the learned chars-per-token survives: it
+  // describes the model, not the thread) and the meter hides
+  // until the first turn builds a system prompt to measure.
+  resetContextBudgetForThread();
 
   setMode('chat', thread.name);
   document.getElementById('center-actions').innerHTML = `
@@ -1248,6 +1266,16 @@ async function sendChat() {
   // The thinking indicator is created per turn by streamOneTurn,
   // which also owns the assistant message element.
 
+  // Context budgeting (v0.19.0): refresh the project map lazily
+  // at the start of the turn — never mid-turn — and fold a pending
+  // fresh map into the frozen one only after a compaction boundary
+  // (the last compaction was a summarize or a drop, which already
+  // rebuilt the cached prefix, so the map rewrite costs nothing
+  // extra). A plain file change only ever produces a delta note.
+  await refreshProjectMapIfDirty();
+  if (state.contextBudget && state.contextBudget.lastCompactionSig
+    && /^(summarize|drop)\|/.test(state.contextBudget.lastCompactionSig)) foldPendingProjectMap();
+
   // Build system prompt — use override if set by executePlan
   const usedExecPlanPrompt = !!(window._execPlanActive && window._execPlanSystemPrompt);
   // Skills (v0.13.0): /skill <name> forces a named skill to load
@@ -1343,7 +1371,9 @@ async function sendChat() {
     } else {
       // Ask / Plan: exactly the v0.4.0 behaviour — one reply, then
       // the apply bar / shell bar / package bar. No looping.
-      const content = await streamOneTurn(state.messages.map(m => ({ role: m.role, content: m.content })), systemPrompt, currentThreadId);
+      // v0.19.0: the model sees the budgeted working set, not the
+      // raw history.
+      const content = await streamOneTurn(messagesForModel(systemPrompt), systemPrompt, currentThreadId);
       if (content != null) {
         const changes = extractFileChanges(content);
         // v0.5.1: a pure set of NEW Unity asset files auto-applies
@@ -2188,6 +2218,11 @@ async function streamOneTurn(messages, systemPrompt, threadId) {
   msgsEl.scrollTop = msgsEl.scrollHeight;
   let assistantContent = '';
   rb.llm.removeListeners();
+  // v0.19.0: the server's numbers for the calibrated counter,
+  // sent once per stream by the main process. Absent when the
+  // server does not report them — estimation then, never invented.
+  let streamMeta = null;
+  if (typeof rb.llm.onMeta === 'function') rb.llm.onMeta((meta) => { streamMeta = meta; });
   rb.llm.onChunk(chunk => {
     thinkingEl.remove();
     assistantContent += chunk;
@@ -2213,6 +2248,7 @@ async function streamOneTurn(messages, systemPrompt, threadId) {
     thinkingEl.remove();
     assistantMsgEl.textContent = '⚠ Could not reach ' + providerLabel() + ' at ' + currentUrl() + '. ' + (e.message || '') + (currentModel() ? '' : ' No model is selected — open Settings, verify the connection, and pick a model.');
     rb.llm.removeListeners();
+    refreshContextMeter();
     return null;
   }
   thinkingEl.remove();
@@ -2220,6 +2256,10 @@ async function streamOneTurn(messages, systemPrompt, threadId) {
   try { await rb.db.insert('messages', { thread_id: threadId, role: 'assistant', content: assistantContent }); } catch {}
   if (state.activeThreadId === threadId) state.messages.push({ role: 'assistant', content: assistantContent });
   await handleSkillSaveFlags(assistantContent);
+  // v0.19.0: ground truth first (when the stream carried it),
+  // then the meter from the new history.
+  if (streamMeta) noteStreamMeta(streamMeta, systemPrompt, messages);
+  refreshContextMeter();
   return assistantContent;
 }
 
@@ -2258,6 +2298,10 @@ function noteTurnChange(paths) {
     if (rel && !loopState.turnChangedFiles.includes(rel)) loopState.turnChangedFiles.push(rel);
     if (/\.(cs|prefab|unity)$/i.test(rel)) loopState.turnChangedCode = true;
   }
+  // v0.19.0: anything the turn changed makes the project map
+  // stale — the delta is computed lazily at the next turn start,
+  // never mid-turn.
+  if (state.contextBudget) state.contextBudget.mapDirty = true;
 }
 function noteTurnSnapshot(snapshotId) {
   if (!loopState || !snapshotId) return;
@@ -2362,7 +2406,7 @@ async function verifyTurnAfterChanges() {
   let fixProduced = false;
   try {
     const content = await streamOneTurn(
-      state.messages.map(m => ({ role: m.role, content: m.content })),
+      messagesForModel(loopState.systemPrompt),
       loopState.systemPrompt, loopState.threadId);
     if (content != null && !loopState.stopRequested && !isRefusal(content)) {
       const fixActions = parseAgentActions(content);
@@ -2482,7 +2526,7 @@ async function runAgentTurn(systemPrompt, threadId) {
       if (loopState.stopRequested) break;
       setLoopStatus('Working… round ' + (loopState.round + 1) + '/' + loopState.maxRounds + ' — waiting for the model…');
       const content = await streamOneTurn(
-        state.messages.map(m => ({ role: m.role, content: m.content })),
+        messagesForModel(systemPrompt),
         systemPrompt, threadId);
       if (!loopState || loopState.stopRequested) break;
       if (content == null) break; // model unreachable — error already shown
@@ -3515,7 +3559,9 @@ function buildSystemPrompt(rulesets, skills) {
   prompt += 'You are CodeFox, a coding assistant running inside an app. You CAN edit the project\'s files. When you output a changed file, CodeFox writes it to disk for you (after taking a snapshot, so it can be reverted — and in a git project a backup commit is taken first, so a bad change can be restored). Never say you cannot modify files, cannot write code, or cannot provide code — that is not true here.\n\n';
   prompt += 'You run locally on the user\'s machine, on a local model with a smaller context window than cloud models. Keep answers focused, work one step at a time, and never invent files, APIs, or asset paths that are not in the project context below. If you do not know something, say so instead of guessing.\n';
   prompt += 'Always write code that fits the existing patterns and architecture. Be specific about file paths and complete implementations.\n\n';
-  const scan = projectScanSummary();
+  const scan = (state.contextBudget && state.contextBudget.projectMapText)
+    ? state.contextBudget.projectMapText
+    : projectScanSummary();
   if (scan) prompt += '## Project context (from a scan of the project folder)\n\n' + scan + '\n\n';
   // Rules budget (Settings > Rules): enabled rulesets only, highest
   // priority first, whole rulesets only — never cut one off mid-way.
@@ -3713,10 +3759,298 @@ async function scanProject() {
   const scan = await rb.project.scan(state.projectPath);
   if (!scan.ok) { showToast('⚠ ' + scan.error); return scan; }
   state.projectScan = scan;
+  // v0.19.0: a manual scan is a natural boundary — the user asked
+  // for fresh context, so the frozen map is rebuilt now (not at
+  // the next compaction boundary) and the delta queue is cleared.
+  if (state.contextBudget && window.ContextBudget) {
+    state.contextBudget.projectMap = window.ContextBudget.buildProjectMap(scan);
+    state.contextBudget.projectMapText = state.contextBudget.projectMap.text;
+    state.contextBudget.pendingMap = null;
+    state.contextBudget.mapDirty = false;
+  }
   const pkgCount = Object.keys(scan.packages || {}).length;
   showToast(`✓ Scanned: ${scan.scriptCount} scripts, ${scan.scenes.length} scenes, ${scan.prefabs.length} prefabs, ${pkgCount} packages`);
   addSystemMessage(`Project scan — Unity ${scan.unityVersion || 'unknown'}, ${scan.scriptCount} scripts, ${scan.scenes.length} scenes, ${scan.prefabs.length} prefabs, ${pkgCount} packages. This context is now included in every chat prompt.`);
+  refreshContextMeter();
   return scan;
+}
+
+// ── Context budgeting (v0.19.0) ──────────────────────────────────
+// The model reads a small local window, so CodeFox budgets it:
+// calibrated counting (server numbers when the stream carries
+// them, chars-per-token otherwise), compaction of the working set
+// the model sees (the full transcript in state.messages and the
+// database is never touched), a deterministic project map, and a
+// meter in the chat view. The pure decisions live in
+// context-budget.js (window.ContextBudget); this section is the
+// wiring. When the module failed to load, everything below
+// degrades to the old behaviour — the full history goes to the
+// model, uncompacted — rather than breaking the turn.
+function newContextBudget() {
+  return {
+    // Learned chars-per-token, updated from server-reported
+    // prompt_tokens (see noteStreamMeta). It describes the model,
+    // not the thread, so it survives thread switches.
+    charsPerToken: 3,
+    lastExactPromptTokens: null,
+    lastExactAt: null,
+    truncatedLastTurn: false,
+    // Last computed meter segments (see refreshContextMeter).
+    lastSegments: null,
+    lastSystemPromptTokens: 0,
+    lastMapTokens: 0,
+    // Compaction log: {at, action, groupsSummarized, groupsDropped,
+    // resultsElided, tokensBefore, tokensAfter, floorHit}. Kept in
+    // memory and persisted (capped at 20) — the record of every
+    // compaction, so a shrunk history is never a mystery.
+    compactionLog: [],
+    // Signature of the last logged compaction, so the log is only
+    // appended when something actually changed.
+    lastCompactionSig: '',
+    // Deterministic project map: the frozen text the system prompt
+    // carries (only rewritten at a compaction boundary or a manual
+    // scan), the structured form for diffing, and the fresh map
+    // waiting for the next boundary.
+    projectMapText: '',
+    projectMap: null,
+    pendingMap: null,
+    mapDirty: false,
+  };
+}
+function resetContextBudgetForThread() {
+  const b = state.contextBudget;
+  if (!b) return;
+  b.lastExactPromptTokens = null;
+  b.lastExactAt = null;
+  b.truncatedLastTurn = false;
+  b.lastSegments = null;
+  b.lastSystemPromptTokens = 0;
+  b.lastMapTokens = 0;
+  b.lastCompactionSig = '';
+}
+
+// The working set for the model: the full history, compacted to
+// the budget. Called at every streamOneTurn call site — never send
+// state.messages directly. Side effects (compaction log, system
+// message on summarize/drop, meter segments) happen here and only
+// here, so the meter refresh can recompute the same working set
+// without logging twice.
+function messagesForModel(systemPrompt) {
+  const CB = (typeof ContextBudget !== 'undefined') ? ContextBudget : null;
+  const fallback = state.messages.map(m => ({ role: m.role, content: m.content }));
+  if (!CB || !state.contextBudget) return fallback;
+  const budget = state.contextBudget;
+  const loaded = state.lmLoadedContext || null;
+  const reserve = CB.outputReserveFor(state.maxTokens, loaded);
+  const promptTokens = CB.estimateTokens(systemPrompt || '', budget.charsPerToken);
+  const res = CB.compactHistory(state.messages, {
+    ratio: budget.charsPerToken,
+    loadedContext: loaded,
+    outputReserve: reserve,
+    promptTokens: promptTokens,
+  });
+  budget.lastSystemPromptTokens = promptTokens;
+  // Meter segments: the map is shown apart from the rest of the
+  // system prompt, so its tokens are measured separately.
+  const mapText = budget.projectMapText || projectScanSummary();
+  budget.lastMapTokens = CB.estimateTokens(mapText, budget.charsPerToken);
+  const working = res.messages;
+  let resultTokens = 0;
+  let historyTokens = 0;
+  for (const m of working) {
+    const t = CB.estimateTokens(m.content || '', budget.charsPerToken);
+    historyTokens += t;
+    if (CB.isToolResultMessage(m)) resultTokens += t;
+  }
+  budget.lastSegments = CB.meterSegments({
+    systemTokens: Math.max(0, promptTokens - budget.lastMapTokens),
+    mapTokens: budget.lastMapTokens,
+    historyTokens: historyTokens,
+    resultTokens: resultTokens,
+    loadedContext: loaded,
+    outputReserve: reserve,
+  });
+  if (res.log && res.log.changed > 0) noteCompaction(res.log, res.action);
+  updateContextMeter();
+  return working.map(m => ({ role: m.role, content: m.content }));
+}
+
+// Record a compaction. Elide is routine — log only. Summarize and
+// drop change what the model can see, so they also get one plain
+// system message in the transcript, and they open the next map
+// boundary (the frozen map is rewritten from the pending fresh
+// map at the next turn start).
+function noteCompaction(log, action) {
+  const budget = state.contextBudget;
+  if (!budget) return;
+  const sig = [action, log.groupsSummarized, log.groupsDropped, log.resultsElided, log.floorHit ? 'floor' : ''].join('|');
+  if (sig === budget.lastCompactionSig) return;
+  budget.lastCompactionSig = sig;
+  const entry = {
+    at: new Date().toISOString(),
+    threadId: state.activeThreadId,
+    action: action,
+    groupsSummarized: log.groupsSummarized,
+    groupsDropped: log.groupsDropped,
+    resultsElided: log.resultsElided,
+    tokensBefore: log.tokensBefore,
+    tokensAfter: log.tokensAfter,
+    floorHit: !!log.floorHit,
+  };
+  budget.compactionLog.push(entry);
+  if (budget.compactionLog.length > 20) budget.compactionLog = budget.compactionLog.slice(-20);
+  try { rb.db.setSetting('context_compaction_log', JSON.stringify(budget.compactionLog)); } catch {}
+  if (action === 'summarize' || action === 'drop') {
+    const bits = [];
+    if (log.groupsSummarized) bits.push(log.groupsSummarized + ' older turn' + (log.groupsSummarized === 1 ? '' : 's') + ' replaced by a working-memory note');
+    if (log.groupsDropped) bits.push(log.groupsDropped + ' older turn' + (log.groupsDropped === 1 ? '' : 's') + ' dropped');
+    if (log.resultsElided) bits.push(log.resultsElided + ' old tool result' + (log.resultsElided === 1 ? '' : 's') + ' elided');
+    addSystemMessage('Context compacted (' + action + '): ' + bits.join(', ') + ' — history now ~' + Math.round(log.tokensAfter / 1000 * 10) / 10 + 'k tokens estimated. The full transcript is still saved.'
+      + (log.floorHit ? ' Nothing more could be compacted — only the newest turns are left.' : ''));
+    budget.mapDirty = true;
+  }
+}
+
+// The server's numbers for one stream, when the stream carried
+// them. prompt_tokens is ground truth for the prompt just sent:
+// the ratio is relearned from it, and the exact reading anchors
+// the next estimate. finish_reason 'length' means the reply was
+// cut off by the window — the model is told plainly, once, so it
+// can ask the user to continue instead of silently restarting.
+function noteStreamMeta(meta, systemPrompt, sentMessages) {
+  const budget = state.contextBudget;
+  const CB = (typeof ContextBudget !== 'undefined') ? ContextBudget : null;
+  if (!budget || !meta || !CB) return;
+  if (typeof meta.promptTokens === 'number' && meta.promptTokens > 0) {
+    let chars = String(systemPrompt || '').length;
+    for (const m of (sentMessages || [])) chars += String((m && m.content) || '').length;
+    budget.charsPerToken = CB.calibrateCharsPerToken(budget.charsPerToken, [{ chars: chars, actualTokens: meta.promptTokens }]);
+    budget.lastExactPromptTokens = meta.promptTokens;
+    budget.lastExactAt = Date.now();
+  }
+  if (meta.finishReason === 'length' && !budget.truncatedLastTurn) {
+    budget.truncatedLastTurn = true;
+    addSystemMessage('The last reply was cut off by the context limit (finish_reason: length). The history has been compacted to make room — ask me to continue if the reply stopped mid-thought.');
+  } else if (meta.finishReason && meta.finishReason !== 'length') {
+    budget.truncatedLastTurn = false;
+  }
+}
+
+// Recompute the meter from the current history (no logging —
+// messagesForModel owns that) and render it. Called after every
+// stream, after a scan, and on thread load.
+function refreshContextMeter() {
+  const CB = (typeof ContextBudget !== 'undefined') ? ContextBudget : null;
+  const budget = state.contextBudget;
+  if (!CB || !budget) { updateContextMeter(); return; }
+  const loaded = state.lmLoadedContext || null;
+  const reserve = CB.outputReserveFor(state.maxTokens, loaded);
+  const promptTokens = budget.lastSystemPromptTokens || 0;
+  const res = CB.compactHistory(state.messages, {
+    ratio: budget.charsPerToken,
+    loadedContext: loaded,
+    outputReserve: reserve,
+    promptTokens: promptTokens,
+  });
+  const mapText = budget.projectMapText || projectScanSummary();
+  const mapTokens = CB.estimateTokens(mapText, budget.charsPerToken);
+  budget.lastMapTokens = mapTokens;
+  budget.lastSystemPromptTokens = promptTokens;
+  let resultTokens = 0;
+  let historyTokens = 0;
+  for (const m of res.messages) {
+    const t = CB.estimateTokens(m.content || '', budget.charsPerToken);
+    historyTokens += t;
+    if (CB.isToolResultMessage(m)) resultTokens += t;
+  }
+  budget.lastSegments = CB.meterSegments({
+    systemTokens: Math.max(0, promptTokens - mapTokens),
+    mapTokens: mapTokens,
+    historyTokens: historyTokens,
+    resultTokens: resultTokens,
+    loadedContext: loaded,
+    outputReserve: reserve,
+  });
+  updateContextMeter();
+}
+
+function fmtTokens(n) {
+  if (n >= 1000) return (Math.round(n / 100) / 10) + 'k';
+  return String(n);
+}
+
+function updateContextMeter() {
+  const el = document.getElementById('context-meter');
+  if (!el) return;
+  const budget = state.contextBudget;
+  const segs = budget && budget.lastSegments;
+  if (!segs) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const byKey = {};
+  for (const s of segs.segments) byKey[s.key] = s;
+  const setW = (id, key) => {
+    const n = document.getElementById(id);
+    if (n) n.style.width = (byKey[key] ? byKey[key].pct : 0) + '%';
+  };
+  setW('ctx-seg-fixed', 'fixed');
+  setW('ctx-seg-map', 'map');
+  setW('ctx-seg-history', 'history');
+  setW('ctx-seg-results', 'results');
+  setW('ctx-seg-reserve', 'reserve');
+  const label = document.getElementById('context-meter-label');
+  const known = segs.known ? '' : ' (assuming ' + fmtTokens(segs.loaded) + ' — verify the model in Settings to measure the window)';
+  if (label) {
+    label.textContent = 'Context ' + segs.usedPct + '% · ' + fmtTokens(segs.used) + ' / ' + fmtTokens(segs.loaded) + ' tokens' + known
+      + (budget && budget.compactionLog.length ? ' · compacted ' + budget.compactionLog.length + '×' : '');
+  }
+  el.title = 'Fixed (system prompt): ' + fmtTokens(byKey.fixed ? byKey.fixed.tokens : 0)
+    + ' · Map: ' + fmtTokens(byKey.map ? byKey.map.tokens : 0)
+    + ' · History: ' + fmtTokens(byKey.history ? byKey.history.tokens : 0)
+    + ' · Tool results: ' + fmtTokens(byKey.results ? byKey.results.tokens : 0)
+    + ' · Reply reserve: ' + fmtTokens(byKey.reserve ? byKey.reserve.tokens : 0)
+    + ' · Free: ' + fmtTokens(segs.free)
+    + (budget && budget.lastExactPromptTokens ? ' · Last exact prompt: ' + fmtTokens(budget.lastExactPromptTokens) + ' tokens (server-reported)' : ' · No server-reported count yet — estimates use ~' + budget.charsPerToken + ' chars/token');
+}
+
+// The project map, refreshed lazily at the start of the next user
+// turn — never mid-turn. A fresh scan is compared with the frozen
+// map; the differences arrive as one short delta note at the end
+// of the history, so the cached prompt prefix stays intact. The
+// frozen map itself is only rewritten at a compaction boundary
+// (when the cache is being rebuilt anyway) or by a manual scan.
+// Eval mode skips this entirely: fixtures are reset constantly
+// and the transcript must stay clean for the grader.
+async function refreshProjectMapIfDirty() {
+  const budget = state.contextBudget;
+  const CB = (typeof ContextBudget !== 'undefined') ? ContextBudget : null;
+  if (!budget || !CB || !budget.mapDirty) return;
+  budget.mapDirty = false;
+  if (window.__evalMode) return;
+  if (!state.projectPath || !state.projectScan) return;
+  let scan = null;
+  try { scan = await rb.project.scan(state.projectPath); } catch { scan = null; }
+  if (!scan || !scan.ok) { budget.mapDirty = true; return; }
+  state.projectScan = scan;
+  const next = CB.buildProjectMap(scan);
+  const delta = CB.diffProjectMap(budget.projectMap, next);
+  budget.pendingMap = next;
+  if (delta.lines.length) {
+    addSystemMessage('Map update: ' + delta.lines.join('; ') + (delta.more ? ' (+' + delta.more + ' more changes)' : ''));
+  }
+}
+
+// Fold the pending fresh map into the frozen one — only at a
+// compaction boundary, when the prompt prefix is being rebuilt
+// anyway. sendChat calls this at the next turn start after a
+// summarize/drop compaction (see the lastCompactionSig check
+// there); a plain file change never folds, it only ever produces
+// a delta note.
+function foldPendingProjectMap() {
+  const budget = state.contextBudget;
+  if (!budget || !budget.pendingMap) return;
+  budget.projectMap = budget.pendingMap;
+  budget.projectMapText = budget.pendingMap.text;
+  budget.pendingMap = null;
 }
 function diagnoseError() {
   // Agent mode (v0.5.2): diagnosing ends in a fix — the model
@@ -7814,6 +8148,15 @@ async function switchProject(id) {
   // v0.16.0: scene paths belong to the project they came from.
   state.pathChanges = [];
   state.projectScan = null;
+  // v0.19.0: the map belongs to the project too — a new project
+  // starts with no frozen map, no pending map, and nothing dirty.
+  if (state.contextBudget) {
+    state.contextBudget.projectMapText = '';
+    state.contextBudget.projectMap = null;
+    state.contextBudget.pendingMap = null;
+    state.contextBudget.mapDirty = false;
+    state.contextBudget.lastSegments = null;
+  }
   state.activeThreadId = null;
   state.activeItemId = null;
   state.activeTable = null;

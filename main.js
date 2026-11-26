@@ -16,6 +16,7 @@ const { UNITY_ASSET_EXTS } = require('./unity-assets');
 const { MCP_PRESETS } = require('./mcp-presets');
 const lmLoad = require('./lmstudio-load');
 const skillFiles = require('./skill-files');
+const ContextBudget = require('./context-budget');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -1156,6 +1157,11 @@ async function lmStudioChat(event, cfg, messages, systemPrompt) {
         temperature: cfg.temperature,
         max_tokens: cfg.maxTokens,
         stream: true,
+        // v0.19.0: ask for usage in the stream. LM Studio puts
+        // `usage` (prompt_tokens and friends) in the final chunk
+        // when this is set; if the server ignores it, nothing
+        // breaks — the renderer falls back to estimation.
+        stream_options: { include_usage: true },
       }),
     });
   } catch (e) {
@@ -1169,6 +1175,16 @@ async function lmStudioChat(event, cfg, messages, systemPrompt) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // v0.19.0: the server's own numbers for the calibrated counter.
+  // usage.prompt_tokens is ground truth for the prompt just sent;
+  // choices[0].finish_reason === 'length' means the reply was cut
+  // off by the context limit. Either is sent once, when the stream
+  // ends — the renderer never sees a partial value.
+  let lastMeta = null;
+  const noteMeta = (parsed) => {
+    const meta = ContextBudget.parseStreamMeta(parsed);
+    if (meta.promptTokens != null || meta.finishReason) lastMeta = meta;
+  };
   const emit = (text) => {
     if (!text) return;
     fullContent += text;
@@ -1187,12 +1203,14 @@ async function lmStudioChat(event, cfg, messages, systemPrompt) {
         if (!trimmed.startsWith('data:')) continue;
         const data = trimmed.slice(5).trim();
         if (data === '[DONE]') {
+          if (lastMeta) event.sender.send('llm:stream-meta', lastMeta);
           event.sender.send('llm:stream-done');
           event.sender.send('ollama:stream-done');
           return fullContent;
         }
         try {
           const parsed = JSON.parse(data);
+          noteMeta(parsed);
           const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
           const content = (delta && delta.content) || (parsed.choices && parsed.choices[0] && parsed.choices[0].message && parsed.choices[0].message.content) || '';
           emit(content);
@@ -1200,6 +1218,7 @@ async function lmStudioChat(event, cfg, messages, systemPrompt) {
       }
     }
   } finally { try { reader.releaseLock(); } catch {} }
+  if (lastMeta) event.sender.send('llm:stream-meta', lastMeta);
   event.sender.send('llm:stream-done');
   event.sender.send('ollama:stream-done');
   return fullContent;
@@ -1233,6 +1252,12 @@ function ollamaChat(event, cfg, messages, systemPrompt) {
               event.sender.send('ollama:stream-chunk', parsed.message.content);
             }
             if (parsed.done) {
+              // v0.19.0: Ollama's done message carries the same
+              // numbers (prompt_eval_count, done_reason) — same
+              // channel as the LM Studio path, same fallback when
+              // they are absent.
+              const meta = ContextBudget.parseStreamMeta(parsed);
+              if (meta.promptTokens != null || meta.finishReason) event.sender.send('llm:stream-meta', meta);
               event.sender.send('llm:stream-done');
               event.sender.send('ollama:stream-done');
               resolve(fullContent);
