@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.9.1.
+// 2. package.json version is 0.9.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.9.1', pkg.version === '0.9.1', 'got ' + pkg.version);
-check('sidebar footer shows 0.9.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.1 — Local'));
+check('package.json version is 0.9.2', pkg.version === '0.9.2', 'got ' + pkg.version);
+check('sidebar footer shows 0.9.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.2 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1953,6 +1953,127 @@ check('refusal: partition splits a mixed set, refusal names the file and the uni
       && p.refused.every(c => /\.prefab$|\.unity$/.test(c.path))
       && r.includes('Assets/Prefabs/X.prefab') && r.includes('unity-command block (createPrefab');
   })());
+
+// 30. v0.9.2 — the model cannot miss the Unity bridge. Rob's 0.9.1
+// live test: no compile errors, no prefab — the model never saw
+// the bridge-command section (it was gated on a project scan he
+// never ran), guessed the block as plain text, and ended by telling
+// him to do it manually in the editor. The section is now gated on
+// a connected project, every error that points at the bridge
+// carries a copyable example, Unity requests get a bridge
+// correction instead of "output the file", and editor-API
+// generator scripts are refused.
+check('Unity prompt section is gated on a connected project, not a scan',
+  appJs.includes('if (state.projectPath) {')
+  && !/if \(state\.projectScan && state\.projectScan\.unityVersion\)/.test(appJs));
+const promptSrc = extractFunction(appJs, 'buildSystemPrompt');
+check('buildSystemPrompt can be extracted for testing', !!promptSrc);
+if (promptSrc) {
+  // buildSystemPrompt closes over the top-level example constant —
+  // pass unity-assets.js's copy in as the parameter of the same
+  // name (the equality check below proves app.js holds the same
+  // string, so this is the value the app itself uses).
+  const buildPrompt = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt = buildPrompt(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the Unity section for a connected project with NO scan',
+    agentPrompt.includes('## Unity — prefabs and components')
+    && agentPrompt.includes('"action": "createPrefab"')
+    && agentPrompt.includes('"type": "Image"')
+    && agentPrompt.includes('never by writing a script that does it'));
+  const refusalListSrc30 = /const REFUSAL_PHRASES = \[[\s\S]*?\];/.exec(appJs);
+  const isRefusalSrc30 = extractFunction(appJs, 'isRefusal');
+  if (refusalListSrc30 && isRefusalSrc30) {
+    const isRefusal = new Function(refusalListSrc30[0] + '\n' + isRefusalSrc30 + '\nreturn isRefusal;')();
+    // The new v0.9.2 phrases must not appear in the Agent prompt
+    // text itself, or the model echoing the prompt would trip its
+    // own retry. (The prompt DOES contain the pre-existing phrases
+    // 'cannot modify files' / 'cannot write code' in its capability
+    // statement — "Never say you cannot modify files…" — that is
+    // by design, and isRefusal is only ever run on model replies,
+    // never on the prompt itself, so it is not a trip.)
+    check('agent prompt contains none of the new v0.9.2 refusal phrases',
+      !['cannot directly', "can't directly", 'manual process', 'drag the gameobject', 'drag this gameobject', 'you need to do this manually', 'you will need to do this'].some(p => agentPrompt.toLowerCase().includes(p)));
+    check('new refusal phrases catch the manual-work pivot',
+      isRefusal('I cannot directly write .prefab files')
+      && isRefusal('This is a manual process that needs to be done through Unity')
+      && isRefusal('Drag the GameObject into the Assets/Prefabs/UI/ folder to create the prefab')
+      && isRefusal('Drag this GameObject into the folder and save it as a prefab')
+      && isRefusal('You will need to do this manually in the editor'));
+    check('isRefusal does NOT flag a successful Unity reply',
+      !isRefusal('Prefab created. View it in the Unity Editor.')
+      && !isRefusal('Done — adjust the size manually afterwards if you want it bigger.'));
+  } else {
+    check('refusal list extractable for the v0.9.2 prompt checks', false);
+  }
+}
+// One canonical example: app.js and unity-assets.js must hold the
+// identical string, so the messages cannot drift apart.
+const appExampleSrc = /const UNITY_CREATE_PREFAB_EXAMPLE = ('(?:\\.|[^'\\])*');/.exec(appJs);
+check('app.js example constant matches unity-assets.js',
+  !!appExampleSrc && new Function('return ' + appExampleSrc[1] + ';')() === assets.UNITY_CREATE_PREFAB_EXAMPLE
+  && assets.UNITY_CREATE_PREFAB_EXAMPLE.includes('"action": "createPrefab"')
+  && assets.UNITY_CREATE_PREFAB_EXAMPLE.includes('"type": "Image"'));
+check('prefab refusal and unity-command parse error both carry the copyable example',
+  appJs.includes("Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE")
+  && appJs.includes("Example of a working block: ' + UNITY_CREATE_PREFAB_EXAMPLE"));
+check('agent loop uses the Unity-aware corrections',
+  appJs.includes('refusalCorrectionFor(userRequest)') && appJs.includes('enforcementFollowupFor(userRequest)'));
+// Functional: editor-API generator scripts (unity-assets.js).
+check('editor-API .cs refused outside Assets/Editor, accepted inside',
+  assets.isEditorApiScript({ path: 'Assets/Scripts/CreateImagePrefab.cs', code: 'using UnityEngine;\npublic class X { void M() { PrefabUtility.SaveAsPrefabAsset(null, "x"); } }' })
+  && assets.isEditorApiScript({ path: 'Assets/Scripts/Y.cs', code: 'using UnityEditor;\npublic class Y {}' })
+  && assets.isEditorApiScript({ path: 'Assets/Scripts/Z.cs', code: 'var x = AssetDatabase.LoadAssetAtPath<Sprite>("Assets/a.png");' })
+  && assets.isEditorApiScript({ path: 'Assets/Scripts/W.cs', code: 'EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects);' })
+  && !assets.isEditorApiScript({ path: 'Assets/Editor/Tools.cs', code: 'using UnityEditor;\nPrefabUtility.SaveAsPrefabAsset(null, "x");' })
+  && !assets.isEditorApiScript({ path: 'Assets/Editor/Sub/Tools.cs', code: 'EditorApplication.update += null;' })
+  && !assets.isEditorApiScript({ path: 'Assets\\Editor\\Tools.cs', code: 'using UnityEditor;\npublic class T {}' })
+  && !assets.isEditorApiScript({ path: 'Assets/Scripts/Player.cs', code: 'using UnityEngine;\npublic class Player : MonoBehaviour {}' })
+  && !assets.isEditorApiScript({ path: 'Assets/Scripts/Player.cs', code: '' })
+  && !assets.isEditorApiScript({ path: 'Assets/Prefabs/X.prefab', code: 'PrefabUtility' }));
+check('editor-API partition splits a mixed set, refusal names the file and the example',
+  (() => {
+    const p = assets.partitionEditorApiScripts([
+      { path: 'Assets/Scripts/Gen.cs', code: 'PrefabUtility.Create();' },
+      { path: 'Assets/Editor/Ok.cs', code: 'PrefabUtility.Create();' },
+      { path: 'Assets/Scripts/Player.cs', code: 'class Player {}' },
+    ]);
+    const r = assets.editorApiScriptRefusal('Assets/Scripts/Gen.cs');
+    return p.refused.length === 1 && p.allowed.length === 2
+      && p.refused[0].path === 'Assets/Scripts/Gen.cs'
+      && r.includes('Assets/Scripts/Gen.cs') && r.includes('Assets/Editor/')
+      && r.includes('unity-command block (createPrefab')
+      && r.includes('"action": "createPrefab"');
+  })());
+// The correction selection: extract the pure helpers and the
+// constants they close over, then run them in Node.
+const unityReqSrc = extractFunction(appJs, 'isUnityRequest');
+const corrForSrc = extractFunction(appJs, 'refusalCorrectionFor');
+const followForSrc = extractFunction(appJs, 'enforcementFollowupFor');
+const exampleDecl = /const UNITY_CREATE_PREFAB_EXAMPLE = '[^']*';/.exec(appJs);
+const corrDecl = /const REFUSAL_CORRECTION = '[^']*';/.exec(appJs);
+const corrUDecl = /const REFUSAL_CORRECTION_UNITY = [^;]+;/.exec(appJs);
+const followDecl = /const ENFORCEMENT_FOLLOWUP = '[^']*';/.exec(appJs);
+const followUDecl = /const ENFORCEMENT_FOLLOWUP_UNITY = [^;]+;/.exec(appJs);
+check('correction helpers can be extracted for testing',
+  !!unityReqSrc && !!corrForSrc && !!followForSrc && !!exampleDecl && !!corrDecl && !!corrUDecl && !!followDecl && !!followUDecl);
+if (unityReqSrc && corrForSrc && followForSrc && exampleDecl && corrDecl && corrUDecl && followDecl && followUDecl) {
+  const fns = new Function(exampleDecl[0] + '\n' + corrDecl[0] + '\n' + corrUDecl[0] + '\n' + followDecl[0] + '\n' + followUDecl[0] + '\n' + unityReqSrc + '\n' + corrForSrc + '\n' + followForSrc + '\nreturn { refusalCorrectionFor, enforcementFollowupFor };')();
+  check('Unity-variant correction for a prefab request, generic for a non-Unity request',
+    fns.refusalCorrectionFor('build me a prefab with an image').includes('unity-command block')
+    && fns.refusalCorrectionFor('build me a prefab with an image').includes('"action": "createPrefab"')
+    && !fns.refusalCorrectionFor('build me a prefab with an image').includes('Output the corrected file')
+    && fns.refusalCorrectionFor('fix the null reference in Player.cs').includes('Output the corrected file')
+    && fns.enforcementFollowupFor('edit this prefab to use a scroll rect').includes('unity-command block')
+    && fns.enforcementFollowupFor('fix the typo in the README').includes('You did not output any file changes'));
+}
+check('CHANGELOG has the 0.9.2 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.2 — 2026-11-26'));
+check('README notes the always-on bridge instructions and the generator-script refusal',
+  readme.includes('no project scan needed') && readme.includes('generator script is never the way to make a prefab'));
 
 // v0.8.3 — tuned LM Studio model loading. The defaults are global:
 // one object, no per-model table, and the load body is built only

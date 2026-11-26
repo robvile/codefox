@@ -113,4 +113,57 @@ function handWrittenUnityRefusal(filePath) {
   return filePath + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead.';
 }
 
-module.exports = { UNITY_ASSET_EXTS, HAND_WRITTEN_UNITY_EXTS, extOf, isUnityAssetPath, isAutoApplyAssetSet, revertBackupFile, isHandWrittenUnityFile, partitionHandWrittenUnityFiles, handWrittenUnityRefusal };
+// One canonical Image-prefab example (v0.9.2) — the full
+// ```unity-command block the prompt section shows, and the same
+// shape every message that tells the model how to use the bridge
+// must carry (the .prefab refusal, the parse error, the Unity
+// correction). app.js holds the identical string; the smoke test
+// asserts the two are equal, so they cannot drift apart.
+const UNITY_CREATE_PREFAB_EXAMPLE = '```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```';
+
+// Editor-only Unity APIs (v0.9.2) — PrefabUtility, AssetDatabase,
+// EditorApplication, EditorUtility, UnityEditor, EditorSceneManager,
+// PrefabStage only exist in the UnityEditor assembly. A runtime
+// script (.cs outside Assets/Editor/) that references them cannot
+// compile, and the model writes such "generator scripts" as a
+// workaround when it does not know the bridge can do the job.
+// Refuse them the same way as hand-written prefabs: the bridge
+// does it, no script needed.
+const EDITOR_API_TOKENS = ['PrefabUtility', 'AssetDatabase', 'EditorApplication', 'EditorUtility', 'UnityEditor', 'EditorSceneManager', 'PrefabStage'];
+const EDITOR_API_RE = new RegExp('\\b(' + EDITOR_API_TOKENS.join('|') + ')\\b');
+
+function isUnderEditorFolder(p) {
+  const parts = String(p || '').split(/[\\/]/).filter(Boolean);
+  return parts.length >= 2 && parts[0].toLowerCase() === 'assets' && parts[1].toLowerCase() === 'editor';
+}
+
+// True when `change` ({ path, code }) is a runtime .cs file that
+// references editor-only Unity APIs — a generator-script workaround
+// that cannot compile. Scripts under Assets/Editor/ are legitimate
+// editor tooling and are never refused here.
+function isEditorApiScript(change) {
+  if (!change || extOf(change.path) !== '.cs') return false;
+  if (isUnderEditorFolder(change.path)) return false;
+  return EDITOR_API_RE.test(String(change.code || ''));
+}
+
+// Split a change set into the files applyFileChanges may write and
+// the editor-API scripts it must refuse. Returns { allowed, refused }.
+function partitionEditorApiScripts(changes) {
+  const allowed = [];
+  const refused = [];
+  for (const c of (changes || [])) {
+    if (c && isEditorApiScript(c)) refused.push(c);
+    else allowed.push(c);
+  }
+  return { allowed, refused };
+}
+
+// The refusal text applyFileChanges returns for a refused script —
+// it names the file and tells the model, in plain words, what to
+// do instead.
+function editorApiScriptRefusal(filePath) {
+  return filePath + ': Editor-only Unity APIs (PrefabUtility, AssetDatabase, …) only work in scripts under Assets/Editor/ — and you do not need a generator script at all: use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) and Unity does it. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE;
+}
+
+module.exports = { UNITY_ASSET_EXTS, HAND_WRITTEN_UNITY_EXTS, UNITY_CREATE_PREFAB_EXAMPLE, EDITOR_API_TOKENS, extOf, isUnityAssetPath, isAutoApplyAssetSet, revertBackupFile, isHandWrittenUnityFile, partitionHandWrittenUnityFiles, handWrittenUnityRefusal, isUnderEditorFolder, isEditorApiScript, partitionEditorApiScripts, editorApiScriptRefusal };

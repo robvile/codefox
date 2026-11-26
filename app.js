@@ -1045,11 +1045,28 @@ const REFUSAL_PHRASES = [
   'unable to create', 'not able to', "i don't have the ability",
   "i don't have access", 'walk you through', 'let me walk you through',
   'i can guide you', 'i can show you how',
+  // Pivot-to-manual-work phrases (v0.9.2): the model gives up and
+  // tells the user to do it in the Unity editor instead of doing
+  // it ("this is a manual process", "drag the GameObject into the
+  // folder"). Only unambiguous pivots — never bare 'manually' or
+  // 'in the unity editor': a successful reply can say "adjust it
+  // manually afterwards" or "view it in the Unity Editor".
+  'cannot directly', "can't directly", 'manual process',
+  'drag the gameobject', 'drag this gameobject',
+  'you need to do this manually', 'you will need to do this',
 ];
 function isRefusal(text) {
   const t = String(text || '').toLowerCase();
   return REFUSAL_PHRASES.some(p => t.includes(p));
 }
+// One canonical Image-prefab example (v0.9.2) — the full
+// ```unity-command block the prompt section shows. Every message
+// that tells the model how to use the bridge uses this constant
+// (the .prefab refusal, the parse error, the Unity corrections),
+// so they cannot drift apart. unity-assets.js exports the
+// identical string for the Node-side refusal functions; the smoke
+// test asserts the two are equal.
+const UNITY_CREATE_PREFAB_EXAMPLE = '```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```';
 const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block. Do not describe the fix instead of making it.';
 
 // No-actions enforcement (v0.5.2). The refusal retry above only
@@ -1083,6 +1100,24 @@ function lastUserMessageText() {
   return '';
 }
 const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format. An explanation without the file is not an answer.';
+
+// Unity-aware corrections (v0.9.2). The generic correction tells
+// the model to "output the file" — for a prefab request that
+// drives it straight back into the refused .prefab write. A Unity
+// request gets the bridge correction instead: the work is a
+// unity-command block, never a file and never a helper script.
+const REFUSAL_CORRECTION_UNITY = 'You CAN do this. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
+const ENFORCEMENT_FOLLOWUP_UNITY = 'You did not output any file changes. The user asked for a Unity change. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
+// Pure, so the smoke test can exercise them directly.
+function isUnityRequest(text) {
+  return /prefab|unity|scene|scrollrect|scroll rect|canvas|textmeshpro/i.test(String(text || ''));
+}
+function refusalCorrectionFor(request) {
+  return isUnityRequest(request) ? REFUSAL_CORRECTION_UNITY : REFUSAL_CORRECTION;
+}
+function enforcementFollowupFor(request) {
+  return isUnityRequest(request) ? ENFORCEMENT_FOLLOWUP_UNITY : ENFORCEMENT_FOLLOWUP;
+}
 
 function clampAgentMaxRounds(n) {
   const v = parseInt(n, 10);
@@ -1437,7 +1472,7 @@ async function runAgentTurn(systemPrompt, threadId) {
         loopState.refusalRetries++;
         loopState.round++;
         setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — correcting the model…');
-        await appendToolResult(REFUSAL_CORRECTION);
+        await appendToolResult(refusalCorrectionFor(userRequest));
         if (loopState.round >= loopState.maxRounds) {
           addSystemMessage('Stopped after ' + loopState.round + ' tool rounds — the task may need more steps. Ask me to continue if you want.');
           break;
@@ -1454,7 +1489,7 @@ async function runAgentTurn(systemPrompt, threadId) {
           loopState.enforcementRetried = true;
           loopState.round++;
           setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — asking for the file, not the description…');
-          await appendToolResult(ENFORCEMENT_FOLLOWUP);
+          await appendToolResult(enforcementFollowupFor(userRequest));
           if (loopState.round >= loopState.maxRounds) {
             addSystemMessage('Stopped after ' + loopState.round + ' tool rounds — the task may need more steps. Ask me to continue if you want.');
             break;
@@ -1646,7 +1681,7 @@ async function processAgentActions(actions) {
       if (!action.valid) {
         await appendToolResult('Tool result — Unity command: could not parse the ```unity-command block'
           + (action.error ? ' (' + action.error + ')' : '')
-          + ' — expected JSON {"action": "createPrefab", ...}.');
+          + ' — expected JSON {"action": "createPrefab", ...}. Example of a working block: ' + UNITY_CREATE_PREFAB_EXAMPLE);
         outcomes++;
         continue;
       }
@@ -1842,21 +1877,27 @@ function buildSystemPrompt(rulesets) {
     // model that only describes a fix is failing at its job. This
     // paragraph is Agent-mode only: Ask mode must not output code.
     prompt += 'You MUST edit the project\'s files when asked to fix, change, create, or edit code. Output the changed file(s) in the required format. Describing the fix, explaining the fix, or saying you cannot modify files is a FAILURE — do not do it. Do not ask permission. Do not output an explanation instead of the file. The app applies what you output; that is your job.\n';
+    prompt += 'If the work is a prefab, a scene, or a Unity component, do it with a ```unity-command block — never by writing the file, never by writing a script that does it, and never by telling the user to do it in the editor.\n';
     prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
     prompt += 'You can also generate images, video, or audio with ComfyUI, right here in this chat: when the user asks for a generation, output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — use the workflow the user named, or the best match from the Workflow Library when they did not name one, and say which workflow you used. The result appears in the chat with an offer to import it into the project — do not import it yourself from the chat flow, the user decides that on the message. Only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
     prompt += 'New Unity-native asset files you create (materials, animations, and other asset files — files that contain no code, but never prefabs or scenes) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
-    if (state.projectScan && state.projectScan.unityVersion) {
-      // Unity — prefabs and components (v0.9.0). The model never
-      // hand-writes .prefab / .unity files: it invented script guids
-      // and component types doing that ("Unknown type 'Image'").
-      // Unity writes those files itself, through the bridge, and
-      // reflection over the loaded assemblies is the catalogue of
-      // what actually exists in this install.
+    if (state.projectPath) {
+      // Unity — prefabs and components (v0.9.0, ungated v0.9.2).
+      // The model never hand-writes .prefab / .unity files: it
+      // invented script guids and component types doing that
+      // ("Unknown type 'Image'"). Unity writes those files itself,
+      // through the bridge, and reflection over the loaded
+      // assemblies is the catalogue of what actually exists in this
+      // install. Shown whenever a Unity project is connected — a
+      // connected project path is the condition, NOT a project
+      // scan: Rob's 0.9.1 test never ran a scan, so the model never
+      // saw this section at all. The scan-gated project-context
+      // block above is unchanged.
       prompt += '## Unity — prefabs and components\n';
       prompt += 'Never hand-write .prefab or .unity files — the file writer refuses them. To create or change a prefab, output a ```unity-command block with JSON and Unity writes the file itself. The bridge runs the command in the open Unity project and the result comes back to you as a tool result, so a failure tells you what to fix.\n';
       prompt += 'Actions:\n';
-      prompt += '- createPrefab — build a prefab from a GameObject tree. Example (an Image prefab): ```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```\n';
+      prompt += '- createPrefab — build a prefab from a GameObject tree. Example (an Image prefab): ' + UNITY_CREATE_PREFAB_EXAMPLE + '\n';
       prompt += '- TextMeshPro text works the same way, with type "TextMeshProUGUI": ```unity-command\n{"action": "createPrefab", "name": "TitleText", "root": {"name": "TitleText", "components": [{"type": "RectTransform", "props": {"sizeDelta": [400, 60]}}, {"type": "TextMeshProUGUI", "props": {"text": "Hello"}}]}}\n```\nThe TextMeshPro package must be in the project — if it is not, the bridge fails plainly and you say so instead of inventing another way.\n';
       prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). Example — add a ScrollRect to a prefab that already has a Viewport child (with RectMask2D and an Image) and a Content child under it: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ScrollPanel.prefab", "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
@@ -5035,26 +5076,52 @@ function showApplyBar(changes, onDecision) {
   document.body.appendChild(bar);
 }
 
+// Editor-API generator scripts (v0.9.2) — the inline mirror of
+// unity-assets.js isEditorApiScript, for the same reason the
+// .prefab check below is inline: the renderer cannot require that
+// file. A runtime .cs outside Assets/Editor/ that calls
+// PrefabUtility / AssetDatabase / UnityEditor / … cannot compile,
+// and the model writes such scripts as a workaround when it does
+// not know the bridge does the job. Scripts under Assets/Editor/
+// are legitimate editor tooling and are never refused here.
+const EDITOR_API_RE = /\b(PrefabUtility|AssetDatabase|EditorApplication|EditorUtility|UnityEditor|EditorSceneManager|PrefabStage)\b/;
+function isEditorApiScriptChange(c) {
+  if (!c || !/\.cs$/i.test(c.path || '')) return false;
+  const parts = String(c.path || '').split(/[\\/]/).filter(Boolean);
+  if (parts.length >= 2 && parts[0].toLowerCase() === 'assets' && parts[1].toLowerCase() === 'editor') return false;
+  return EDITOR_API_RE.test(String(c.code || ''));
+}
+
 async function applyFileChanges(changes) {
   // v0.9.0: Unity writes its own files. A .prefab or .unity write is
   // refused here — the model must use a ```unity-command block
   // (createPrefab / modifyPrefab) instead, so Unity writes the YAML
   // itself and the model can never invent a script guid or a
-  // component type again. The refusal is a failed entry in the
-  // summary, so the caller's tool result carries it back to the
-  // model; it is never a silent skip. Nothing is snapshotted for a
-  // refused file, and no revert bar appears when nothing was written.
-  const refused = [];
+  // component type again. v0.9.2 adds the same refusal for
+  // editor-API generator scripts (see isEditorApiScriptChange
+  // above). Each refusal is a failed entry in the summary, so the
+  // caller's tool result carries it back to the model; it is never
+  // a silent skip. Nothing is snapshotted for a refused file, and
+  // no revert bar appears when nothing was written.
+  const refused = []; // { change, error }
   const allowed = [];
   for (const c of (changes || [])) {
-    if (/\.(prefab|unity)$/i.test(c.path || '')) refused.push(c);
-    else allowed.push(c);
+    if (/\.(prefab|unity)$/i.test(c.path || '')) {
+      refused.push({ change: c, error: c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
+    } else if (isEditorApiScriptChange(c)) {
+      refused.push({ change: c, error: c.path + ': Editor-only Unity APIs (PrefabUtility, AssetDatabase, …) only work in scripts under Assets/Editor/ — and you do not need a generator script at all: use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) and Unity does it. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
+    } else allowed.push(c);
   }
-  const refusalErrors = refused.map(c => c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead.');
+  const refusalErrors = refused.map(r => r.error);
   if (!allowed.length) {
     const bar0 = document.getElementById('apply-bar');
     if (bar0) bar0.remove();
-    if (refused.length) showToast(`⚠ ${refused.length} file${refused.length > 1 ? 's' : ''} not written — Unity writes prefabs and scenes itself (use a unity-command block)`);
+    if (refused.length) {
+      const reasons = [];
+      if (refused.some(r => /\.(prefab|unity)$/i.test(r.change.path || ''))) reasons.push('Unity writes prefabs and scenes itself (use a unity-command block)');
+      if (refused.some(r => /\.cs$/i.test(r.change.path || ''))) reasons.push('editor-API scripts belong under Assets/Editor/ — use a unity-command block instead of a generator script');
+      showToast(`⚠ ${refused.length} file${refused.length > 1 ? 's' : ''} not written — ` + reasons.join('; '));
+    }
     return { written: 0, failed: refused.length, errors: refusalErrors, snapshotId: null, label: (changes || []).map(c => c.path.split(/[\/]/).pop()).join(', ') };
   }
   changes = allowed;
