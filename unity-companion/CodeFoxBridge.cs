@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.16.1
+// CodeFoxBridge version: 0.16.2
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -200,6 +200,17 @@ using System.Reflection;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.LowLevel;
+
+// Animator type aliases (v0.16.2): UnityEditorInternal also defines
+// AnimatorController, AnimatorControllerParameter and
+// AnimatorControllerParameterType, so the bare names are ambiguous
+// (CS0104) once UnityEditorInternal is imported. The bridge always
+// means the public ones — the editor controller for
+// CreateAnimatorControllerAtPath, the runtime parameter types for
+// AddParameter and param.type.
+using AnimatorController = UnityEditor.Animations.AnimatorController;
+using AnimatorControllerParameter = UnityEngine.AnimatorControllerParameter;
+using AnimatorControllerParameterType = UnityEngine.AnimatorControllerParameterType;
 #endif
 
 [InitializeOnLoad]
@@ -221,7 +232,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.16.1";
+    public const string BridgeVersion = "0.16.2";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -2767,6 +2778,18 @@ public static class CodeFoxBridge
         private const int ExitTimeoutSeconds = 30;
         private const int MaxDurationSeconds = 120;
 
+        // SessionState has no SetLong/GetLong (only Bool/Float/Int/
+        // String), so longs ride as decimal strings. Values here are
+        // a console cursor and Unix-millisecond timestamps — plain
+        // integers, round-tripped exactly; a corrupt value reads as
+        // the default instead of throwing.
+        private static void SetSessionLong(string key, long value) { SessionState.SetString(key, value.ToString()); }
+        private static long GetSessionLong(string key, long defaultValue)
+        {
+            long v;
+            return long.TryParse(SessionState.GetString(key, ""), out v) ? v : defaultValue;
+        }
+
         public static void Initialize()
         {
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
@@ -2808,10 +2831,10 @@ public static class CodeFoxBridge
             SessionState.SetString(PendingIdKey, id);
             SessionState.SetString(PhaseKey, enabled ? "entering" : "exiting");
             SessionState.SetString(SettledStateKey, EditorApplication.isPlaying ? "play" : "edit");
-            SessionState.SetLong(StartCursorKey, ConsoleBuffer.CurrentCursor());
-            SessionState.SetLong(RequestedAtKey, UnixMs());
-            SessionState.SetLong(RunningSinceKey, 0);
-            SessionState.SetLong(DurationKey, (long)(durationSeconds * 1000));
+            SetSessionLong(StartCursorKey, ConsoleBuffer.CurrentCursor());
+            SetSessionLong(RequestedAtKey, UnixMs());
+            SetSessionLong(RunningSinceKey, 0);
+            SetSessionLong(DurationKey, (long)(durationSeconds * 1000));
             SessionState.SetString(EndedByKey, "");
             EditorApplication.isPlaying = enabled;
             return BridgeResult.Pending(enabled ? "Entering Play Mode…" : "Exiting Play Mode…");
@@ -2840,10 +2863,10 @@ public static class CodeFoxBridge
 
             string phase = SessionState.GetString(PhaseKey, "");
             string settled = SessionState.GetString(SettledStateKey, "");
-            long requestedAt = SessionState.GetLong(RequestedAtKey, 0);
-            long durationMs = SessionState.GetLong(DurationKey, 0);
-            long runningSince = SessionState.GetLong(RunningSinceKey, 0);
-            long startCursor = SessionState.GetLong(StartCursorKey, 0);
+            long requestedAt = GetSessionLong(RequestedAtKey, 0);
+            long durationMs = GetSessionLong(DurationKey, 0);
+            long runningSince = GetSessionLong(RunningSinceKey, 0);
+            long startCursor = GetSessionLong(StartCursorKey, 0);
             string endedBy = SessionState.GetString(EndedByKey, "");
             long now = UnixMs();
 
@@ -2873,7 +2896,7 @@ public static class CodeFoxBridge
                     return true;
                 }
                 SessionState.SetString(PhaseKey, "running");
-                SessionState.SetLong(RunningSinceKey, now);
+                SetSessionLong(RunningSinceKey, now);
                 phase = "running";
                 runningSince = now;
             }
@@ -2913,10 +2936,10 @@ public static class CodeFoxBridge
             SessionState.SetString(PendingIdKey, "");
             SessionState.SetString(PhaseKey, "");
             SessionState.SetString(SettledStateKey, "");
-            SessionState.SetLong(StartCursorKey, 0);
-            SessionState.SetLong(RequestedAtKey, 0);
-            SessionState.SetLong(RunningSinceKey, 0);
-            SessionState.SetLong(DurationKey, 0);
+            SetSessionLong(StartCursorKey, 0);
+            SetSessionLong(RequestedAtKey, 0);
+            SetSessionLong(RunningSinceKey, 0);
+            SetSessionLong(DurationKey, 0);
             SessionState.SetString(EndedByKey, "");
         }
 
@@ -4165,7 +4188,16 @@ public static class CodeFoxBridge
                 foreach (GameObject go in Resources.FindObjectsOfTypeAll<GameObject>())
                 {
                     if (go.transform.parent != null) continue;
-                    if (!PrefabUtility.IsPartOfPrefabContents(go)) continue;
+                    // NOTE (v0.16.2): PrefabUtility has no
+                    // IsPartOfPrefabContents — that is PrefabStage's
+                    // instance method, and it only covers Prefab Mode.
+                    // A LoadPrefabContents root is part of its prefab
+                    // asset (GetPrefabAssetType != NotAPrefab) but is
+                    // not an instance (GetPrefabInstanceStatus ==
+                    // NotAPrefab); a scene instance is Connected and a
+                    // plain scene object is NotAPrefab on both.
+                    if (PrefabUtility.GetPrefabAssetType(go) == PrefabAssetType.NotAPrefab) continue;
+                    if (PrefabUtility.GetPrefabInstanceStatus(go) != PrefabInstanceStatus.NotAPrefab) continue;
                     leakedRoot = go;
                     break;
                 }
@@ -5572,7 +5604,7 @@ public static class CodeFoxBridge
                 Undo.RecordObject(target, "Agent: rename " + target.name);
                 target.name = finalName;
             }
-            Undo.SetTransformParent(target.transform, newParentT, keepWorldPosition);
+            Undo.SetTransformParent(target.transform, newParentT, keepWorldPosition, "Agent: move " + target.name);
             MutationScope.Commit(undoGroup, scene);
             var resultData = new Dictionary<string, object>();
             resultData["path"] = ComponentLocator.GetPath(target.transform);
