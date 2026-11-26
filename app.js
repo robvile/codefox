@@ -1072,12 +1072,25 @@ async function sendChat() {
 
   // Build system prompt — use override if set by executePlan
   const usedExecPlanPrompt = !!(window._execPlanActive && window._execPlanSystemPrompt);
+  // Log triage (v0.12.0): a pasted log, or a message asking why
+  // there are many errors, routes the turn into triage mode — the
+  // ## Log triage section is Agent-mode only, so the mode switch
+  // happens here, BEFORE the prompt is built. Needs a connected
+  // project: without one there are no file or console tools to
+  // triage with, so the turn stays a normal chat turn (the model
+  // can still read whatever the user pasted). Not applied to an
+  // executePlan override prompt.
+  const wantsTriage = !usedExecPlanPrompt && !!state.projectPath && isLogTriageRequest(text);
   let systemPrompt;
   if (usedExecPlanPrompt) {
     systemPrompt = window._execPlanSystemPrompt;
     window._execPlanActive = false;
     window._execPlanSystemPrompt = null;
   } else {
+    if (wantsTriage && state.chatMode !== 'agent') {
+      setChatMode('agent');
+      addSystemMessage('Switched to Agent mode for log triage — diagnosing from the log needs the file and console tools.');
+    }
     const rulesets = await rb.db.getAll('rulesets');
     systemPrompt = buildSystemPrompt(rulesets);
   }
@@ -1087,6 +1100,8 @@ async function sendChat() {
   // lines to the system prompt so the model can fix it instead of
   // guessing. (Not applied to an executePlan override prompt.)
   if (!usedExecPlanPrompt) systemPrompt += await diagnoseErrorContext(text);
+  // Log triage (v0.12.0): point the model at the triage section.
+  if (wantsTriage) systemPrompt += LOG_TRIAGE_TURN_NOTE;
 
   // Capture thread ID now — state may change if user navigates away
   const currentThreadId = state.activeThreadId;
@@ -1203,6 +1218,10 @@ function asksForChange(text) {
 //               change was asked for and already enforced once.
 function loopNoActionsDecision(userRequest, enforcementRetried, lastRoundHadActions, lastRoundFailed) {
   if (lastRoundHadActions && !lastRoundFailed) return 'done';
+  // Log triage (v0.12.0): a triage turn is read-only — a text-only
+  // reply is the report, never a description that needs enforcing
+  // into a file change. Never push a triage turn to output a file.
+  if (isLogTriageRequest(userRequest)) return 'stop';
   if (!asksForChange(userRequest)) return 'stop';
   if (!enforcementRetried) return 'enforce';
   return 'stop';
@@ -1474,11 +1493,15 @@ const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user aske
 // unity-command block, never a file and never a helper script.
 const REFUSAL_CORRECTION_UNITY = 'You CAN do this. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
 const ENFORCEMENT_FOLLOWUP_UNITY = 'You did not output any file changes. The user asked for a Unity change. Do not write the file and do not write a helper script. Output a ```unity-command block with JSON — example: ' + UNITY_CREATE_PREFAB_EXAMPLE + '. The bridge runs it in Unity and the result comes back to you as a tool result.';
+const REFUSAL_CORRECTION_TRIAGE = 'This is a log-triage turn, not a fix turn. Do not output any file changes. Diagnose the root cause from the log and the console, and end with the triage report format (root cause, evidence, location, confidence, other issues, ignored noise, suggested fix described not applied).';
 // Pure, so the smoke test can exercise them directly.
 function isUnityRequest(text) {
   return /prefab|unity|scene|scrollrect|scroll rect|canvas|textmeshpro/i.test(String(text || ''));
 }
 function refusalCorrectionFor(request) {
+  // A triage refusal is the model confusing diagnosis with a fix:
+  // correct it back to diagnosis, never to file output.
+  if (isLogTriageRequest(request)) return REFUSAL_CORRECTION_TRIAGE;
   return isUnityRequest(request) ? REFUSAL_CORRECTION_UNITY : REFUSAL_CORRECTION;
 }
 function enforcementFollowupFor(request) {
@@ -2855,6 +2878,27 @@ function buildSystemPrompt(rulesets) {
       prompt += '- str_replace — replace ONE exact chunk of a file: {"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}. The old text must match EXACTLY ONCE: if it is not found, or it matches more than once, the edit fails plainly and you must view the file and copy the exact text (including indentation) or add more surrounding lines to make it unique. A str_replace is a real file change — CodeFox snapshots the file first and the user approves it like any other code write, and after the edit the project is compiled and the result comes back to you.\n';
       prompt += 'After you change a .cs file (a whole-file write or a str_replace), CodeFox compiles the project and the result comes back to you as a tool result before your next turn: "compile clean" means carry on; a failure lists the errors — fix them, and the check runs again. A project with no .NET solution reports "no check available" — that is not a failure and not an error to fix. Prefab and asset changes are not compiled — the bridge already reports those.\n';
       prompt += 'Do not put a **File Path:** line before a ```file block — the block is a command, not a file.\n';
+      prompt += '## Log triage\n';
+      prompt += 'When this turn is about finding the ROOT CAUSE of many errors — the user attached or pasted a log (Editor.log, Player.log, a build log, a crash log), or asks why the editor or console is showing many errors — you are in triage mode. Triage is READ-ONLY, and it overrides the "you MUST edit files" rule above for this turn: do not output file changes, do not write or edit any file, scene, prefab, asset or setting, do not enter play mode, do not reimport anything, and never trigger a recompile while reading. Diagnose first; the fix comes in a later turn, after the user has seen the report.\n';
+      prompt += 'Method:\n';
+      prompt += '- Find the FIRST error that causes the rest. Group repeated entries and count them — ten copies of one error is one problem, not ten.\n';
+      prompt += '- Separate user-code stack frames from engine, package and third-party frames. Map only user frames to source: view the exact lines with the file tools before claiming a cause.\n';
+      prompt += '- Read source for the root cause plus 2–3 confirming issues, never every entry.\n';
+      prompt += '- If a native stack trace has only addresses, say the cause cannot be confirmed — never guess from addresses.\n';
+      prompt += '- When several logs are involved, line them up by timestamp or sequence markers.\n';
+      prompt += '- Read an attached log file in ranges — start, then end, then narrow toward the first error. Never read it top to bottom; view returns at most 200 lines at a time, so use ranges.\n';
+      prompt += '- Read the Unity console with readConsole: Error first, then Warning separately, never "All". Newest 50, at most 2 stack lines each. If the result says truncated, the counts are lower bounds — say so, and ask for Editor.log.\n';
+      prompt += '- Log files you may ask for (Windows paths first — this user is on Windows, but the app is cross-platform): Editor.log is %LOCALAPPDATA%\\Unity\\Editor\\ on Windows, ~/Library/Logs/Unity/ on macOS; Player.log is %USERPROFILE%\\AppData\\LocalLow\\<Company>\\<Product>\\ on Windows, ~/Library/Logs/<Company>/<Product>/ on macOS; project logs are in <Project>/Logs/; after an editor crash ask for Editor-prev.log from the same folder as Editor.log.\n';
+      prompt += 'Report format — keep it short, and never echo large log sections:\n';
+      prompt += '- Root cause: 1–2 sentences.\n';
+      prompt += '- Evidence: at most 5 quoted log lines, each with its line number or timestamp.\n';
+      prompt += '- Location: file:line.\n';
+      prompt += '- Confidence: high, medium or low — and what is missing to raise it.\n';
+      prompt += '- Other issues: grouped, with counts.\n';
+      prompt += '- Ignored as noise: one line.\n';
+      prompt += '- Suggested fix: described, not applied.\n';
+      prompt += 'If the cause cannot be established, end with a "Request for more information" block instead of guessing: for each file you need, its name, its Windows path and its macOS path, and why you need it — plus what you found so far. Ask for EVERY file you suspect you will need in one go, not one per round trip. The main agent relays that block to the user word for word.\n';
+      prompt += 'A single error that can be read directly is NOT a triage turn — that stays a normal fix turn.\n';
       prompt += '## Git backups\n';
       prompt += 'Before you change anything in a project that uses git, CodeFox takes a backup commit first ("CodeFox backup: before …") — you do not need to make one, and the commit shows up in the user\'s git program (for example GitKraken) like any other commit. Only tracked changes are committed; untracked files are left alone.\n';
       prompt += 'You can inspect the project\'s git state with a ```git block (Agent mode only): {"action": "status"} — what changed and what branch you are on; {"action": "diff", "ref": "<sha>"} — what changed since a backup commit (add "nameStatus": true for a file list instead of the full diff); {"action": "log", "count": 10} — recent commits, backup commits are marked. After a change, compare what changed against the last backup to find what broke.\n';
@@ -2943,6 +2987,44 @@ PASTE THE ERROR OR LOG HERE
 \`\`\`
 `);
 }
+
+// ── Log triage (v0.12.0) — pure helpers ────────────────────────
+// Inline mirror of isLogTriageRequest in log-triage.js (the
+// renderer cannot require that file — the same reason
+// unity-assets.js and file-tools.js have inline mirrors). The
+// smoke test pins the two copies to agree: if you change one,
+// change both. A triage turn is a pasted log, or a message asking
+// why there are many errors; a single error stays a normal turn.
+const TRIAGE_MIN_ERROR_LINES = 4;
+function isLogTriageRequest(text) {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  const lower = t.toLowerCase();
+  let errorLines = 0;
+  for (const line of t.split(/\r?\n/)) {
+    if (/(error|exception|failed|fatal|crash)/i.test(line)) errorLines++;
+  }
+  if (errorLines >= TRIAGE_MIN_ERROR_LINES) return true;
+  if (/\b(editor|player|editor-prev)\.log\b/i.test(t)) {
+    if (/where\s+(is|are|can\s+i\s+find)\b/i.test(lower)) return false;
+    return true;
+  }
+  if (/\bcrash\s+log\b/i.test(t)) return true;
+  if (/(attach|paste|here is|here'?s|see|check|look at|read)[^.\n]{0,30}\blog\s+file\b/i.test(t)) return true;
+  if (/many errors|so many errors|lots of errors|tons of errors|full of errors|flooded with|spammed with|errors everywhere|all these errors|all the errors|a bunch of errors/i.test(lower)) return true;
+  if (/why\b[^.\n]{0,80}\b(so many|lots of|all these|many)\s+errors?\b/i.test(lower)) return true;
+  if (/why\b[^.\n]{0,60}\berrors\b/i.test(lower)) return true;
+  if (/diagnose\s+(the\s+|this\s+|my\s+|these\s+)?logs?\b/i.test(lower)) return true;
+  if (/\btriage\b/i.test(lower)) return true;
+  if (/read\s+(the\s+|my\s+)?(unity\s+)?(console|editor\.?log|player\.?log)\b/i.test(lower)) return true;
+  if (/what('| i)s\s+(wrong|causing|in)\b[^.\n]{0,20}\b(log|console)\b/i.test(lower)) return true;
+  return false;
+}
+
+// Short routing note appended to the system prompt on a triage
+// turn — the full method lives in the ## Log triage section of
+// the prompt; this just points the model at it.
+const LOG_TRIAGE_TURN_NOTE = '\n\n[CodeFox note: this is a log-triage turn — the user attached or pasted a log, or asks why there are many errors. Follow the ## Log triage section: diagnose read-only, do not fix anything, and end with the report format (or the "Request for more information" block if the cause cannot be established).]\n';
 
 // When a message reports a Unity error naming a file (e.g.
 // "Assets/Editor/CodeFoxBridge.cs(156,45): error CS1501 ..."),

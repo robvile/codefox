@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.11.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.12.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -189,6 +189,12 @@ The assistant reads before it edits — it views the exact lines, then replaces 
 - **str_replace** — replaces ONE exact chunk of a file: `{"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}`. The old text must match exactly once: not found, or matching more than once, fails plainly and the assistant views the file and copies the exact text (including indentation) instead of guessing. A str_replace is a real file change — the file is snapshotted first and the user approves it like any other code write, and the revert bar works the same way.
 
 **Compile after every edit** — after a round in which the assistant changed a `.cs` file (a whole-file write or a str_replace), CodeFox compiles the project with `dotnet build` and the result comes back as a tool result before the next turn: "compile clean" means carry on; a failure lists the errors, and the assistant fixes them and the check runs again. A project with no .NET solution reports "no check available" — that is not a failure. Prefab and asset changes are not compiled; the bridge already reports those.
+
+### Log triage
+
+When you paste a log (Editor.log, Player.log, a build log, a crash log) or ask why the editor is showing many errors, CodeFox switches into triage mode automatically: it finds the root cause instead of fixing things one by one. Triage is strictly read-only — it never changes a file, scene, prefab, asset or setting, never enters play mode, never recompiles or reimports while reading, so the evidence is never cleared. It reads the log in ranges (start, then end, then narrows toward the first error), reads the Unity console (Error first, then Warning separately), groups repeated entries, separates your code from engine and package frames, and views the exact source lines before naming a cause. The report is short: root cause, up to 5 quoted log lines as evidence, the file:line, confidence and what is missing to raise it, other issues grouped with counts, one line of ignored noise, and the suggested fix described — not applied. The fix itself comes after, as a normal turn. If the cause cannot be established, the report ends with a "Request for more information" block naming every file it needs (with Windows and macOS paths) in one go. A single error that can be read directly is not a triage turn — that stays a normal fix turn.
+
+Log files it may ask for: Editor.log is `%LOCALAPPDATA%\Unity\Editor\` (Windows) or `~/Library/Logs/Unity/` (macOS); Player.log is `%USERPROFILE%\AppData\LocalLow\<Company>\<Product>\` (Windows) or `~/Library/Logs/<Company>/<Product>/` (macOS); project logs are in `<Project>/Logs/`; after an editor crash, Editor-prev.log from the same folder as Editor.log.
 
 ### Git backups
 

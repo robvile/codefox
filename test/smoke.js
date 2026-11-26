@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.11.0.
+// 2. package.json version is 0.12.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.11.0', pkg.version === '0.11.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.11.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.11.0 — Local'));
+check('package.json version is 0.12.0', pkg.version === '0.12.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.12.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.12.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2053,15 +2053,19 @@ check('editor-API partition splits a mixed set, refusal names the file and the e
 const unityReqSrc = extractFunction(appJs, 'isUnityRequest');
 const corrForSrc = extractFunction(appJs, 'refusalCorrectionFor');
 const followForSrc = extractFunction(appJs, 'enforcementFollowupFor');
+// v0.12.0: the correction closes over the triage detector too.
+const triageCorrSrc = extractFunction(appJs, 'isLogTriageRequest');
+const triageCorrConst = /const TRIAGE_MIN_ERROR_LINES = \d+;/.exec(appJs);
 const exampleDecl = /const UNITY_CREATE_PREFAB_EXAMPLE = '[^']*';/.exec(appJs);
 const corrDecl = /const REFUSAL_CORRECTION = '[^']*';/.exec(appJs);
 const corrUDecl = /const REFUSAL_CORRECTION_UNITY = [^;]+;/.exec(appJs);
+const corrTDecl = /const REFUSAL_CORRECTION_TRIAGE = '[^']*';/.exec(appJs);
 const followDecl = /const ENFORCEMENT_FOLLOWUP = '[^']*';/.exec(appJs);
 const followUDecl = /const ENFORCEMENT_FOLLOWUP_UNITY = [^;]+;/.exec(appJs);
 check('correction helpers can be extracted for testing',
-  !!unityReqSrc && !!corrForSrc && !!followForSrc && !!exampleDecl && !!corrDecl && !!corrUDecl && !!followDecl && !!followUDecl);
-if (unityReqSrc && corrForSrc && followForSrc && exampleDecl && corrDecl && corrUDecl && followDecl && followUDecl) {
-  const fns = new Function(exampleDecl[0] + '\n' + corrDecl[0] + '\n' + corrUDecl[0] + '\n' + followDecl[0] + '\n' + followUDecl[0] + '\n' + unityReqSrc + '\n' + corrForSrc + '\n' + followForSrc + '\nreturn { refusalCorrectionFor, enforcementFollowupFor };')();
+  !!unityReqSrc && !!corrForSrc && !!followForSrc && !!exampleDecl && !!corrDecl && !!corrUDecl && !!corrTDecl && !!followDecl && !!followUDecl && !!triageCorrSrc && !!triageCorrConst);
+if (unityReqSrc && corrForSrc && followForSrc && exampleDecl && corrDecl && corrUDecl && corrTDecl && followDecl && followUDecl && triageCorrSrc && triageCorrConst) {
+  const fns = new Function(exampleDecl[0] + '\n' + corrDecl[0] + '\n' + corrUDecl[0] + '\n' + corrTDecl[0] + '\n' + followDecl[0] + '\n' + followUDecl[0] + '\n' + unityReqSrc + '\n' + triageCorrConst[0] + '\n' + triageCorrSrc + '\n' + corrForSrc + '\n' + followForSrc + '\nreturn { refusalCorrectionFor, enforcementFollowupFor };')();
   check('Unity-variant correction for a prefab request, generic for a non-Unity request',
     fns.refusalCorrectionFor('build me a prefab with an image').includes('unity-command block')
     && fns.refusalCorrectionFor('build me a prefab with an image').includes('"action": "createPrefab"')
@@ -2069,6 +2073,11 @@ if (unityReqSrc && corrForSrc && followForSrc && exampleDecl && corrDecl && corr
     && fns.refusalCorrectionFor('fix the null reference in Player.cs').includes('Output the corrected file')
     && fns.enforcementFollowupFor('edit this prefab to use a scroll rect').includes('unity-command block')
     && fns.enforcementFollowupFor('fix the typo in the README').includes('You did not output any file changes'));
+  // v0.12.0: a triage refusal is corrected back to diagnosis,
+  // never to file output.
+  check('refusal correction for a triage request goes back to diagnosis, not to file output',
+    fns.refusalCorrectionFor('here is the Editor.log from the crash').includes('log-triage turn')
+    && !fns.refusalCorrectionFor('here is the Editor.log from the crash').includes('Output the corrected file'));
 }
 check('CHANGELOG has the 0.9.2 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.2 — 2026-11-26'));
@@ -2144,10 +2153,13 @@ if (extractorSrc93) {
 const loopDecisionSrc = extractFunction(appJs, 'loopNoActionsDecision');
 const asksSrc93 = extractFunction(appJs, 'asksForChange');
 const intentDecl93 = /const CHANGE_INTENT_WORDS = \[[^\]]*\];/.exec(appJs);
+// v0.12.0: the loop-done decision closes over the triage detector.
+const triageFn93 = extractFunction(appJs, 'isLogTriageRequest');
+const triageConst93 = /const TRIAGE_MIN_ERROR_LINES = \d+;/.exec(appJs);
 check('loopNoActionsDecision can be extracted for testing',
-  !!loopDecisionSrc && !!asksSrc93 && !!intentDecl93);
-if (loopDecisionSrc && asksSrc93 && intentDecl93) {
-  const decide = new Function(intentDecl93[0] + '\n' + asksSrc93 + '\n' + loopDecisionSrc + '\nreturn loopNoActionsDecision;')();
+  !!loopDecisionSrc && !!asksSrc93 && !!intentDecl93 && !!triageFn93 && !!triageConst93);
+if (loopDecisionSrc && asksSrc93 && intentDecl93 && triageFn93 && triageConst93) {
+  const decide = new Function(intentDecl93[0] + '\n' + asksSrc93 + '\n' + triageConst93[0] + '\n' + triageFn93 + '\n' + loopDecisionSrc + '\nreturn loopNoActionsDecision;')();
   check('loop-done: all-success round + text-only reply ends, anything else enforces or stops',
     decide('build me a prefab with an image', false, true, false) === 'done'
     && decide('build me a prefab with an image', false, true, true) === 'enforce'
@@ -2156,6 +2168,13 @@ if (loopDecisionSrc && asksSrc93 && intentDecl93) {
     && decide('build me a prefab with an image', true, true, true) === 'stop'
     && decide('what is a prefab?', false, false, false) === 'stop'
     && decide('what is a prefab?', false, true, false) === 'done');
+  // v0.12.0: a triage turn is read-only — a text-only reply is the
+  // report, never an enforcement, even when the request names a fix
+  // (the Diagnose error template says "Diagnose it and fix it").
+  check('loop-done: a triage turn never enforces a file change',
+    decide('I pasted a Unity console error / log below. Diagnose it and fix it:\nNullReferenceException\nerror CS1002\nFailed to load\nerror CS0117\nFatal error', false, false, false) === 'stop'
+    && decide('why are there so many errors in the console', false, false, false) === 'stop'
+    && decide('here is the Editor.log from the crash', false, true, false) === 'done');
 }
 check('agent loop records per-round success for the no-actions branch',
   appJs.includes('lastRoundHadActions: false, lastRoundFailed: false')
@@ -2774,10 +2793,117 @@ check('bridge version pins are 0.11.0 everywhere',
   && bridgeCs.includes('BridgeVersion = "0.11.0"')
   && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.11.0'")
   && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.11.0'));
-check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.11.0 entry',
+check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.12.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.11.0')
-  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.11.0 — 2026-11-26'));
+  && readme.includes('readConsole') && readme.includes('version-0.12.0')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.12.0 — 2026-11-26'));
+
+// 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
+// loop guards, wiring. No new IPCs, no bridge change.
+const logTriage = require('../log-triage');
+const TRIAGE_TRUE = [
+  'here is the Editor.log from the crash',
+  'Player.log attached — why does the game crash on start',
+  'why are there so many errors in the console',
+  'the editor is full of errors, what is going on',
+  'diagnose these logs please',
+  'can you read the Unity console? it is flooded with errors',
+  'Editor-prev.log after the editor crashed',
+  'what is causing all these errors',
+  'why is the console full of errors',
+  'I pasted a Unity console error / log below. Diagnose it and fix it:\n```\nNullReferenceException: Object reference not set\nerror CS1002: ; expected\nFailed to load asset\nerror CS0117: no definition\nFatal error in gc\n```',
+  'here is the log file, what is the root cause',
+  'what is wrong with the console',
+];
+const TRIAGE_FALSE = [
+  'fix this error: Assets/Scripts/Player.cs(42,5): error CS1002: ; expected',
+  'why is there an error in Player.cs',
+  'show me the git log',
+  'add a console.log to debug this',
+  'create a log file for player scores',
+  'the build failed',
+  'where is the Editor.log file?',
+  'what is a prefab?',
+  'NullReferenceException in Player.cs line 42, fix it',
+  '',
+  'diagnose this error: error CS1501',
+  // Three error lines is one error pasted for a fix, not a log.
+  'error CS1002\nerror CS0117\nFailed to load',
+];
+check('log-triage detector fires on log files, many-errors asks, and pasted logs',
+  TRIAGE_TRUE.every(t => logTriage.isLogTriageRequest(t) === true));
+check('log-triage detector stays quiet on a single error, git log, and location questions',
+  TRIAGE_FALSE.every(t => logTriage.isLogTriageRequest(t) === false));
+
+// The app.js mirror must agree with log-triage.js: the renderer
+// cannot require that file, so the detector lives in both places.
+const triageMirrorSrc = extractFunction(appJs, 'isLogTriageRequest');
+const triageMirrorConst = /const TRIAGE_MIN_ERROR_LINES = \d+;/.exec(appJs);
+check('app.js log-triage mirror is extractable for testing',
+  !!triageMirrorSrc && !!triageMirrorConst);
+if (triageMirrorSrc && triageMirrorConst) {
+  const mirrorDetect = new Function(triageMirrorConst[0] + '\n' + triageMirrorSrc + '\nreturn isLogTriageRequest;')();
+  check('app.js log-triage mirror agrees with log-triage.js on every case',
+    [...TRIAGE_TRUE, ...TRIAGE_FALSE].every(t =>
+      mirrorDetect(t) === logTriage.isLogTriageRequest(t)));
+}
+
+// Prompt: the agent prompt carries the triage section (Agent mode,
+// project connected); the Ask prompt and a no-project prompt do not.
+if (promptSrc) {
+  const buildPrompt12 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt12 = buildPrompt12(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the log-triage section: trigger, read-only override, method, report format, request for more information',
+    agentPrompt12.includes('## Log triage')
+    && agentPrompt12.includes('READ-ONLY')
+    && agentPrompt12.includes('overrides the "you MUST edit files" rule')
+    && agentPrompt12.includes('FIRST error that causes the rest')
+    && agentPrompt12.includes('never guess from addresses')
+    && agentPrompt12.includes('never trigger a recompile while reading')
+    && agentPrompt12.includes('start, then end, then narrow toward the first error')
+    && agentPrompt12.includes('Request for more information')
+    && agentPrompt12.includes('EVERY file you suspect')
+    && agentPrompt12.includes('Editor-prev.log')
+    && agentPrompt12.includes('%LOCALAPPDATA%')
+    && agentPrompt12.includes('Ignored as noise')
+    && agentPrompt12.includes('A single error that can be read directly is NOT a triage turn'));
+  const askPrompt12 = buildPrompt12(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'ask' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('ask prompt has no log-triage section (Agent-mode only)', !askPrompt12.includes('## Log triage'));
+  const noProjectPrompt12 = buildPrompt12(
+    { projectContext: '', projectPath: '', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('no-project prompt has no log-triage section (needs the file and console tools)', !noProjectPrompt12.includes('## Log triage'));
+}
+
+// Wiring: sendChat detects triage, switches Ask/Plan to Agent
+// before the prompt is built, and appends the turn note.
+check('sendChat routes triage turns: detector, mode switch before the prompt, turn note',
+  appJs.includes('const wantsTriage = !usedExecPlanPrompt && !!state.projectPath && isLogTriageRequest(text)')
+  && appJs.includes("if (wantsTriage && state.chatMode !== 'agent')")
+  && appJs.includes('Switched to Agent mode for log triage')
+  && appJs.includes('if (wantsTriage) systemPrompt += LOG_TRIAGE_TURN_NOTE;'));
+check('triage loop guards: no-actions decision never enforces triage, refusal correction routes back to diagnosis',
+  appJs.includes("if (isLogTriageRequest(userRequest)) return 'stop';")
+  && appJs.includes('REFUSAL_CORRECTION_TRIAGE')
+  && appJs.includes('if (isLogTriageRequest(request)) return REFUSAL_CORRECTION_TRIAGE;'));
+
+// (The refusal-correction behaviour for triage turns is covered
+// by the v0.9.2 correction harness above, which extracts
+// refusalCorrectionFor with the triage detector in scope.)
+check('README has the log-triage section + CHANGELOG has the 0.12.0 triage entry',
+  readme.includes('### Log triage') && readme.includes('strictly read-only')
+  && readme.includes('Editor-prev.log')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Log triage as an automatic pipeline stage'));
 (async () => {
   await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
   const base = 'http://127.0.0.1:' + mockServer.address().port;
