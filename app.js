@@ -1358,20 +1358,126 @@ function shouldRunRoundCompileCheck(writtenPaths) {
   return (writtenPaths || []).some(p => String(p || '').toLowerCase().endsWith('.cs'));
 }
 
-// The compile-check tool result, as the model sees it.
-// buildCheck says "no .NET solution found" when the project has
-// no solution: that is "no check available", a plain note — never
-// a failure, never an error to fix. A build that ran and failed
-// reports the error tail, so the model can fix it next round.
-function roundCompileCheckText(check) {
-  if (!check) return 'Compile check: no result.';
-  const text = String(check.rawTail || check.error || '').trim();
-  if (check.ok) return 'Compile check: compile clean — the project compiles.';
-  if (/no \.net solution found/i.test(text) || /no \.net solution found/i.test(String(check.error || ''))) {
-    return 'Compile check: no .NET solution found in the project, so there is no check available here. Not a failure — carry on.';
+// The compile-check shape every check normalizes into:
+//   { ok, source: 'bridge' | 'dotnet' | 'none', noCheck,
+//     errors: [{file, line, message}], errorCount, warningCount,
+//     detail }
+// `ok` is "the project compiles" (or there was nothing to
+// compile). `noCheck` is "no check could run at all" — never a
+// failure, never an error to fix. `source` is which compiler
+// answered: Unity's own compiler through the bridge, or the
+// dotnet build check as the fallback.
+
+// Normalize a recompile_and_report_errors result (bridge data)
+// into the shared compile-check shape. Compile errors are data,
+// not a bridge failure: success:false with errors is a failed
+// check, not a missing one.
+function normalizeBridgeCompileReport(data, message) {
+  const d = (data && typeof data === 'object') ? data : {};
+  const errors = Array.isArray(d.errors) ? d.errors.map(e => ({
+    file: String((e && e.file) || ''),
+    line: Number((e && e.line) || 0) || 0,
+    message: String((e && e.message) || ''),
+  })).filter(e => e.message) : [];
+  const errorCount = Number(d.errorCount) || errors.length;
+  const warningCount = Number(d.warningCount) || 0;
+  const success = d.success !== false;
+  const compiled = d.compiled !== false;
+  const detail = compiled
+    ? (success
+      ? 'Compile clean (Unity).' + (warningCount ? ' ' + warningCount + ' warning(s).' : '')
+      : 'Compile failed (Unity): ' + errorCount + ' error(s)' + (warningCount ? ', ' + warningCount + ' warning(s)' : '') + '.\n'
+        + errors.map(e => (e.file ? e.file + (e.line ? ':' + e.line : '') + ': ' : '') + e.message).join('\n')
+        + (errorCount > errors.length ? '\n(showing the first ' + errors.length + ' of ' + errorCount + ' errors)' : '')
+        + '\nFix the first error first; later errors are often caused by it.')
+    : 'No script changes — nothing to compile.';
+  return { ok: success, source: 'bridge', noCheck: false, errors, errorCount, warningCount, detail };
+}
+
+// Normalize a dotnet buildCheck result into the same shape. "no
+// .NET solution found" is "no check available" — never a failure,
+// never an error to fix. "No project folder set" means there was
+// nothing to check at all.
+function normalizeDotnetBuildCheck(check) {
+  const c = check || {};
+  const text = String(c.rawTail || c.error || '').trim();
+  if (c.ok) return { ok: true, source: 'dotnet', noCheck: false, errors: [], errorCount: 0, warningCount: 0, detail: 'Compile clean (dotnet).' };
+  if (/no project folder set/i.test(text)) {
+    return { ok: false, source: 'none', noCheck: true, errors: [], errorCount: 0, warningCount: 0, detail: 'No project folder set.' };
+  }
+  if (/no \.net solution found/i.test(text)) {
+    return { ok: false, source: 'dotnet', noCheck: true, errors: [], errorCount: 0, warningCount: 0, detail: 'No .NET solution found in the project, so there is no check available here. Not a failure — carry on.' };
   }
   const tail = text.split(/\r?\n/).slice(-30).join('\n');
-  return 'Compile check: FAILED — the project does not compile. Fix the errors below, then the check runs again.\n' + tail;
+  return { ok: false, source: 'dotnet', noCheck: false, errors: [], errorCount: 0, warningCount: 0, detail: 'Compile failed (dotnet).\n' + tail };
+}
+
+// The first error of a compile check, as one comparable string
+// (file:line: message, or the first error line of the dotnet
+// tail). The loop compares it across rounds: an identical first
+// error twice means the fix is not working. Returns null when the
+// check carries no identifiable first error.
+function firstCompileError(check) {
+  const c = check || {};
+  if (Array.isArray(c.errors) && c.errors.length) {
+    const e = c.errors[0];
+    return (e.file ? e.file + (e.line ? ':' + e.line : '') + ': ' : '') + e.message;
+  }
+  const detail = String(c.detail || '').trim();
+  if (!detail) return null;
+  const lines = detail.split(/\r?\n/).filter(l => l.trim());
+  for (const line of lines) {
+    if (/error/i.test(line)) return line.trim();
+  }
+  return null;
+}
+
+function isSameFirstError(a, b) {
+  return !!a && !!b && a === b;
+}
+
+// One compile check for the agent loop and the post-turn verify:
+// Unity's own compiler first (recompile_and_report_errors through
+// the bridge), the dotnet build check as the fallback. The bridge
+// path only runs when the heartbeat is fresh — Unity open with the
+// bridge loaded — so a closed Unity costs one fast IPC read, not a
+// 60-second wait. A bridge that does not answer falls through to
+// dotnet; dotnet stays the check when there is no bridge or no
+// Unity open. Returns the normalized shape (see
+// normalizeBridgeCompileReport). Never throws.
+async function runCompileCheck() {
+  if (state.projectPath) {
+    try {
+      const hb = await rb.unity.heartbeat(state.projectPath);
+      if (hb && hb.fresh) {
+        const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'recompile_and_report_errors' } });
+        if (res && res.ok && res.data) return normalizeBridgeCompileReport(res.data, res.message);
+        // The bridge did not answer: a timeout after it was
+        // answering is the breakage signal the post-turn verify
+        // reads.
+        if (res && String(res.error || '').includes('did not answer in 60 seconds') && loopState) loopState.unityTimedOut = true;
+      }
+    } catch (e) { /* fall through to dotnet */ }
+  }
+  let check;
+  try {
+    check = await rb.unity.buildCheck({ projectPath: state.projectPath });
+  } catch (e) {
+    check = { ok: false, error: String(e && e.message || e) };
+  }
+  return normalizeDotnetBuildCheck(check);
+}
+
+// The compile-check tool result, as the model sees it. A check
+// that ran clean says so; a "no check available" project says so
+// plainly and is never a failure; a failed check lists the errors
+// (Unity's own compiler first, dotnet as the fallback) so the
+// model can fix them next round.
+function roundCompileCheckText(check) {
+  if (!check) return 'Compile check: no result.';
+  if (check.noCheck) return 'Compile check: ' + (check.detail || 'no check available here. Not a failure — carry on.');
+  if (check.ok) return 'Compile check: compile clean — the project compiles.';
+  return 'Compile check: FAILED — the project does not compile. Fix the errors below, then the check runs again.\n' + (check.detail || '');
 }
 
 // The tool result for a ```file block, as the model sees it.
@@ -1396,21 +1502,50 @@ function fileToolResultText(result) {
   return 'File tool: done.';
 }
 
-// Format a readConsole result for the model (v0.11.0): newest
-// first, at most 50 entries, at most 2 stack lines each, and the
-// truncated flag when the console held more. A `truncated: true`
-// means the earliest errors are missing and the count is a lower
-// bound — the model must say so, and the full picture is in
-// Editor.log. (The log-triage build consumes this shape.)
+// Format a readConsole result for the model (v0.12.0): the bridge
+// keeps its own log buffer and reads it by sequence number, so the
+// result is earliest-first with a cursor for the next read — not
+// the newest-first 50 of v0.11.0. The header carries what the model
+// did NOT see: omitted (cut by maxEntries), hiddenByFilter,
+// errorCount / warningCount (totals for the window), and
+// missedEvictedEntries (entries evicted from the buffer before the
+// oldest one returned — the full log is in Editor.log). An entry
+// with count > 1 is one log line repeated that many times. The old
+// shape (no cursor) still formats the old way, so a stale result
+// never breaks the turn. (The log-triage build consumes this shape.)
 function formatConsoleResult(data) {
   const d = data || {};
   const entries = Array.isArray(d.entries) ? d.entries : [];
-  if (!entries.length) return 'Console (' + (d.logType || 'Error') + '): no entries.';
-  const head = 'Console (' + (d.logType || 'Error') + '): ' + entries.length + ' newest entr' + (entries.length === 1 ? 'y' : 'ies') + (d.truncated ? ' — truncated, the console held more; the earliest entries are missing and this count is a lower bound. The full log is in Editor.log.' : '') + ':';
+  if (d.cursor == null) {
+    // Old shape (bridge before 0.12.0): newest first, truncated flag.
+    if (!entries.length) return 'Console (' + (d.logType || 'Error') + '): no entries.';
+    const head = 'Console (' + (d.logType || 'Error') + '): ' + entries.length + ' newest entr' + (entries.length === 1 ? 'y' : 'ies') + (d.truncated ? ' — truncated, the console held more; the earliest entries are missing and this count is a lower bound. The full log is in Editor.log.' : '') + ':';
+    const body = entries.map(e => {
+      const where = e.file ? ' (' + e.file + (e.line ? ':' + e.line : '') + ')' : '';
+      const stack = (e.stack || []).map(s => '    at ' + s).join('\n');
+      return '- ' + (e.message || '') + where + (stack ? '\n' + stack : '');
+    }).join('\n');
+    return head + '\n' + body;
+  }
+  if (d.marked) return 'Console marked at seq ' + d.cursor + ' — read with sinceSeq ' + d.cursor + ' to see what happens next.';
+  if (!entries.length) {
+    let msg = 'Console: no new entries since the cursor (' + d.cursor + ')';
+    if (d.hiddenByFilter) msg += ' — ' + d.hiddenByFilter + ' hidden by the filters';
+    if (d.errorCount || d.warningCount) msg += ' (' + (d.errorCount || 0) + ' error(s), ' + (d.warningCount || 0) + ' warning(s) in the window)';
+    if (d.missedEvictedEntries) msg += ' — ' + d.missedEvictedEntries + ' older entries were evicted; the full log is in Editor.log';
+    return msg + '.';
+  }
+  const head = 'Console: ' + entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies') + ' (cursor ' + d.cursor + ')'
+    + ' — ' + (d.errorCount || 0) + ' error(s), ' + (d.warningCount || 0) + ' warning(s) in the window'
+    + (d.omitted ? '; ' + d.omitted + ' more omitted (maxEntries cut them — narrow sinceSeq or raise maxEntries)' : '')
+    + (d.hiddenByFilter ? '; ' + d.hiddenByFilter + ' hidden by the filters' : '')
+    + (d.missedEvictedEntries ? '; ' + d.missedEvictedEntries + ' older entries were evicted from the buffer, so the earliest errors may be missing — the full log is in Editor.log' : '')
+    + ':';
   const body = entries.map(e => {
     const where = e.file ? ' (' + e.file + (e.line ? ':' + e.line : '') + ')' : '';
+    const repeated = e.count > 1 ? ' (repeated ' + e.count + ' times in total)' : '';
     const stack = (e.stack || []).map(s => '    at ' + s).join('\n');
-    return '- ' + (e.message || '') + where + (stack ? '\n' + stack : '');
+    return '- ' + (e.message || '') + repeated + where + (stack ? '\n' + stack : '');
   }).join('\n');
   return head + '\n' + body;
 }
@@ -1984,16 +2119,16 @@ function gitToolResultText(action, res) {
 // — never a retry loop.
 async function verifyTurnAfterChanges() {
   if (!loopState || !state.projectPath) return;
-  const first = await rb.unity.buildCheck({ projectPath: state.projectPath });
+  const first = await runCompileCheck();
   const firstOk = !!(first && first.ok);
-  const noSolution = first && first.ok === false && first.error === 'no .NET solution found';
+  const noSolution = !!(first && first.noCheck);
   const timeoutSignal = loopState.unityWasAnswering && loopState.unityTimedOut;
   const buildFailed = !firstOk && !noSolution;
   // Nothing to verify: no solution to check and no timeout signal.
   if (!buildFailed && !timeoutSignal) return;
 
   const detail = buildFailed
-    ? String((first && (first.rawTail || first.error)) || 'build failed')
+    ? String((first && first.detail) || 'build failed')
     : 'Unity stopped answering after a change — the bridge stops answering when a .cs change breaks compilation. The dotnet build itself passes, so this may also be Unity not running.';
   // One fix round: give the model the errors and let it fix them.
   await appendToolResult('Tool result — post-change check failed:\n' + detail.slice(0, 4000)
@@ -2013,7 +2148,7 @@ async function verifyTurnAfterChanges() {
   } catch (e) { /* a failed fix round counts as no fix */ }
   let secondOk = null;
   if (buildFailed && fixProduced) {
-    const second = await rb.unity.buildCheck({ projectPath: state.projectPath });
+    const second = await runCompileCheck();
     secondOk = !!(second && second.ok);
     if (secondOk) {
       addSystemMessage('The build broke after the last change, but the fix round repaired it — the build passes now.');
@@ -2107,6 +2242,9 @@ async function runAgentTurn(systemPrompt, threadId) {
     backupAttempted: false, backupRestorePoint: null, backupPreUntracked: [],
     turnChangedFiles: [], turnChangedCode: false, turnSnapshotIds: [],
     unityWasAnswering: false, unityTimedOut: false,
+    // v0.12.0: the first error of the last compile check — the
+    // identical-first-error rule compares against it.
+    lastCompileFirstError: null,
   };
   showLoopUI();
   try {
@@ -2258,27 +2396,31 @@ async function applyFilesAction(changes, resultPrefix) {
   return { outcomes, failed, stop: false, writtenPaths };
 }
 
-// Compile after every edit (v0.11.0): run the existing
-// unity:buildCheck IPC once and append the result as a tool
-// result before the next model turn. Reuses the IPC — the dotnet
-// invocation is not re-implemented here. Returns true when the
-// check ran and the build actually failed (a "no solution"
-// project is not a failure — it reports "no check available").
-// The check never throws: a failed IPC is reported as a tool
-// result, never a crashed turn.
+// Compile after every edit (v0.11.0, Unity compiler v0.12.0): run
+// one compile check and append the result as a tool result before
+// the next model turn. Reuses the shared check — Unity's own
+// compiler when the bridge answers, dotnet otherwise. Returns true
+// when the check ran and the build actually failed (a "no check
+// available" project is not a failure — it reports "no check
+// available"). The identical-first-error rule (v0.12.0): when the
+// first error is unchanged since the last check, the fix is not
+// working — the model is told to stop and tell the user instead of
+// trying the same fix again. The check never throws: a failed IPC
+// is reported as a tool result, never a crashed turn.
 async function runRoundCompileCheck() {
   if (!state.projectPath) return false;
   if (loopState) setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — compiling…');
-  let check;
-  try {
-    check = await rb.unity.buildCheck(state.projectPath);
-  } catch (e) {
-    check = { ok: false, error: String(e && e.message || e) };
+  const check = await runCompileCheck();
+  let text = 'Tool result — ' + roundCompileCheckText(check);
+  if (!check.ok && !check.noCheck && loopState) {
+    const first = firstCompileError(check);
+    if (first && isSameFirstError(loopState.lastCompileFirstError, first)) {
+      text += '\nThe first error is identical to the last compile check — the same fix is not working. Stop and tell the user what is blocking instead of trying again.';
+    }
+    loopState.lastCompileFirstError = first;
   }
-  await appendToolResult('Tool result — ' + roundCompileCheckText(check));
-  if (!check || check.ok) return false;
-  const text = String(check.rawTail || check.error || '');
-  if (/no \.net solution found/i.test(text)) return false;
+  await appendToolResult(text);
+  if (!check || check.ok || check.noCheck) return false;
   return true;
 }
 
@@ -2495,8 +2637,8 @@ async function processAgentActions(actions) {
         }
         let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
           + (res.path ? ' (' + res.path + ')' : '');
-        // v0.11.0: readConsole comes back as newest-first entries
-        // with at most 2 stack lines each — format them for the
+        // v0.12.0: readConsole comes back as earliest-first entries
+        // with a cursor for the next read — format them for the
         // model instead of dumping raw JSON. (The log-triage build
         // consumes this shape.)
         if (label === 'readConsole' && res.data != null) {
@@ -2922,14 +3064,15 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += '- deleteAsset — delete one asset: ```unity-command\n{"action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab"}\n```\nThe path must start with Assets/ and must exist. CodeFox snapshots the file (and its .meta) before Unity deletes it, so the user can revert the delete.\n';
       prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
-      prompt += '- readConsole — read the newest Unity console entries of one type, without recompiling or reimporting anything (reading never clears the console): {"action": "readConsole", "logType": "Error"}. Ask for Error first, then Warning separately when you need it — never "All". You get the newest 50 entries, each with its message, file:line where Unity knows it, and up to 2 stack lines; a truncated flag means the console held more and the earliest entries are missing, so the count is a lower bound and the full log is in Editor.log. Use it when a build, a play-mode run, or a prefab command fails and the error is in Unity, not in the file you just wrote.\n';
+      prompt += '- readConsole — read the Unity console from the bridge\'s own log buffer, without recompiling or reimporting anything (reading never clears the console). The buffer reads by sequence number, earliest first: {"action": "readConsole", "sinceSeq": 0} reads everything since the cursor, {"action": "readConsole", "mark": true} returns just the cursor so you can mark a point in time and read what happens after it. Filter with "minLevel" (0 = everything, 1 = warnings and errors, 2 = errors only), "contains" (a substring), "playModeOnly": true (only entries logged while the game was running), and "maxEntries" (default 30, at most 100). The result carries a cursor for the next read, plus errorCount / warningCount for the window, omitted (cut by maxEntries), hiddenByFilter, and missedEvictedEntries (older entries the buffer dropped — the full log is in Editor.log). Stacks come back for error entries only. To watch what happens while the game runs: mark the console, ask the user to run the game, then read since the cursor with minLevel 1 and playModeOnly true — errors? fix them, recompile, and repeat. The old "logType": "Error" / "Warning" still works (it maps to minLevel 2 / 1) — never "All". Use it when a build, a play-mode run, or a prefab command fails and the error is in Unity, not in the file you just wrote.\n';
+      prompt += '- recompile_and_report_errors — ask Unity itself to compile and report the errors, with file:line: {"action": "recompile_and_report_errors"}. Use it after writing or editing .cs files by hand, or whenever you need to know whether the project compiles. The result is {"success": bool, "compiled": bool, "errors": [{"file", "line", "message"}], "errorCount": n, "warningCount": n} — compile errors come back as success:false, which is the tool working and reporting a failure, not a bridge failure. "compiled": false means there was nothing to compile. Fix the first error first; later errors are often caused by it. If the first error is identical on two consecutive checks, stop and tell the user — the fix is not working.\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
       prompt += '## Reading and editing files\n';
       prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
       prompt += '- view — read a file in line ranges, with line numbers: {"action": "view", "path": "Assets/Scripts/Player.cs", "start": 40, "end": 80}. Omit start/end to read from the top. At most 200 lines come back at once, and the result says so when it was cut short — view the next range if you need it.\n';
       prompt += '- grep — search plain text across the project (a substring, case-insensitive, not a regex): {"action": "grep", "pattern": "Health"}. Optionally narrow it with "paths": ["Assets/Scripts"] (folders or files). Results are file:line: matching line, at most 50 — narrow the pattern or the paths to see more. Library, .git, node_modules and the other generated folders are never searched. No match is a plain empty result, not an error.\n';
       prompt += '- str_replace — replace ONE exact chunk of a file: {"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}. The old text must match EXACTLY ONCE: if it is not found, or it matches more than once, the edit fails plainly and you must view the file and copy the exact text (including indentation) or add more surrounding lines to make it unique. A str_replace is a real file change — CodeFox snapshots the file first and the user approves it like any other code write, and after the edit the project is compiled and the result comes back to you.\n';
-      prompt += 'After you change a .cs file (a whole-file write or a str_replace), CodeFox compiles the project and the result comes back to you as a tool result before your next turn: "compile clean" means carry on; a failure lists the errors — fix them, and the check runs again. A project with no .NET solution reports "no check available" — that is not a failure and not an error to fix. Prefab and asset changes are not compiled — the bridge already reports those.\n';
+      prompt += 'After you change a .cs file (a whole-file write or a str_replace), CodeFox compiles the project with Unity\'s own compiler and the result comes back to you as a tool result before your next turn: "compile clean" means carry on; a failure lists the errors with file:line — fix the first error first, then the check runs again. If the first error is identical on two consecutive checks, stop and tell the user — the fix is not working. A project with no check available reports "no check available" — that is not a failure and not an error to fix. Prefab and asset changes are not compiled — the bridge already reports those.\n';
       prompt += 'Do not put a **File Path:** line before a ```file block — the block is a command, not a file.\n';
       prompt += '## Log triage\n';
       prompt += 'When this turn is about finding the ROOT CAUSE of many errors — the user attached or pasted a log (Editor.log, Player.log, a build log, a crash log), or asks why the editor or console is showing many errors — you are in triage mode. Triage is READ-ONLY, and it overrides the "you MUST edit files" rule above for this turn: do not output file changes, do not write or edit any file, scene, prefab, asset or setting, do not enter play mode, do not reimport anything, and never trigger a recompile while reading. Diagnose first; the fix comes in a later turn, after the user has seen the report.\n';
@@ -2940,7 +3083,7 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += '- If a native stack trace has only addresses, say the cause cannot be confirmed — never guess from addresses.\n';
       prompt += '- When several logs are involved, line them up by timestamp or sequence markers.\n';
       prompt += '- Read an attached log file in ranges — start, then end, then narrow toward the first error. Never read it top to bottom; view returns at most 200 lines at a time, so use ranges.\n';
-      prompt += '- Read the Unity console with readConsole: Error first, then Warning separately, never "All". Newest 50, at most 2 stack lines each. If the result says truncated, the counts are lower bounds — say so, and ask for Editor.log.\n';
+      prompt += '- Read the Unity console with readConsole: earliest first, up to 100 entries, stacks for error entries. Ask for errors first (minLevel 2), then warnings (minLevel 1) separately, never "All". If the result reports omitted or missedEvictedEntries, the counts are lower bounds — say so, and ask for Editor.log.\n';
       prompt += '- Log files you may ask for (Windows paths first — this user is on Windows, but the app is cross-platform): Editor.log is %LOCALAPPDATA%\\Unity\\Editor\\ on Windows, ~/Library/Logs/Unity/ on macOS; Player.log is %USERPROFILE%\\AppData\\LocalLow\\<Company>\\<Product>\\ on Windows, ~/Library/Logs/<Company>/<Product>/ on macOS; project logs are in <Project>/Logs/; after an editor crash ask for Editor-prev.log from the same folder as Editor.log.\n';
       prompt += 'Report format — keep it short, and never echo large log sections:\n';
       prompt += '- Root cause: 1–2 sentences.\n';
@@ -3183,21 +3326,19 @@ async function runTests() {
   return res;
 }
 async function buildCheck() {
-  showToast('Running dotnet build check…');
-  const res = await rb.unity.buildCheck({ projectPath: state.projectPath });
-  if (!res.ok && !res.solution) {
-    addSystemMessage('⚠ Build check could not run: ' + res.error);
-    showToast('⚠ ' + res.error);
-    return res;
+  showToast('Running build check…');
+  const check = await runCompileCheck();
+  const via = check.source === 'bridge' ? 'Unity' : check.source === 'dotnet' ? 'dotnet' : 'no check';
+  if (check.noCheck) {
+    addSystemMessage('⚠ Build check could not run (' + via + '): ' + check.detail);
+    showToast('⚠ ' + check.detail);
+    return check;
   }
-  addSystemMessage(res.ok
-    ? `✓ Build check passed (${res.solution}).`
-    : `⚠ Build check failed (exit ${res.exitCode}, ${res.solution}). Tail:
-${(res.rawTail || '').slice(-2000)}
-
-Paste this into chat and ask the model to fix the first error.`);
-  showToast(res.ok ? '✓ Build check passed' : '⚠ Build check failed');
-  return res;
+  addSystemMessage(check.ok
+    ? `✓ Build check passed (${via}).`
+    : `⚠ Build check failed (${via}). ${check.detail}\n\nPaste this into chat and ask the model to fix the first error.`);
+  showToast(check.ok ? '✓ Build check passed' : '⚠ Build check failed');
+  return check;
 }
 
 // ── Plan execution ────────────────────────────────────────────────

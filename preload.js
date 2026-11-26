@@ -205,6 +205,10 @@ contextBridge.exposeInMainWorld('rb', {
     // are created and changed in Unity itself, never by writing
     // .prefab YAML by hand. See unity-command.js.
     runCommand: (payload) => ipcRenderer.invoke('unity:command', payload || {}),
+    // Bridge heartbeat (v0.12.0): whether the bridge is ticking
+    // right now, without waiting for it. The compile check reads
+    // this before trying Unity's own compiler.
+    heartbeat: (projectPath) => ipcRenderer.invoke('unity:heartbeat', projectPath),
   },
   shell: {
     run: (payload) => ipcRenderer.invoke('shell:run', payload || {}),

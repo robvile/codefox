@@ -1260,9 +1260,16 @@ ipcMain.handle('unity:buildCheck', async (_, payload) => {
 
 // Writes the refresh sentinel the Unity bridge watches (same trigger
 // the bridge install uses). Shared by unity:refresh and the package
-// handlers so a manifest edit is picked up by Unity.
+// handlers so a manifest edit is picked up by Unity. The 0.12.0
+// bridge watches <project>/.bridge/refresh-trigger; an older bridge
+// watches Assets/.codefox-refresh-trigger — both are written, so a
+// refresh works whichever bridge is installed (the legacy file is
+// deleted when the bridge updates).
 function writeRefreshTrigger(projectPath) {
   try {
+    const bridgeDir = path.join(projectPath, '.bridge');
+    fs.mkdirSync(bridgeDir, { recursive: true });
+    fs.writeFileSync(path.join(bridgeDir, 'refresh-trigger'), Date.now().toString());
     fs.writeFileSync(path.join(projectPath, 'Assets', '.codefox-refresh-trigger'), Date.now().toString());
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
@@ -1282,15 +1289,44 @@ ipcMain.handle('unity:refresh', async (_, projectPath) => {
   return writeRefreshTrigger(projectPath);
 });
 
-// Run one command through the Unity bridge (v0.9.0): the bridge
-// polls Assets/.codefox-command.json and answers in
-// Assets/.codefox-result.json. The runner (unity-command.js) owns
-// the missing-bridge check, the 60-second wait, and the plain
-// failure messages — this handler only picks the project folder.
+// Run one command through the Unity bridge (v0.12.0): the bridge
+// polls <project>/.bridge/inbox/ and answers in
+// <project>/.bridge/outbox/. The runner (unity-command.js) owns the
+// heartbeat check, the .tmp+rename write, the pending-aware wait,
+// and the plain failure messages — this handler only picks the
+// project folder and makes sure the bridge is new enough to receive
+// an inbox command. An older bridge never sees the inbox, so it is
+// updated first: the update triggers a Unity domain reload, and the
+// command then waits longer for the first heartbeat.
 ipcMain.handle('unity:command', async (_, payload) => {
   const root = (payload && payload.projectPath) || readSetting('project_path', '');
   const command = payload && payload.command;
-  return unityCommand.runUnityCommand(root, command);
+  let heartbeatWaitMs;
+  try {
+    const installed = unityBridge.getInstalledBridgeVersion(root);
+    if (!installed || unityBridge.compareVersions(installed, unityBridge.MIN_TRANSPORT_VERSION) < 0) {
+      const ensured = unityBridge.ensureBridge(root, __dirname, { enabled: bridgeEnabledForProject(projectIdByPath(root)) });
+      if (!ensured.ok && !ensured.already) {
+        return { ok: false, error: ensured.error || 'The bridge in this project is out of date and could not be updated.' };
+      }
+      // The bridge file was (re)written — Unity reloads the domain
+      // before the new bridge starts writing heartbeats.
+      if (ensured.updated || (ensured.ok && !ensured.already)) heartbeatWaitMs = 45000;
+    }
+  } catch (e) { /* fall through — runUnityCommand re-checks the version */ }
+  return unityCommand.runUnityCommand(root, command, heartbeatWaitMs != null ? { heartbeatWaitMs } : undefined);
+});
+
+// Bridge heartbeat, for the compile check's fast path and the UI:
+// whether the bridge is ticking right now, without waiting for it.
+// { exists, fresh, staleCompiling, isCompiling, isPlaying, timeMs,
+// protocol } or { exists:false }. A fresh heartbeat is what makes
+// the bridge-compile path worth trying; anything else falls back
+// to the dotnet build check.
+ipcMain.handle('unity:heartbeat', async (_, projectPath) => {
+  const root = projectPath || readSetting('project_path', '');
+  if (!root || !fs.existsSync(root)) return { exists: false };
+  return unityCommand.readHeartbeat(root);
 });
 
 // ── Git backups (v0.10.0) ────────────────────────────────────────
@@ -1385,17 +1421,26 @@ ipcMain.handle('unity:bridgeStatus', async (_, projectPath) => {
 // (and the refresh sentinel if one is present). Returns whether the
 // bridge file was actually there. Turning it off persists (v0.5.2):
 // the flag is what stops every auto-install path from putting the
-// bridge straight back after a toggle-off.
+// bridge straight back after a toggle-off. The .bridge/ protocol
+// folder goes too — its inbox/outbox/heartbeat are per-machine
+// state for the bridge that was just removed — as do the legacy
+// protocol files from bridges before 0.12.0.
 ipcMain.handle('unity:removeBridge', async (_, projectPath) => {
   const root = projectPath || readSetting('project_path', '');
   setBridgeEnabled(projectIdByPath(root), false);
   if (!root || !fs.existsSync(root)) return { ok: false, error: 'No project folder set.' };
   const dest = path.join(root, 'Assets', 'Editor', 'CodeFoxBridge.cs');
   const sentinel = path.join(root, 'Assets', '.codefox-refresh-trigger');
+  const bridgeDir = path.join(root, '.bridge');
   let removed = false;
   try {
     if (fs.existsSync(dest)) { fs.unlinkSync(dest); removed = true; }
     if (fs.existsSync(sentinel)) fs.unlinkSync(sentinel);
+    if (fs.existsSync(bridgeDir)) fs.rmSync(bridgeDir, { recursive: true, force: true });
+    for (const name of ['.codefox-command.json', '.codefox-result.json']) {
+      const p = path.join(root, 'Assets', name);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
     return { ok: true, removed };
   } catch (e) { return { ok: false, error: e.message }; }
 });

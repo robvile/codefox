@@ -21,7 +21,15 @@ const path = require('path');
 // (see getInstalledBridgeVersion) to decide whether an installed
 // bridge is out of date. The .cs file carries the same version in
 // its "// CodeFoxBridge version: X.Y.Z" marker and BridgeVersion const.
-const BUNDLED_BRIDGE_VERSION = '0.11.0';
+const BUNDLED_BRIDGE_VERSION = '0.12.0';
+
+// The oldest bridge that speaks the .bridge/ transport (protocol 1,
+// inbox/outbox/heartbeat). The app never sends an inbox command to
+// anything older — main.js updates the bridge first, and
+// unity-command.js refuses as a safety net. Stays at 0.12.0 even
+// as the bundled version moves on: a 0.12.0 bridge still speaks
+// protocol 1.
+const MIN_TRANSPORT_VERSION = '0.12.0';
 
 // Compare "a.b.c" versions numerically. Returns <0, 0, or >0.
 function compareVersions(a, b) {
@@ -98,6 +106,55 @@ function resolveBridgeSource(appDir) {
   };
 }
 
+// True when the installed bridge speaks the .bridge/ transport
+// (protocol 1). False when it is missing, unmarked, or older than
+// 0.12.0 — an old bridge never sees the inbox, so the app must
+// update it before sending a command.
+function hasTransportBridge(projectPath) {
+  const installed = getInstalledBridgeVersion(projectPath);
+  if (!installed) return false;
+  return compareVersions(installed, MIN_TRANSPORT_VERSION) >= 0;
+}
+
+// The bridge protocol files live in <project>/.bridge/ and must
+// never be committed to the project's repo — they are per-machine
+// state (inbox, outbox, heartbeat), not project files. Appends
+// ".bridge/" to the project's .gitignore when the file exists and
+// does not already list it. Best-effort: never fails the install.
+// Only appends when a .gitignore already exists — creating one
+// just for this would be a surprise.
+function ensureProjectGitignore(projectPath) {
+  if (!projectPath) return false;
+  const gitignorePath = path.join(projectPath, '.gitignore');
+  try {
+    if (!fs.existsSync(gitignorePath)) return false;
+    const content = fs.readFileSync(gitignorePath, 'utf8');
+    const listed = content.split(/\r?\n/).some(l => {
+      const t = l.trim();
+      return t === '.bridge/' || t === '.bridge' || t === '/.bridge/' || t === '/.bridge';
+    });
+    if (listed) return false;
+    const sep = content.length && !content.endsWith('\n') ? '\n' : '';
+    fs.writeFileSync(gitignorePath, content + sep + '# CodeFox bridge protocol files (per-machine, never committed)\n.bridge/\n', 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+// Legacy protocol files from bridges before 0.12.0, which used
+// Assets/.codefox-command.json and Assets/.codefox-result.json (and
+// the refresh sentinel in Assets). The new bridge never reads
+// them; deleting them on update stops a stale command file from
+// lingering in the project. Best-effort — a missing file is fine.
+function deleteLegacyProtocolFiles(projectPath) {
+  if (!projectPath) return;
+  for (const name of ['.codefox-command.json', '.codefox-result.json', '.codefox-refresh-trigger']) {
+    try {
+      const p = path.join(projectPath, 'Assets', name);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch { /* best-effort */ }
+  }
+}
+
 // Write the bridge into <project>/Assets/Editor/CodeFoxBridge.cs
 // (creating the folder if needed). Returns { ok, dest, from } or
 // { ok:false, error } with the real filesystem error.
@@ -111,6 +168,10 @@ function installBridgeFile(projectPath, appDir) {
   try {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, resolved.source, 'utf8');
+    // A new bridge speaks the new transport: the legacy protocol
+    // files are dead weight, and .bridge/ belongs in .gitignore.
+    deleteLegacyProtocolFiles(projectPath);
+    ensureProjectGitignore(projectPath);
     return { ok: true, dest, from: resolved.from };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -152,9 +213,13 @@ function ensureBridge(projectPath, appDir, opts) {
 
 module.exports = {
   BUNDLED_BRIDGE_VERSION,
+  MIN_TRANSPORT_VERSION,
   compareVersions,
   getInstalledBridgeVersion,
   isBridgeUpdateAvailable,
+  hasTransportBridge,
+  ensureProjectGitignore,
+  deleteLegacyProtocolFiles,
   bridgeDiskPath,
   bridgeDestPath,
   bridgeInstalled,

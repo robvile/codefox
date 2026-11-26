@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.13.0.
+// 2. package.json version is 0.14.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.13.0', pkg.version === '0.13.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.13.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.13.0 — Local'));
+check('package.json version is 0.14.0', pkg.version === '0.14.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.14.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.14.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.11.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.11.0') && bridgeCs.includes('BridgeVersion = "0.11.0"'));
-check('embedded bridge has the 0.11.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.11.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.11.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.11.0');
+check('bridge .cs has the 0.12.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.12.0') && bridgeCs.includes('BridgeVersion = "0.12.0"'));
+check('embedded bridge has the 0.12.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.12.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.12.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.12.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.11.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.11.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.11.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.12.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.12.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.12.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -1894,17 +1894,19 @@ check('CHANGELOG has the 0.8.4 entry',
 // CanvasRenderer. Unity writes those files itself now, and the file
 // writer refuses .prefab / .unity writes outright.
 check('bridge .cs has the four v0.9.0 actions',
-  bridgeCs.includes('case "createPrefab":') && bridgeCs.includes('case "modifyPrefab":')
-  && bridgeCs.includes('case "listComponentTypes":') && bridgeCs.includes('case "describeComponent":'));
+  bridgeCs.includes('{ "createPrefab", (json, args) => CreatePrefab(json, args) }')
+  && bridgeCs.includes('{ "modifyPrefab", (json, args) => ModifyPrefab(json, args) }')
+  && bridgeCs.includes('{ "listComponentTypes", (json, args) => ListComponentTypes(json, args) }')
+  && bridgeCs.includes('{ "describeComponent", (json, args) => DescribeComponent(json, args) }'));
 check('bridge .cs builds prefabs through Unity APIs, never YAML',
   bridgeCs.includes('PrefabUtility.SaveAsPrefabAsset') && bridgeCs.includes('PrefabUtility.LoadPrefabContents')
   && bridgeCs.includes('PrefabUtility.UnloadPrefabContents') && bridgeCs.includes('AddComponent(type)')
   && bridgeCs.includes('ResolveComponentType') && bridgeCs.includes('GetComponent<CanvasRenderer>'));
 check('embedded bridge has the four v0.9.0 actions',
-  bridgeSrc.BRIDGE_SOURCE.includes('case "createPrefab":')
-  && bridgeSrc.BRIDGE_SOURCE.includes('case "modifyPrefab":')
-  && bridgeSrc.BRIDGE_SOURCE.includes('case "listComponentTypes":')
-  && bridgeSrc.BRIDGE_SOURCE.includes('case "describeComponent":'));
+  bridgeSrc.BRIDGE_SOURCE.includes('{ "createPrefab", (json, args) => CreatePrefab(json, args) }')
+  && bridgeSrc.BRIDGE_SOURCE.includes('{ "modifyPrefab", (json, args) => ModifyPrefab(json, args) }')
+  && bridgeSrc.BRIDGE_SOURCE.includes('{ "listComponentTypes", (json, args) => ListComponentTypes(json, args) }')
+  && bridgeSrc.BRIDGE_SOURCE.includes('{ "describeComponent", (json, args) => DescribeComponent(json, args) }'));
 check('main.js has unity:command IPC backed by unity-command.js',
   mainJs.includes("ipcMain.handle('unity:command'") && mainJs.includes("require('./unity-command')")
   && mainJs.includes('runUnityCommand'));
@@ -2112,9 +2114,9 @@ check('README notes the always-on bridge instructions and the generator-script r
 // ordering that makes the behaviours possible. The first compile
 // and the live round-trips are Rob's Unity test).
 check('bridge dispatches deleteAsset',
-  bridgeCs.includes('case "deleteAsset":') && bridgeCs.includes('return DeleteAsset(json);'));
+  bridgeCs.includes('{ "deleteAsset", (json, args) => DeleteAsset(json, args) }'));
 check('deleteAsset validates path, existence, and the Assets folder itself',
-  bridgeCs.includes('private static CFResult DeleteAsset(string json)')
+  bridgeCs.includes('private static BridgeResult DeleteAsset(string json, Dictionary<string, object> args)')
   && bridgeCs.includes('deleteAsset path must start with Assets/')
   && bridgeCs.includes('refuses to delete the Assets folder itself')
   && bridgeCs.includes('AssetDatabase.IsValidFolder(assetPath)')
@@ -2131,7 +2133,7 @@ check('bridge builds prefabs in two passes (structure first, props second)',
     // whole point: a reference can only resolve against the
     // complete tree.
     const start = bridgeCs.indexOf('private static string BuildTreeStructure(');
-    const end = bridgeCs.indexOf('private static CFResult CreatePrefab(', start);
+    const end = bridgeCs.indexOf('private static BridgeResult CreatePrefab(', start);
     const body = bridgeCs.slice(start, end);
     return body.includes('AddComponentsNoProps') && !body.includes('SetComponentProps') && !body.includes('SetMember');
   })());
@@ -2635,24 +2637,62 @@ if (mirrorCountSrc && mirrorMapSrc && mirrorReplaceSrc) {
       JSON.stringify(mirrorReplace(content, oldText, newText)) === JSON.stringify(fileTools.applyStrReplaceText(content, oldText, newText))));
 }
 
-// Compile-after-every-edit decision + result text (pure helpers).
+// Compile-after-every-edit decision + normalized check (pure helpers).
+// v0.12.0: the check shape is normalized — Unity's compiler (bridge)
+// or dotnet — so the loop, the post-turn verify, and the manual
+// button all read the same fields.
 const compileCheckSrc = extractFunction(appJs, 'shouldRunRoundCompileCheck');
 const compileTextSrc = extractFunction(appJs, 'roundCompileCheckText');
-check('round compile helpers are extractable for testing', !!compileCheckSrc && !!compileTextSrc);
-if (compileCheckSrc && compileTextSrc) {
-  const helpers = new Function(compileCheckSrc + '\n' + compileTextSrc + '\nreturn { shouldRunRoundCompileCheck, roundCompileCheckText };')();
+const normBridgeSrc = extractFunction(appJs, 'normalizeBridgeCompileReport');
+const normDotnetSrc = extractFunction(appJs, 'normalizeDotnetBuildCheck');
+const firstErrSrc = extractFunction(appJs, 'firstCompileError');
+const sameErrSrc = extractFunction(appJs, 'isSameFirstError');
+check('round compile helpers are extractable for testing',
+  !!compileCheckSrc && !!compileTextSrc && !!normBridgeSrc && !!normDotnetSrc && !!firstErrSrc && !!sameErrSrc);
+if (compileCheckSrc && compileTextSrc && normBridgeSrc && normDotnetSrc && firstErrSrc && sameErrSrc) {
+  const helpers = new Function(compileCheckSrc + '\n' + compileTextSrc + '\n' + normBridgeSrc + '\n' + normDotnetSrc + '\n' + firstErrSrc + '\n' + sameErrSrc + '\nreturn { shouldRunRoundCompileCheck, roundCompileCheckText, normalizeBridgeCompileReport, normalizeDotnetBuildCheck, firstCompileError, isSameFirstError };')();
   check('compile check runs when a .cs changed, skips otherwise',
     helpers.shouldRunRoundCompileCheck(['Assets/Scripts/Player.cs']) === true
     && helpers.shouldRunRoundCompileCheck(['Assets/Scripts/PLAYER.CS']) === true
     && helpers.shouldRunRoundCompileCheck(['Assets/Prefabs/Image.prefab']) === false
     && helpers.shouldRunRoundCompileCheck([]) === false
     && helpers.shouldRunRoundCompileCheck(['Assets/Scripts/Player.cs', 'Assets/Prefabs/Image.prefab']) === true);
-  check('compile result text: clean note, no-solution note, failure tail',
-    helpers.roundCompileCheckText({ ok: true }).includes('compile clean')
-    && helpers.roundCompileCheckText({ ok: false, rawTail: 'no .NET solution found in the project' }).includes('no check available')
-    && !helpers.roundCompileCheckText({ ok: false, rawTail: 'no .NET solution found in the project' }).includes('FAILED')
-    && helpers.roundCompileCheckText({ ok: false, rawTail: 'error CS1002: ; expected\n  at Foo.cs:12' }).includes('FAILED')
-    && helpers.roundCompileCheckText({ ok: false, rawTail: 'error CS1002: ; expected' }).includes('CS1002'));
+  check('bridge compile report normalizes: clean, failure with file:line, nothing-to-compile',
+    (() => {
+      const clean = helpers.normalizeBridgeCompileReport({ success: true, compiled: true, errors: [], errorCount: 0, warningCount: 2 });
+      const fail = helpers.normalizeBridgeCompileReport({ success: false, compiled: true, errors: [{ file: 'Assets/Scripts/Player.cs', line: 12, message: 'error CS1002: ; expected' }], errorCount: 1, warningCount: 0 });
+      const none = helpers.normalizeBridgeCompileReport({ success: true, compiled: false, errors: [], errorCount: 0, warningCount: 0 });
+      const many = helpers.normalizeBridgeCompileReport({ success: false, compiled: true, errors: Array.from({ length: 20 }, (_, i) => ({ file: 'f.cs', line: i + 1, message: 'error CS' + i })), errorCount: 25, warningCount: 0 });
+      return clean.ok === true && clean.source === 'bridge' && clean.detail.includes('Compile clean (Unity)') && clean.detail.includes('2 warning(s)')
+        && fail.ok === false && fail.source === 'bridge' && fail.errorCount === 1 && fail.detail.includes('Player.cs:12') && fail.detail.includes('CS1002') && fail.detail.includes('Fix the first error first')
+        && none.ok === true && none.detail.includes('nothing to compile')
+        && many.detail.includes('showing the first 20 of 25');
+    })());
+  check('dotnet build check normalizes: clean, no-solution is noCheck, no-project is none, failure tail',
+    (() => {
+      const clean = helpers.normalizeDotnetBuildCheck({ ok: true });
+      const noSol = helpers.normalizeDotnetBuildCheck({ ok: false, error: 'no .NET solution found' });
+      const noProj = helpers.normalizeDotnetBuildCheck({ ok: false, error: 'No project folder set.' });
+      const fail = helpers.normalizeDotnetBuildCheck({ ok: false, rawTail: 'Assets/Scripts/Player.cs(12,5): error CS1002: ; expected' });
+      return clean.ok === true && clean.source === 'dotnet'
+        && noSol.ok === false && noSol.noCheck === true && noSol.detail.includes('no check available')
+        && noProj.source === 'none' && noProj.noCheck === true
+        && fail.ok === false && fail.noCheck === false && fail.detail.includes('CS1002');
+    })());
+  check('firstCompileError reads the bridge first error and the dotnet tail, null when there is none',
+    helpers.firstCompileError({ errors: [{ file: 'Assets/Scripts/Player.cs', line: 12, message: 'error CS1002: ; expected' }] }) === 'Assets/Scripts/Player.cs:12: error CS1002: ; expected'
+    && helpers.firstCompileError({ detail: 'Compile failed (dotnet).\nAssets/Scripts/Player.cs(12,5): error CS1002: ; expected' }).includes('CS1002')
+    && helpers.firstCompileError({ detail: 'Compile clean (Unity).' }) === null
+    && helpers.isSameFirstError('a', 'a') === true
+    && helpers.isSameFirstError('a', 'b') === false
+    && helpers.isSameFirstError(null, 'a') === false
+    && helpers.isSameFirstError('a', null) === false);
+  check('compile result text: clean note, no-check note, failure with file:line',
+    helpers.roundCompileCheckText({ ok: true, source: 'bridge', detail: 'Compile clean (Unity).' }).includes('compile clean')
+    && helpers.roundCompileCheckText({ ok: false, noCheck: true, detail: 'No .NET solution found in the project, so there is no check available here. Not a failure — carry on.' }).includes('no check available')
+    && !helpers.roundCompileCheckText({ ok: false, noCheck: true, detail: 'No .NET solution found in the project, so there is no check available here. Not a failure — carry on.' }).includes('FAILED')
+    && helpers.roundCompileCheckText({ ok: false, source: 'bridge', detail: 'Compile failed (Unity): 1 error(s).\nAssets/Scripts/Player.cs:12: error CS1002: ; expected' }).includes('FAILED')
+    && helpers.roundCompileCheckText({ ok: false, source: 'bridge', detail: 'Compile failed (Unity): 1 error(s).\nAssets/Scripts/Player.cs:12: error CS1002: ; expected' }).includes('Player.cs:12'));
 }
 
 // File-tool result text + console result text (pure helpers).
@@ -2667,9 +2707,16 @@ if (fileTextSrc && consoleTextSrc) {
     && fmt.fileToolResultText({ ok: true, kind: 'grep', pattern: 'zzz', matches: [], filesSearched: 3 }).includes('no matches')
     && fmt.fileToolResultText({ ok: true, kind: 'str_replace', path: 'x.cs' }).includes('str_replace applied')
     && fmt.fileToolResultText({ ok: false, error: 'boom' }).includes('File tool failed: boom'));
-  check('console result text: newest entries, file:line, stack lines, truncated warning, empty',
-    fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start () (at Assets/Scripts/Player.cs:42)'] }, { message: 'NullReferenceException', stack: [] }], truncated: true }).includes('CS1002')
-    && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start ()'] }], truncated: true }).includes('Player.cs:42')
+  check('console result text (new shape): earliest-first, cursor, counts, omitted / evicted / repeated, mark, empty',
+    fmt.formatConsoleResult({ cursor: 42, entries: [{ seq: 40, message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start () (at Assets/Scripts/Player.cs:42)'] }, { message: 'NullReferenceException', count: 3, stack: [] }], errorCount: 2, warningCount: 1, omitted: 0, hiddenByFilter: 0, missedEvictedEntries: 0 }).includes('CS1002')
+    && fmt.formatConsoleResult({ cursor: 42, entries: [{ seq: 40, message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start ()'] }], errorCount: 1, warningCount: 0 }).includes('Player.cs:42')
+    && fmt.formatConsoleResult({ cursor: 42, entries: [{ seq: 40, message: 'NullReferenceException', count: 3, stack: [] }], errorCount: 1, warningCount: 0 }).includes('repeated 3 times')
+    && fmt.formatConsoleResult({ cursor: 42, entries: [{ seq: 40, message: 'x', stack: [] }], errorCount: 1, warningCount: 0, omitted: 5 }).includes('5 more omitted')
+    && fmt.formatConsoleResult({ cursor: 42, entries: [{ seq: 40, message: 'x', stack: [] }], errorCount: 1, warningCount: 0, missedEvictedEntries: 7 }).includes('7 older entries were evicted')
+    && fmt.formatConsoleResult({ cursor: 42, marked: true, entries: [], errorCount: 0, warningCount: 0 }).includes('marked at seq 42')
+    && fmt.formatConsoleResult({ cursor: 42, entries: [], errorCount: 0, warningCount: 0 }).includes('no new entries'));
+  check('console result text (old shape): newest entries, file:line, stack lines, truncated warning, empty — still formats',
+    fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start () (at Assets/Scripts/Player.cs:42)'] }], truncated: true }).includes('CS1002')
     && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'x', stack: [] }], truncated: true }).includes('truncated')
     && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'x', stack: [] }], truncated: true }).includes('lower bound')
     && fmt.formatConsoleResult({ logType: 'Warning', entries: [], truncated: false }).includes('no entries'));
@@ -2712,37 +2759,78 @@ check('parser skips ```file fences as files, still extracts a real file change',
       && p('**File Path:** `Assets/Scripts/Player.cs`\n```csharp\npublic class Player {}\n```\n').length === 1;
   })());
 
-// readConsole — structural only: the .cs can only truly run in
-// Rob's Unity. The dispatcher case, the LogEntries reflection,
-// the mode masks, the newest-first 50-entry cap, and the hard
-// rule that reading never recompiles or reimports.
-check('bridge dispatcher has a readConsole case',
-  bridgeCs.includes('case "readConsole":'));
-const readConsoleStart = bridgeCs.indexOf('private static CFResult ReadConsole(');
-const readConsoleEnd = bridgeCs.indexOf('    [MenuItem("CodeFox/Refresh")]', readConsoleStart);
-const readConsoleSrc = readConsoleStart !== -1 && readConsoleEnd !== -1 ? bridgeCs.slice(readConsoleStart, readConsoleEnd) : '';
-const readConsoleCode = readConsoleSrc
+// readConsole + the transport + the compile action — structural
+// only: the .cs can only truly run in Rob's Unity. The dispatcher
+// dictionary, the ConsoleBuffer (subscribe + seed + persist), the
+// read args and caps, the hard rule that reading never
+// recompiles or reimports, and the CompileReport's SessionState
+// shape (the trap: errors never reload, so a poll tick must
+// finalize either way).
+check('bridge dispatcher registers readConsole and recompile_and_report_errors, unknown action lists available actions',
+  bridgeCs.includes('{ "readConsole", (json, args) => ConsoleBuffer.Read(json, args) }')
+  && bridgeCs.includes('{ "recompile_and_report_errors", (json, args) => CompileReport.Begin(json, args) }')
+  && bridgeCs.includes('Unknown action: ') && bridgeCs.includes('. Available: '));
+const consoleStart = bridgeCs.indexOf('private static class ConsoleBuffer');
+const consoleEnd = bridgeCs.indexOf('private static class JsonMini', consoleStart);
+const consoleSrc = consoleStart !== -1 && consoleEnd !== -1 ? bridgeCs.slice(consoleStart, consoleEnd) : '';
+const consoleCode = consoleSrc
   .replace(/"(?:\\.|[^"\\])*"/g, '""')
   .replace(/'(?:\\.|[^'\\])*'/g, "''")
   .replace(/\/\/.*$/gm, '')
   .replace(/\/\*[\s\S]*?\*\//g, '');
-check('bridge readConsole is extractable for the structural checks', readConsoleSrc.length > 0);
-check('bridge readConsole reaches LogEntries by reflection and never clears the console',
-  readConsoleSrc.includes('GetType("UnityEditor.LogEntries")')
-  && readConsoleSrc.includes('StartGettingEntries') && readConsoleSrc.includes('EndGettingEntries')
-  && readConsoleSrc.includes('GetEntryInternal') && readConsoleSrc.includes('GetCount')
-  && readConsoleSrc.includes('GetType("UnityEditor.LogEntry")')
-  && !/\.Clear\s*\(/.test(readConsoleCode));
+check('bridge ConsoleBuffer is extractable for the structural checks', consoleSrc.length > 0);
+check('bridge ConsoleBuffer subscribes to logMessageReceivedThreaded and seeds from LogEntries once at load',
+  consoleSrc.includes('Application.logMessageReceivedThreaded -= OnLogMessage')
+  && consoleSrc.includes('Application.logMessageReceivedThreaded += OnLogMessage')
+  && consoleSrc.includes('SeedFromLogEntries')
+  && consoleSrc.includes('GetType("UnityEditor.LogEntries")')
+  && consoleSrc.includes('"StartGettingEntries"') && consoleSrc.includes('"GetCount"')
+  && consoleSrc.includes('"GetEntryInternal"') && consoleSrc.includes('GetType("UnityEditor.LogEntry")'));
+check('bridge ConsoleBuffer persists across reloads and never clears the console',
+  consoleSrc.includes('AssemblyReloadEvents.beforeAssemblyReload -= Persist')
+  && consoleSrc.includes('AssemblyReloadEvents.beforeAssemblyReload += Persist')
+  && consoleSrc.includes('SessionState')
+  && consoleSrc.includes('Capacity = 2000') && consoleSrc.includes('PersistCount = 500')
+  && !/\.Clear\s*\(/.test(consoleCode));
+check('bridge readConsole takes sinceSeq / mark / minLevel / contains / playModeOnly / includeStack / maxEntries (default 30, hard max 100)',
+  consoleSrc.includes('"sinceSeq"') && consoleSrc.includes('"mark"') && consoleSrc.includes('"minLevel"')
+  && consoleSrc.includes('"contains"') && consoleSrc.includes('"playModeOnly"') && consoleSrc.includes('"includeStack"')
+  && consoleSrc.includes('ToLong(NumField(cmd, "maxEntries"), 30)') && consoleSrc.includes('if (maxEntries > 100) maxEntries = 100')
+  && consoleSrc.includes('\\"cursor\\"') && consoleSrc.includes('\\"omitted\\"') && consoleSrc.includes('\\"hiddenByFilter\\"')
+  && consoleSrc.includes('\\"errorCount\\"') && consoleSrc.includes('\\"warningCount\\"') && consoleSrc.includes('\\"missedEvictedEntries\\"'));
 check('bridge readConsole never recompiles or reimports (no Refresh / AssetDatabase / Compile call)',
-  !readConsoleCode.includes('AssetDatabase') && !readConsoleCode.includes('Refresh(')
-  && !readConsoleCode.includes('Compile') && !readConsoleCode.includes('Reimport'));
-check('bridge readConsole: newest first, at most 50, at most 2 stack lines, truncated flag',
-  readConsoleCode.includes('count - 1') && readConsoleCode.includes('i--')
-  && bridgeCs.includes('ReadConsoleMaxEntries = 50') && bridgeCs.includes('ReadConsoleMaxStackLines = 2')
-  && readConsoleCode.includes('ReadConsoleMaxEntries') && readConsoleCode.includes('ReadConsoleMaxStackLines')
-  && readConsoleSrc.includes('\\"truncated\\"'));
-check('bridge readConsole refuses "All" and takes Error / Warning only',
-  readConsoleSrc.includes('never \\"All\\"') && readConsoleSrc.includes('\\"Error\\"') && readConsoleSrc.includes('\\"Warning\\"'));
+  !consoleCode.includes('AssetDatabase') && !consoleCode.includes('Refresh(')
+  && !consoleCode.includes('Compile') && !consoleCode.includes('Reimport'));
+check('bridge readConsole refuses "All" and maps the old logType to minLevel',
+  consoleSrc.includes('never \\"All\\"') && consoleSrc.includes('\\"Error\\"') && consoleSrc.includes('\\"Warning\\"')
+  && consoleSrc.includes('minLevel = 2') && consoleSrc.includes('minLevel = 1'));
+const compileStart = bridgeCs.indexOf('private static class CompileReport');
+const compileEnd = bridgeCs.indexOf('private static class ConsoleBuffer', compileStart);
+const compileSrc = compileStart !== -1 && compileEnd !== -1 ? bridgeCs.slice(compileStart, compileEnd) : '';
+check('bridge CompileReport is extractable for the structural checks', compileSrc.length > 0);
+check('bridge CompileReport keeps state in SessionState, compiles via the pipeline, caps 20 errors x 300 chars, 5-min timeout',
+  compileSrc.includes('SessionState.GetString(PendingIdKey')
+  && compileSrc.includes('CompilationPipeline.RequestScriptCompilation()')
+  && compileSrc.includes('CompilationPipeline.compilationStarted -= OnCompilationStarted')
+  && compileSrc.includes('CompilationPipeline.compilationFinished -= OnCompilationFinished')
+  && compileSrc.includes('MaxErrors = 20') && compileSrc.includes('MaxErrorChars = 300')
+  && compileSrc.includes('HardTimeoutSeconds = 300')
+  && compileSrc.includes('EditorUtility.scriptCompilationFailed')
+  && compileSrc.includes('TryFinalize') && compileSrc.includes('IsPending'));
+check('bridge transport: BridgeResult ok/error/pending, protocol 1, inbox/processing/outbox/heartbeat, atomic claim, pending kept',
+  bridgeCs.includes('public static BridgeResult Ok(') && bridgeCs.includes('public static BridgeResult Error(')
+  && bridgeCs.includes('public static BridgeResult Pending(')
+  && bridgeCs.includes('public const int ProtocolVersion = 1')
+  && bridgeCs.includes('Path.Combine(_bridgeDir, "inbox")') && bridgeCs.includes('Path.Combine(_bridgeDir, "processing")')
+  && bridgeCs.includes('Path.Combine(_bridgeDir, "outbox")') && bridgeCs.includes('Path.Combine(_bridgeDir, "heartbeat.json")')
+  && bridgeCs.includes('File.Move(file, processingPath)')
+  && bridgeCs.includes('IsSafeRequestId') && bridgeCs.includes('RecoverInterruptedRequests')
+  && bridgeCs.includes('if (CompileReport.IsPending(id)) continue;')
+  && bridgeCs.includes('WriteHeartbeat()'));
+check('bridge has no Newtonsoft dependency and no old single-file protocol in code',
+  !bridgeCs.includes('Newtonsoft')
+  && !bridgeCs.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').includes('.codefox-command.json')
+  && !bridgeCs.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').includes('.codefox-result.json'));
 
 // Prompt: the agent prompt carries the file-tool docs and the
 // readConsole example, and its JSON examples parse.
@@ -2760,13 +2848,19 @@ if (promptSrc) {
     && agentPrompt11.includes('"action": "grep"')
     && agentPrompt11.includes('"action": "str_replace"')
     && agentPrompt11.includes('must match EXACTLY ONCE'));
-  check('agent prompt has the readConsole example (Error first, Warning separately, never All)',
+  check('agent prompt has the readConsole example (cursor, mark, minLevel, never All) and the recompile action',
     agentPrompt11.includes('"action": "readConsole"')
-    && agentPrompt11.includes('"logType": "Error"')
-    && agentPrompt11.includes('never "All"'));
-  check('agent prompt says compile-after-edit feedback comes back as a tool result',
+    && agentPrompt11.includes('"sinceSeq": 0')
+    && agentPrompt11.includes('"mark": true')
+    && agentPrompt11.includes('minLevel')
+    && agentPrompt11.includes('never "All"')
+    && agentPrompt11.includes('"action": "recompile_and_report_errors"')
+    && agentPrompt11.includes('success:false'));
+  check('agent prompt says compile-after-edit uses Unity\'s own compiler and the identical-first-error rule',
     agentPrompt11.includes('After you change a .cs file')
     && agentPrompt11.includes('compile clean')
+    && agentPrompt11.includes('Unity\'s own compiler')
+    && agentPrompt11.includes('identical on two consecutive checks')
     && agentPrompt11.includes('no check available'));
   check('the file-tool examples in the built prompt are valid JSON',
     (() => {
@@ -2798,15 +2892,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.11.0 everywhere',
-  bridgeCs.includes('// CodeFoxBridge version: 0.11.0')
-  && bridgeCs.includes('BridgeVersion = "0.11.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.11.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.11.0'));
-check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.12.0 entry',
+check('bridge version pins are 0.12.0 everywhere',
+  bridgeCs.includes('// CodeFoxBridge version: 0.12.0')
+  && bridgeCs.includes('BridgeVersion = "0.12.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.12.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.12.0'));
+check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.13.0')
-  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.12.0 — 2026-11-26'));
+  && readme.includes('readConsole') && readme.includes('version-0.14.0')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
 // loop guards, wiring. No new IPCs, no bridge change.
@@ -3070,8 +3164,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge still 0.11.0 (app version only moved)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.11.0';"));
+check('bridge is now 0.12.0 (moved in 0.14.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.12.0';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3135,9 +3229,209 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.13.0', readme.includes('version-0.13.0'));
+check('README badge reads 0.14.0', readme.includes('version-0.14.0'));
+
+// 38. v0.14.0 — bridge protocol hardening: the .bridge/
+// transport (inbox/processing/outbox/heartbeat), Unity's own
+// compiler (recompile_and_report_errors), and the unified
+// readConsole buffer. The bridge .cs is structural (it can only
+// truly run in Rob's Unity); the runner is plain Node and is
+// tested directly with an injected fs and clock (see the async
+// block below); the app.js helpers are extracted like the
+// earlier ones.
+const unityCommand = require(path.join(root, 'unity-command.js'));
+check('unity-command pure helpers: safe request ids, heartbeat parse/status, result classification',
+  unityCommand.isSafeBridgeRequestId('abc-123_X') === true
+  && unityCommand.isSafeBridgeRequestId('../x') === false
+  && unityCommand.isSafeBridgeRequestId('a/b') === false
+  && unityCommand.isSafeBridgeRequestId('') === false
+  && unityCommand.isSafeBridgeRequestId('x'.repeat(65)) === false
+  && unityCommand.isSafeBridgeRequestId('bad id') === false
+  && unityCommand.parseHeartbeat('{"protocol":1,"timeMs":1000,"isCompiling":false,"isPlaying":false}').ok === true
+  && unityCommand.parseHeartbeat('{"protocol":2,"timeMs":1000}').ok === false
+  && unityCommand.parseHeartbeat('not json').ok === false
+  && unityCommand.parseHeartbeat('{"protocol":1}').ok === false
+  && unityCommand.heartbeatStatus({ ok: true, timeMs: 1000, isCompiling: false }, 5000) === 'fresh'
+  && unityCommand.heartbeatStatus({ ok: true, timeMs: 1000, isCompiling: false }, 7000) === 'stale'
+  && unityCommand.heartbeatStatus({ ok: true, timeMs: 1000, isCompiling: true }, 7000) === 'stale-compiling'
+  && unityCommand.heartbeatStatus(null, 5000) === 'missing'
+  && unityCommand.heartbeatStatus({ ok: false }, 5000) === 'missing'
+  && unityCommand.classifyBridgeResult('{"status":"ok","message":"done","data":{"a":1}}').state === 'ok'
+  && unityCommand.classifyBridgeResult('{"status":"pending","message":"working"}').state === 'pending'
+  && unityCommand.classifyBridgeResult('{"status":"error","message":"boom"}').state === 'error'
+  && unityCommand.classifyBridgeResult('not json').state === 'unreadable'
+  && unityCommand.classifyBridgeResult('{"status":"weird"}').state === 'unreadable'
+  && unityCommand.oldBridgeError('0.11.0').includes('0.11.0')
+  && unityCommand.oldBridgeError(null).includes('older CodeFox'));
+check('unity-command exports the transport constants and the heartbeat read',
+  unityCommand.BRIDGE_DIR === '.bridge' && unityCommand.INBOX_DIR === 'inbox' && unityCommand.OUTBOX_DIR === 'outbox'
+  && unityCommand.PROTOCOL_VERSION === 1 && unityCommand.HEARTBEAT_FRESH_MS === 5000
+  && typeof unityCommand.readHeartbeat === 'function' && typeof unityCommand.runUnityCommand === 'function');
+
+// Transport minimum + .gitignore + legacy cleanup (unity-bridge.js).
+const tmpT = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-transport-'));
+try {
+  const tProj = path.join(tmpT, 'proj');
+  fs.mkdirSync(path.join(tProj, 'Assets', 'Editor'), { recursive: true });
+  check('hasTransportBridge false with no bridge, false for 0.11.0, true for the bundled 0.12.0',
+    bridge.MIN_TRANSPORT_VERSION === '0.12.0'
+    && bridge.hasTransportBridge(tProj) === false
+    && (() => {
+      fs.writeFileSync(path.join(tProj, 'Assets', 'Editor', 'CodeFoxBridge.cs'), '// CodeFoxBridge version: 0.11.0\npublic class CodeFoxBridge {}');
+      const old = bridge.hasTransportBridge(tProj);
+      fs.writeFileSync(path.join(tProj, 'Assets', 'Editor', 'CodeFoxBridge.cs'), fs.readFileSync(path.join(root, 'unity-companion', 'CodeFoxBridge.cs'), 'utf8'));
+      return old === false && bridge.hasTransportBridge(tProj) === true;
+    })());
+  check('ensureProjectGitignore does nothing without a .gitignore, appends .bridge/ once, is idempotent',
+    bridge.ensureProjectGitignore(tProj) === false
+    && (() => {
+      fs.writeFileSync(path.join(tProj, '.gitignore'), 'Library/\n');
+      const added = bridge.ensureProjectGitignore(tProj);
+      const content = fs.readFileSync(path.join(tProj, '.gitignore'), 'utf8');
+      const again = bridge.ensureProjectGitignore(tProj);
+      const content2 = fs.readFileSync(path.join(tProj, '.gitignore'), 'utf8');
+      return added === true && content.includes('.bridge/') && again === false && content2 === content;
+    })());
+  check('deleteLegacyProtocolFiles removes the old protocol files',
+    (() => {
+      fs.writeFileSync(path.join(tProj, 'Assets', '.codefox-command.json'), '{}');
+      fs.writeFileSync(path.join(tProj, 'Assets', '.codefox-result.json'), '{}');
+      bridge.deleteLegacyProtocolFiles(tProj);
+      return !fs.existsSync(path.join(tProj, 'Assets', '.codefox-command.json'))
+        && !fs.existsSync(path.join(tProj, 'Assets', '.codefox-result.json'));
+    })());
+  check('installBridgeFile removes legacy protocol files on update',
+    (() => {
+      fs.writeFileSync(path.join(tProj, 'Assets', '.codefox-command.json'), '{}');
+      const inst = bridge.installBridgeFile(tProj, root);
+      return inst.ok === true && !fs.existsSync(path.join(tProj, 'Assets', '.codefox-command.json'))
+        && fs.readFileSync(path.join(tProj, '.gitignore'), 'utf8').includes('.bridge/');
+    })());
+} finally { fs.rmSync(tmpT, { recursive: true, force: true }); }
+
+// Wiring: main.js heartbeat IPC + version gate, preload, app.js.
+check('main.js has the unity:heartbeat IPC and the unity:command version gate (update first, longer wait after a reload)',
+  mainJs.includes("ipcMain.handle('unity:heartbeat'")
+  && mainJs.includes('unityBridge.MIN_TRANSPORT_VERSION')
+  && mainJs.includes('heartbeatWaitMs = 45000')
+  && mainJs.includes("const bridgeDir = path.join(projectPath, '.bridge')")
+  && mainJs.includes('fs.rmSync(bridgeDir, { recursive: true, force: true })'));
+check('preload.js exposes rb.unity.heartbeat',
+  preloadJs.includes("ipcRenderer.invoke('unity:heartbeat'"));
+check('app.js runCompileCheck is heartbeat-gated with a dotnet fallback, and the loop tracks the first error',
+  appJs.includes('async function runCompileCheck()')
+  && appJs.includes('rb.unity.heartbeat(state.projectPath)')
+  && appJs.includes("command: { action: 'recompile_and_report_errors' }")
+  && appJs.includes('normalizeBridgeCompileReport(res.data, res.message)')
+  && appJs.includes('normalizeDotnetBuildCheck(check)')
+  && appJs.includes('lastCompileFirstError: null')
+  && appJs.includes('isSameFirstError(loopState.lastCompileFirstError, first)')
+  && appJs.includes('The first error is identical to the last compile check'));
+check('app.js manual build check uses the shared compile check',
+  appJs.includes('const check = await runCompileCheck();'));
+check('package.json build files include the plain-Node modules',
+  Array.isArray(pkg.build && pkg.build.files) && pkg.build.files.includes('log-triage.js') && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
+check('README documents the .bridge/ transport, the console buffer, and the Unity compiler; CHANGELOG has the 0.14.0 entry',
+  readme.includes('.bridge/inbox/') && readme.includes('heartbeat')
+  && readme.includes('log buffer') && readme.includes('recompile_and_report_errors')
+  && readme.includes("Unity's own compiler")
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Bridge protocol hardened'));
 
 (async () => {
+  // v0.14.0 runner: runUnityCommand against an injected fs and
+  // clock — no Unity, no real waiting. The fake clock advances
+  // only when the fake sleep runs, so every wait is deterministic
+  // and fast in real time. Own try/catch so a failure is labelled
+  // as the runner, not the mock ComfyUI server below.
+  try {
+    const uc = require(path.join(root, 'unity-command.js'));
+    // In-memory fs. The fake bridge answers when a command lands
+    // in the inbox: onInbox(id) returns the outbox JSON (or null
+    // for no answer). After the app reads a pending result, the
+    // fake bridge writes the final one in its place.
+    function makeBridgeFs(seed, onInbox) {
+      const store = new Map(Object.entries(seed || {}));
+      return {
+        store,
+        existsSync: (p) => store.has(p),
+        readFileSync: (p) => {
+          if (!store.has(p)) { const e = new Error('ENOENT ' + p); e.code = 'ENOENT'; throw e; }
+          return store.get(p);
+        },
+        writeFileSync: (p, data) => { store.set(p, String(data)); },
+        renameSync: (from, to) => {
+          store.set(to, store.get(from)); store.delete(from);
+          if (to.includes('inbox') && to.endsWith('.json') && onInbox) {
+            const id = path.basename(to, '.json');
+            const out = onInbox(id);
+            if (out != null) store.set(path.join('/proj', '.bridge', 'outbox', id + '.json'), out);
+          }
+        },
+        unlinkSync: (p) => {
+          const cur = store.get(p);
+          if (cur && p.includes('outbox')) {
+            try {
+              const parsed = JSON.parse(cur);
+              if (parsed.status === 'pending') {
+                store.set(p, JSON.stringify({ protocol: 1, requestId: parsed.requestId, status: 'ok', message: 'done', data: { ok: true } }));
+                return;
+              }
+            } catch (e) { /* fall through to delete */ }
+          }
+          store.delete(p);
+        },
+        mkdirSync: () => {},
+      };
+    }
+    let fakeNow = 1000000;
+    const fakeSleep = async (ms) => { fakeNow += ms; };
+    const now = () => fakeNow;
+    const baseOpts = { sleep: fakeSleep, now, pollMs: 1, bridgeInstalled: () => true, getInstalledVersion: () => '0.12.0' };
+    const heartbeatSeed = () => ({ '/proj/.bridge/heartbeat.json': JSON.stringify({ protocol: 1, timeMs: fakeNow, isCompiling: false, isPlaying: false }) });
+
+    const rMissing = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: makeBridgeFs(), bridgeInstalled: () => false });
+    check('runner refuses a missing bridge', rMissing.ok === false && rMissing.error.includes('not installed'));
+    const rOld = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: makeBridgeFs(), getInstalledVersion: () => '0.11.0' });
+    check('runner refuses an old bridge (never sends inbox commands to it)', rOld.ok === false && rOld.error.includes('older CodeFox'));
+    const rNoHb = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: makeBridgeFs(), heartbeatWaitMs: 100 });
+    check('runner fails fast with no heartbeat', rNoHb.ok === false && rNoHb.error.includes('not responding'));
+
+    const fOk = makeBridgeFs(heartbeatSeed(), (id) => JSON.stringify({ protocol: 1, requestId: id, status: 'ok', message: 'done', data: { ok: true } }));
+    const rOk = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: fOk });
+    check('runner delivers an ok result, inbox written via .tmp then rename with protocol 1, outbox deleted after reading',
+      rOk.ok === true && rOk.message === 'done' && rOk.data && rOk.data.ok === true
+      && [...fOk.store.keys()].some(k => k.includes('/inbox/') && k.endsWith('.json'))
+      && ![...fOk.store.keys()].some(k => k.endsWith('.tmp'))
+      && ![...fOk.store.keys()].some(k => k.includes('/outbox/'))
+      && (() => {
+        const inboxKey = [...fOk.store.keys()].find(k => k.includes('/inbox/') && k.endsWith('.json'));
+        const body = JSON.parse(fOk.store.get(inboxKey));
+        return body.protocol === 1 && body.requestId === path.basename(inboxKey, '.json') && body.action === 'refresh';
+      })());
+
+    const fPend = makeBridgeFs(heartbeatSeed(), (id) => JSON.stringify({ protocol: 1, requestId: id, status: 'pending', message: 'compiling' }));
+    const rPend = await uc.runUnityCommand('/proj', { action: 'recompile_and_report_errors' }, { ...baseOpts, fs: fPend, timeoutMs: 5000 });
+    check('runner treats pending as alive and returns the final result',
+      rPend.ok === true && rPend.message === 'done' && ![...fPend.store.keys()].some(k => k.includes('/outbox/')));
+
+    const fErr = makeBridgeFs(heartbeatSeed(), (id) => JSON.stringify({ protocol: 1, requestId: id, status: 'error', message: "Unknown component type 'Nope'. Use listComponentTypes to see what this Unity install has." }));
+    const rErr = await uc.runUnityCommand('/proj', { action: 'createPrefab', name: 'X' }, { ...baseOpts, fs: fErr });
+    check('runner returns a bridge failure as a plain error',
+      rErr.ok === false && /Unknown component type 'Nope'/.test(rErr.error || ''));
+    const fBad = makeBridgeFs(heartbeatSeed(), () => 'this is not json{');
+    const rBad = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: fBad });
+    check('runner returns a malformed result as a plain unreadable-result error',
+      rBad.ok === false && /could not read/.test(rBad.error || ''));
+
+    const fStale = makeBridgeFs(heartbeatSeed(), null);
+    const rStale = await uc.runUnityCommand('/proj', { action: 'refresh' }, { ...baseOpts, fs: fStale, timeoutMs: 60000 });
+    check('runner fails fast when the heartbeat goes stale mid-command',
+      rStale.ok === false && rStale.error.includes('stopped responding'));
+  } catch (e) {
+    check('bridge runner tests ran without throwing', false, String(e && e.message));
+  }
+
   await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
   const base = 'http://127.0.0.1:' + mockServer.address().port;
   try {
@@ -3288,65 +3582,11 @@ check('README badge reads 0.13.0', readme.includes('version-0.13.0'));
       && appJs.includes('function updateLoadedContextLine')
       && mainJs.includes('loadedContextLength') && mainJs.includes('loadState') && mainJs.includes("'not-loaded'"));
   }
-  // v0.9.0 — unity:command runner: writes the command file, parses
-  // the result file, plain failures for a missing bridge, a timeout,
-  // and a malformed result. The stub fs pretends to be the bridge:
-  // when the command file is written, the result file appears.
-  {
-    const unityCommand = require(path.join(root, 'unity-command.js'));
-    const proj = path.join(os.tmpdir(), 'codefox-unity-cmd-proj');
-    const cmdPath = path.join(proj, 'Assets', '.codefox-command.json');
-    const resPath = path.join(proj, 'Assets', '.codefox-result.json');
-    const makeStubFs = (onCommand) => {
-      const files = new Map();
-      return {
-        files,
-        existsSync: (p) => files.has(p),
-        writeFileSync: (p, c) => { files.set(p, c); if (p === cmdPath && onCommand) onCommand(files); },
-        readFileSync: (p) => files.get(p),
-        unlinkSync: (p) => { files.delete(p); },
-      };
-    };
-    const noSleep = async () => {};
-    // (a) Happy path: command written, result parsed, result file consumed.
-    const stubOk = makeStubFs((files) => {
-      files.set(resPath, JSON.stringify({ ok: true, message: 'Prefab created.', path: 'Assets/Prefabs/ImageContainer.prefab' }));
-    });
-    const okRes = await unityCommand.runUnityCommand(proj, { action: 'createPrefab', name: 'ImageContainer' },
-      { fs: stubOk, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
-    const writtenCmd = JSON.parse(stubOk.files.get(cmdPath) || '{}');
-    check('unity:command writes the command file and returns the parsed result',
-      okRes.ok === true && okRes.message === 'Prefab created.' && okRes.path === 'Assets/Prefabs/ImageContainer.prefab'
-      && writtenCmd.action === 'createPrefab' && writtenCmd.name === 'ImageContainer'
-      && !stubOk.files.has(resPath));
-    // (b) A bridge failure comes back as a plain error.
-    const stubFail = makeStubFs((files) => {
-      files.set(resPath, JSON.stringify({ ok: false, message: "Unknown component type 'Nope'. Use listComponentTypes to see what this Unity install has." }));
-    });
-    const failRes = await unityCommand.runUnityCommand(proj, { action: 'createPrefab', name: 'X' },
-      { fs: stubFail, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
-    check('unity:command returns a bridge failure as a plain error',
-      failRes.ok === false && /Unknown component type 'Nope'/.test(failRes.error || ''));
-    // (c) Timeout: no result file ever appears.
-    const stubQuiet = makeStubFs(null);
-    const timeoutRes = await unityCommand.runUnityCommand(proj, { action: 'listComponentTypes' },
-      { fs: stubQuiet, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 10, pollMs: 1 });
-    check('unity:command timeout returns the plain "Unity did not answer" message',
-      timeoutRes.ok === false && /did not answer in 60 seconds/.test(timeoutRes.error || ''));
-    // (d) Malformed result JSON.
-    const stubBad = makeStubFs((files) => { files.set(resPath, 'this is not json{'); });
-    const badRes = await unityCommand.runUnityCommand(proj, { action: 'refresh' },
-      { fs: stubBad, bridgeInstalled: () => true, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
-    check('unity:command malformed result returns a plain unreadable-result error',
-      badRes.ok === false && /could not read/.test(badRes.error || ''));
-    // (e) Missing bridge: the install hint, before any file is touched.
-    const stubNone = makeStubFs(null);
-    const missingRes = await unityCommand.runUnityCommand(proj, { action: 'refresh' },
-      { fs: stubNone, bridgeInstalled: () => false, sleep: noSleep, timeoutMs: 5000, pollMs: 1 });
-    check('unity:command with no bridge returns the install hint and writes nothing',
-      missingRes.ok === false && /not installed in this project/.test(missingRes.error || '')
-      && /install it in Settings/.test(missingRes.error || '') && !stubNone.files.has(cmdPath));
-  }
+  // v0.14.0 — the unity:command runner tests moved to the top of
+  // this async block: the single-file protocol (Assets/.codefox-
+  // command.json / .codefox-result.json) is gone, and the runner
+  // is now tested against the .bridge/ transport (inbox/outbox/
+  // heartbeat) with an injected fs and clock.
   // Bulk approve: run the REAL approveAllComfyuiWorkflows from
   // app.js (extracted by brace matching, not a copy) against a
   // mock library with several workflows per section.
