@@ -97,6 +97,161 @@ function isRecommendedCodingModel(model) {
     && norm.includes('a3b') && norm.includes('q4_k_m');
 }
 
+// ── Native model listing (v0.8.4) ─────────────────────────────────
+// GET /v1/models (OpenAI-compatible) cannot be trusted for load
+// state. LM Studio's own docs say it "returns the models visible to
+// the server" and "may include all downloaded models when
+// Just-In-Time loading is enabled"
+// (https://www.lmstudio.ai/docs/developer/openai-compat/models), so a
+// model appearing there may or may not be in memory. The native
+// endpoints say so explicitly, and they also carry the context the
+// model was actually loaded with — which is what the reply cap needs:
+//   GET /api/v1/models -> { models: [{ key, type, display_name,
+//     quantization: { name }, params_string, size_bytes, format,
+//     selected_variant, max_context_length,
+//     loaded_instances: [{ id, config: { context_length } }] }] }
+//   GET /api/v0/models -> { data: [{ id, type, state:
+//     'loaded' | 'not-loaded', loaded_context_length,
+//     max_context_length, quantization }] }
+//   (https://lmstudio.ai/docs/developer/rest/list,
+//    https://lmstudio.ai/docs/developer/rest/endpoints)
+// List order is newest first: /api/v1, then /api/v0 (LM Studio
+// 0.3.6+), then the OpenAI-compatible list as a last resort, which
+// only reports loaded models and carries no context length.
+
+// Connection failures, in Inkwell's wording: unreachable vs timed
+// out are different failures and say so. HTTP errors are not
+// connection failures and keep their own wording upstream.
+function lmStudioConnectionError(url, err) {
+  const u = String(url || 'http://localhost:1234');
+  if (err && err.name === 'AbortError') {
+    return new Error('LM Studio at ' + u + ' did not answer in time — the server may be busy or still starting up.');
+  }
+  return new Error('Can\'t reach LM Studio at ' + u + '. Start the local server in LM Studio (Developer tab) and check the address in Settings.');
+}
+
+function positiveNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// One native-list entry, normalised across the v1 and v0 shapes.
+// loadedContextLength is the window the running instance actually
+// serves — never the architectural max_context_length.
+function normalizeNativeModel(m, source) {
+  if (!m || typeof m !== 'object') return null;
+  if (source === 'v0') {
+    const id = typeof m.id === 'string' ? m.id : (typeof m.key === 'string' ? m.key : null);
+    if (!id) return null;
+    const q = typeof m.quantization === 'string' ? m.quantization
+      : (m.quantization && m.quantization.name) || null;
+    return {
+      id, displayName: id, type: m.type || 'llm', quantization: q,
+      params: null, sizeBytes: null, format: null, variant: null,
+      loaded: m.state === 'loaded',
+      loadedContextLength: m.state === 'loaded' ? positiveNumber(m.loaded_context_length) : null,
+      maxContextLength: positiveNumber(m.max_context_length),
+      loadedIds: [],
+    };
+  }
+  const id = typeof m.key === 'string' ? m.key : (typeof m.id === 'string' ? m.id : null);
+  if (!id) return null;
+  const instances = Array.isArray(m.loaded_instances) ? m.loaded_instances : [];
+  const firstCtx = instances.length && instances[0] && instances[0].config
+    ? positiveNumber(instances[0].config.context_length) : null;
+  return {
+    id, displayName: m.display_name || id, type: m.type || 'llm',
+    quantization: (m.quantization && m.quantization.name) || null,
+    params: m.params_string || null, sizeBytes: m.size_bytes || null,
+    format: m.format || null, variant: m.selected_variant || null,
+    loaded: instances.length > 0, loadedContextLength: firstCtx,
+    maxContextLength: positiveNumber(m.max_context_length),
+    loadedIds: instances.map(i => i && i.id).filter(Boolean),
+  };
+}
+
+// Only LLM entries are offered as chat models — embedding (and
+// decision) models are filtered out, as before.
+function mapNativeModels(raw, source) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const m of raw) {
+    const n = normalizeNativeModel(m, source);
+    if (n && String(n.type).toLowerCase() === 'llm') out.push(n);
+  }
+  return out;
+}
+
+// One native-list fetch: { found: true, data } when the endpoint
+// exists and answered, { found: false } on 404/405 (endpoint not
+// on this server). Any other HTTP error throws; a connection
+// failure throws too, and the caller turns it into plain words.
+async function fetchNativeList(root, headers, path, fetchImpl, timeoutMs) {
+  const res = await withTimeout(fetchImpl, root + path, { headers }, timeoutMs);
+  if (res.status === 404 || res.status === 405) return { found: false };
+  if (!res.ok) throw new Error('LM Studio returned HTTP ' + res.status + ': ' + (await res.text().catch(() => '')).slice(0, 300));
+  return { found: true, data: await readJsonBody(res) };
+}
+
+// The native model list, newest endpoint first, with a compat
+// fallback. Never throws a raw fetch error: connection failures
+// come back as { ok: false, error } in plain words.
+// @returns {{ok: boolean, models: array, source: string, downloadedList: boolean, error?: string}}
+async function listNativeLmStudioModels(opts) {
+  const root = String((opts && opts.baseUrl) || 'http://localhost:1234').replace(/\/+$/, '');
+  const apiKey = (opts && opts.apiKey) || '';
+  const fetchImpl = (opts && opts.fetchImpl) || fetch;
+  const timeoutMs = (opts && opts.timeoutMs) || 5000;
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
+  const fail = (error) => ({ ok: false, models: [], source: 'none', downloadedList: false, error });
+  try {
+    const v1 = await fetchNativeList(root, headers, '/api/v1/models', fetchImpl, timeoutMs);
+    if (v1.found) {
+      if (!v1.data || !Array.isArray(v1.data.models)) return fail('LM Studio answered, but not with a model list.');
+      return { ok: true, models: mapNativeModels(v1.data.models, 'v1'), source: 'v1', downloadedList: true };
+    }
+    const v0 = await fetchNativeList(root, headers, '/api/v0/models', fetchImpl, timeoutMs);
+    if (v0.found) {
+      if (!v0.data || !Array.isArray(v0.data.data)) return fail('LM Studio answered, but not with a model list.');
+      return { ok: true, models: mapNativeModels(v0.data.data, 'v0'), source: 'v0', downloadedList: true };
+    }
+    const compat = await fetchNativeList(root, headers, '/v1/models', fetchImpl, timeoutMs);
+    if (compat.found) {
+      const list = (compat.data && compat.data.data) || [];
+      return { ok: true, models: list.filter(m => m && m.id).map(m => ({ id: m.id, displayName: m.id, type: 'llm', quantization: null, params: null, sizeBytes: null, format: null, variant: null, loaded: true, loadedContextLength: null, maxContextLength: null, loadedIds: [] })), source: 'compat', downloadedList: false };
+    }
+    return fail('LM Studio answered, but none of its model-list endpoints exist — is this an LM Studio server?');
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || e instanceof TypeError || /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|fetch failed/i.test(String(e && e.message)))) {
+      return fail(lmStudioConnectionError(root, e).message);
+    }
+    return fail(e && e.message ? e.message : 'Could not list models.');
+  }
+}
+
+// Load state of one model from a native list: found means the model
+// is downloaded (or, on the compat fallback, loaded); loaded means
+// it is actually in memory.
+function loadedContextForModel(models, modelId) {
+  const id = String(modelId || '');
+  const entry = (models || []).find(m => m && (m.id === id || (m.loadedIds || []).includes(id)));
+  if (!entry) return { found: false, loaded: false, loadedContextLength: null };
+  return { found: true, loaded: !!entry.loaded, loadedContextLength: entry.loaded ? (entry.loadedContextLength || null) : null };
+}
+
+// Inkwell's budget pattern: the reply may use at most half the
+// window the model was actually loaded with, so the prompt plus the
+// reply still fit. The configured maxTokens stays the ceiling —
+// this only ever caps it down. Unknown context falls back to 4096.
+function effectiveMaxTokens(configuredMaxTokens, loadedContextLength) {
+  const configured = Number(configuredMaxTokens);
+  const ceiling = Number.isFinite(configured) && configured > 0 ? configured : 4096;
+  const ctx = Number(loadedContextLength);
+  if (Number.isFinite(ctx) && ctx > 0) return Math.max(1, Math.min(ceiling, Math.floor(ctx / 2)));
+  return Math.min(ceiling, 4096);
+}
+
 // ── LM Studio home + per-model settings files ──────────────────────
 // Where LM Studio keeps its own files. Overridable with
 // LM_STUDIO_HOME (used by the tests). On Windows this is
@@ -385,6 +540,12 @@ module.exports = {
   tunedLoadProfile,
   buildLoadBody,
   isRecommendedCodingModel,
+  lmStudioConnectionError,
+  normalizeNativeModel,
+  mapNativeModels,
+  listNativeLmStudioModels,
+  loadedContextForModel,
+  effectiveMaxTokens,
   lmStudioHomeDir,
   safeModelId,
   profileFilesForModel,

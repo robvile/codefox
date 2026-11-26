@@ -91,8 +91,19 @@ async function fetchJson(url, opts, timeoutMs) {
     return res;
   } finally { clearTimeout(t); }
 }
+// NOTE: this is the OpenAI-compatible list. Per LM Studio's docs
+// (https://www.lmstudio.ai/docs/developer/openai-compat/models) it
+// "returns the models visible to the server" and "may include all
+// downloaded models when Just-In-Time loading is enabled", so a
+// model appearing here does NOT prove it is loaded. Load state
+// comes from the native list (lmstudio-load.js).
 async function listLmStudioModels(base, apiKey) {
-  const res = await fetchJson(lmStudioModelsUrl(base), { headers: lmStudioHeaders(apiKey) }, 5000);
+  let res;
+  try {
+    res = await fetchJson(lmStudioModelsUrl(base), { headers: lmStudioHeaders(apiKey) }, 5000);
+  } catch (e) {
+    throw lmLoad.lmStudioConnectionError(normalizeLmStudioRoot(base), e);
+  }
   if (!res.ok) throw new Error('LM Studio returned HTTP ' + res.status + ': ' + (await res.text()).slice(0, 300));
   const data = await res.json();
   return (data.data || []).map(m => ({ id: m.id }));
@@ -675,10 +686,17 @@ function resolveLlmConfig(payload) {
 ipcMain.handle('llm:status', async () => {
   const cfg = resolveLlmConfig({});
   try {
-    const models = cfg.provider === 'ollama'
-      ? await listOllamaModels(cfg.url)
-      : await listLmStudioModels(cfg.url, cfg.apiKey);
-    return { provider: cfg.provider, running: true, url: cfg.url, model: cfg.model, modelsAvailable: models.length, models };
+    if (cfg.provider === 'ollama') {
+      const models = await listOllamaModels(cfg.url);
+      return { provider: cfg.provider, running: true, url: cfg.url, model: cfg.model, modelsAvailable: models.length, models, loaded: null, loadedContextLength: null };
+    }
+    // Load state from the native list, not /v1/models (see
+    // lmstudio-load.js): /v1/models may list downloaded models too.
+    const native = await lmLoad.listNativeLmStudioModels({ baseUrl: normalizeLmStudioRoot(cfg.url), apiKey: cfg.apiKey });
+    if (!native.ok) throw new Error(native.error);
+    const models = native.models.map(m => ({ id: m.id }));
+    const state = cfg.model ? lmLoad.loadedContextForModel(native.models, cfg.model) : { found: false, loaded: false, loadedContextLength: null };
+    return { provider: cfg.provider, running: true, url: cfg.url, model: cfg.model, modelsAvailable: models.length, models, loaded: state.found ? state.loaded : null, loadedContextLength: state.loadedContextLength, loadSource: native.source };
   } catch (e) {
     return { provider: cfg.provider, running: false, url: cfg.url, model: cfg.model, modelsAvailable: 0, error: e.message };
   }
@@ -696,40 +714,21 @@ ipcMain.handle('llm:listModels', async (_, payload) => {
   }
 });
 
-// Downloaded models (LM Studio only): GET /api/v1/models lists ALL
-// models on the system, downloaded or not, with loaded_instances
-// (empty when not loaded) — unlike the OpenAI-compatible /v1/models,
-// which only lists loaded ones. Each entry carries its load state, so
-// Settings can offer a Load action per model. On an older server that
-// has no such endpoint, fall back to the loaded-only list and say so.
+// Downloaded models (LM Studio only): the native list, newest
+// endpoint first — GET /api/v1/models, then /api/v0/models, then
+// the OpenAI-compatible /v1/models as a last resort (loaded models
+// only, no context). Each entry carries its load state, so Settings
+// can offer a Load action per model. See lmstudio-load.js: /v1/models
+// alone cannot be trusted for load state, because with Just-In-Time
+// loading on it may list downloaded models too.
 ipcMain.handle('llm:listDownloaded', async (_, payload) => {
   const cfg = resolveLlmConfig(payload || {});
   if (cfg.provider !== 'lmstudio') return { ok: false, provider: cfg.provider, error: 'Downloaded-model listing is only supported for LM Studio.', models: [], downloadedList: false };
-  const root = normalizeLmStudioRoot(cfg.url);
   try {
-    const res = await fetchJson(root + '/api/v1/models', { headers: lmStudioHeaders(cfg.apiKey) }, 5000);
-    if (res.status === 404 || res.status === 405) {
-      const loaded = await listLmStudioModels(cfg.url, cfg.apiKey);
-      return { ok: true, provider: cfg.provider, downloadedList: false, models: loaded.map(m => ({ id: m.id, displayName: m.id, type: 'llm', loaded: true })) };
-    }
-    if (!res.ok) throw new Error('LM Studio returned HTTP ' + res.status + ': ' + (await res.text()).slice(0, 300));
-    const data = await res.json();
-    if (!Array.isArray(data.models)) throw new Error('LM Studio answered, but not with a model list.');
-    const models = data.models
-      .filter(m => !m.type || String(m.type).toLowerCase() === 'llm')
-      .map(m => ({
-        id: m.key,
-        displayName: m.display_name || m.key,
-        type: m.type || 'llm',
-        quantization: (m.quantization && m.quantization.name) || null,
-        params: m.params_string || null,
-        sizeBytes: m.size_bytes || null,
-        format: m.format || null,
-        variant: m.selected_variant || null,
-        loaded: Array.isArray(m.loaded_instances) && m.loaded_instances.length > 0,
-        recommended: lmLoad.isRecommendedCodingModel(m),
-      }));
-    return { ok: true, provider: cfg.provider, downloadedList: true, models };
+    const native = await lmLoad.listNativeLmStudioModels({ baseUrl: normalizeLmStudioRoot(cfg.url), apiKey: cfg.apiKey });
+    if (!native.ok) return { ok: false, provider: cfg.provider, error: native.error, models: [], downloadedList: false };
+    const models = native.models.map(m => ({ ...m, recommended: lmLoad.isRecommendedCodingModel(m) }));
+    return { ok: true, provider: cfg.provider, downloadedList: native.downloadedList, models };
   } catch (e) {
     return { ok: false, provider: cfg.provider, error: e.message, models: [], downloadedList: false };
   }
@@ -757,39 +756,67 @@ ipcMain.handle('llm:loadModel', async (_, payload) => {
 
 // Verify: connection + model list, plus a tiny non-streaming chat probe
 // ONLY when a model is selected. No model selected is not a failure.
+// For LM Studio, load state comes from the native model list, not
+// /v1/models — /v1/models may list downloaded models too (Just-In-Time
+// loading), so a downloaded-but-not-loaded model used to pass verify
+// and die at the probe. Now it fails here, plainly.
 ipcMain.handle('llm:verify', async (_, payload) => {
   const cfg = resolveLlmConfig(payload || {});
   try {
-    const models = cfg.provider === 'ollama'
-      ? await listOllamaModels(cfg.url)
-      : await listLmStudioModels(cfg.url, cfg.apiKey);
-    const result = { ok: true, provider: cfg.provider, url: cfg.url, models, model: cfg.model, probe: null };
-    if (!cfg.model) {
-      result.message = 'Connected — ' + models.length + ' model(s) found. Pick a model to finish setup.';
-      return result;
-    }
-    if (!models.some(m => m.id === cfg.model)) {
-      result.ok = false;
-      result.error = 'Model "' + cfg.model + '" is not loaded on the server. Loaded models: ' + (models.map(m => m.id).join(', ') || 'none');
-      return result;
-    }
-    // Tiny probe (non-streaming, 5 tokens).
     if (cfg.provider === 'ollama') {
+      const models = await listOllamaModels(cfg.url);
+      const result = { ok: true, provider: cfg.provider, url: cfg.url, models, model: cfg.model, probe: null };
+      if (!cfg.model) {
+        result.message = 'Connected — ' + models.length + ' model(s) found. Pick a model to finish setup.';
+        return result;
+      }
+      if (!models.some(m => m.id === cfg.model)) {
+        result.ok = false;
+        result.error = 'Model "' + cfg.model + '" is not loaded on the server. Loaded models: ' + (models.map(m => m.id).join(', ') || 'none');
+        return result;
+      }
       const res = await fetchJson(String(cfg.url).replace(/\/+$/, '') + '/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'Reply with OK.' }], stream: false }),
       }, 30000);
       if (!res.ok) throw new Error('Ollama probe failed: HTTP ' + res.status);
       result.probe = 'ok';
-    } else {
-      const res = await fetchJson(lmStudioChatUrl(cfg.url), {
-        method: 'POST', headers: lmStudioHeaders(cfg.apiKey),
-        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'Reply with OK.' }], temperature: 0, max_tokens: 5, stream: false }),
-      }, 30000);
-      if (!res.ok) throw new Error('LM Studio probe failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 300));
-      result.probe = 'ok';
+      result.message = 'Connected — model "' + cfg.model + '" answered the probe.';
+      return result;
     }
-    result.message = 'Connected — model "' + cfg.model + '" answered the probe.';
+    const native = await lmLoad.listNativeLmStudioModels({ baseUrl: normalizeLmStudioRoot(cfg.url), apiKey: cfg.apiKey });
+    if (!native.ok) throw new Error(native.error);
+    const models = native.models.map(m => ({ id: m.id }));
+    const result = { ok: true, provider: cfg.provider, url: cfg.url, models, model: cfg.model, probe: null, loadedContextLength: null, loadState: 'unknown' };
+    if (!cfg.model) {
+      result.message = 'Connected — ' + models.length + ' model(s) found. Pick a model to finish setup.';
+      return result;
+    }
+    const state = lmLoad.loadedContextForModel(native.models, cfg.model);
+    result.loadedContextLength = state.loadedContextLength;
+    result.loadState = !state.found ? (native.downloadedList ? 'not-downloaded' : 'unknown')
+      : (state.loaded ? 'loaded' : 'not-loaded');
+    if (!state.found) {
+      result.ok = false;
+      result.error = native.downloadedList
+        ? 'Model "' + cfg.model + '" is not downloaded in LM Studio. Download it in LM Studio first.'
+        : 'Model "' + cfg.model + '" was not found on the server.';
+      return result;
+    }
+    if (!state.loaded) {
+      result.ok = false;
+      result.error = 'Model "' + cfg.model + '" is downloaded but not loaded — load it in Settings (Downloaded models → Load).';
+      return result;
+    }
+    // Tiny probe (non-streaming, 5 tokens).
+    const res = await fetchJson(lmStudioChatUrl(cfg.url), {
+      method: 'POST', headers: lmStudioHeaders(cfg.apiKey),
+      body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'Reply with OK.' }], temperature: 0, max_tokens: 5, stream: false }),
+    }, 30000);
+    if (!res.ok) throw new Error('LM Studio probe failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 300));
+    result.probe = 'ok';
+    result.message = 'Connected — model "' + cfg.model + '" answered the probe.'
+      + (result.loadedContextLength ? ' Loaded context: ' + result.loadedContextLength.toLocaleString('en-US') + ' tokens.' : '');
     return result;
   } catch (e) {
     return { ok: false, provider: cfg.provider, url: cfg.url, model: cfg.model, error: e.message, models: [] };
@@ -797,17 +824,22 @@ ipcMain.handle('llm:verify', async (_, payload) => {
 });
 
 async function lmStudioChat(event, cfg, messages, systemPrompt) {
-  const res = await fetch(lmStudioChatUrl(cfg.url), {
-    method: 'POST',
-    headers: lmStudioHeaders(cfg.apiKey),
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: [{ role: 'system', content: systemPrompt || '' }, ...messages],
-      temperature: cfg.temperature,
-      max_tokens: cfg.maxTokens,
-      stream: true,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(lmStudioChatUrl(cfg.url), {
+      method: 'POST',
+      headers: lmStudioHeaders(cfg.apiKey),
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [{ role: 'system', content: systemPrompt || '' }, ...messages],
+        temperature: cfg.temperature,
+        max_tokens: cfg.maxTokens,
+        stream: true,
+      }),
+    });
+  } catch (e) {
+    throw lmLoad.lmStudioConnectionError(normalizeLmStudioRoot(cfg.url), e);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error('LM Studio returned HTTP ' + res.status + (body ? ': ' + body.slice(0, 500) : ''));
@@ -901,7 +933,20 @@ ipcMain.handle('llm:chat', async (event, payload) => {
   const messages = (payload && payload.messages) || [];
   const systemPrompt = (payload && payload.systemPrompt) || '';
   if (cfg.provider === 'ollama') return ollamaChat(event, cfg, messages, systemPrompt);
-  return lmStudioChat(event, cfg, messages, systemPrompt);
+  // Context cap (v0.8.4, Inkwell's budget pattern): the reply may
+  // use at most half the window the model was actually loaded with,
+  // so the prompt plus the reply still fit. The lookup is
+  // best-effort — a failure falls back to the 4096 cap and never
+  // fails the chat.
+  let effectiveMax = lmLoad.effectiveMaxTokens(cfg.maxTokens, null);
+  try {
+    const native = await lmLoad.listNativeLmStudioModels({ baseUrl: normalizeLmStudioRoot(cfg.url), apiKey: cfg.apiKey });
+    if (native.ok) {
+      const state = lmLoad.loadedContextForModel(native.models, cfg.model);
+      effectiveMax = lmLoad.effectiveMaxTokens(cfg.maxTokens, state.loadedContextLength);
+    }
+  } catch {}
+  return lmStudioChat(event, { ...cfg, maxTokens: effectiveMax }, messages, systemPrompt);
 });
 
 // Legacy Ollama chat handler — routes through the unified path.

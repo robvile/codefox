@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.8.3.
+// 2. package.json version is 0.8.4.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.8.3', pkg.version === '0.8.3', 'got ' + pkg.version);
-check('sidebar footer shows 0.8.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.3 — Local'));
+check('package.json version is 0.8.4', pkg.version === '0.8.4', 'got ' + pkg.version);
+check('sidebar footer shows 0.8.4', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.4 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1866,8 +1866,8 @@ check('Available only defaults ON, is persisted, and Clear resets to it',
   && appJs.includes('function toggleComfyuiAvailableOnly')
   && appJs.includes("toggleComfyuiAvailableOnly(!state.comfyuiLib.availableOnly)")
   && appJs.includes('state.comfyuiLib.availableOnly = true;'));
-check('CHANGELOG has the 0.8.3 entry',
-  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.3 — 2026-11-25'));
+check('CHANGELOG has the 0.8.4 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.4 — 2026-11-25'));
 
 // v0.8.3 — tuned LM Studio model loading. The defaults are global:
 // one object, no per-model table, and the load body is built only
@@ -2056,6 +2056,97 @@ const mockServer = http.createServer((req, res) => {
     check('load flow: an unreachable server fails plainly, never a fake success',
       res3.ok === false && /not running/.test(res3.error || ''));
     fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+  // v0.8.4 — Inkwell-aligned LM Studio calls: load state from the
+  // native list (v1, then v0, then the compat list), the context
+  // cap, and plain connection-failure wording. /v1/models alone
+  // cannot prove a model is loaded — with Just-In-Time loading on
+  // it may list downloaded models too (LM Studio docs:
+  // https://www.lmstudio.ai/docs/developer/openai-compat/models).
+  {
+    const v1Body = (loaded) => JSON.stringify({ models: [{
+      key: 'qwen/qwen3-coder-30b-a3b-instruct', type: 'llm',
+      display_name: 'Qwen3 Coder 30B A3B Instruct',
+      quantization: { name: 'q4_k_m' }, params_string: '30B', size_bytes: 19000000000,
+      format: 'gguf', selected_variant: 'qwen/qwen3-coder-30b-a3b-instruct@q4_k_m',
+      max_context_length: 262144,
+      loaded_instances: loaded ? [{ id: 'qwen/qwen3-coder-30b-a3b-instruct', config: { context_length: 16384 } }] : [],
+    }, {
+      key: 'nomic-ai/nomic-embed-text-v1.5', type: 'embedding',
+      display_name: 'Nomic Embed', loaded_instances: [],
+    }] });
+    const compatBody = JSON.stringify({ data: [{ id: 'qwen/qwen3-coder-30b-a3b-instruct' }] });
+    const makeNativeStub = (mode) => async (url, opts) => {
+      if (url.endsWith('/api/v1/models')) {
+        if (mode === 'v1-not-loaded') return { ok: true, status: 200, text: async () => v1Body(false) };
+        if (mode === 'v1-loaded') return { ok: true, status: 200, text: async () => v1Body(true) };
+        return { ok: false, status: 404, text: async () => '' }; // v0 / compat modes: no v1 endpoint
+      }
+      if (url.endsWith('/api/v0/models')) {
+        if (mode === 'v0') return { ok: true, status: 200, text: async () => JSON.stringify({ object: 'list', data: [
+          { id: 'qwen/qwen3-coder-30b-a3b-instruct', object: 'model', type: 'llm', publisher: 'qwen', arch: 'qwen3', compatibility_type: 'gguf', quantization: 'q4_k_m', state: 'loaded', max_context_length: 262144, loaded_context_length: 8192 },
+          { id: 'google/gemma-3-4b-it', object: 'model', type: 'llm', publisher: 'google', arch: 'gemma3', compatibility_type: 'gguf', quantization: 'q4_k_m', state: 'not-loaded', max_context_length: 131072, loaded_context_length: null },
+          { id: 'text-embedding-nomic-embed-text-v1.5', object: 'model', type: 'embeddings', publisher: 'nomic-ai', arch: 'nomic-bert', compatibility_type: 'gguf', quantization: 'f16', state: 'not-loaded', max_context_length: 2048, loaded_context_length: null },
+        ] }) };
+        return { ok: false, status: 404, text: async () => '' }; // compat mode: no v0 endpoint
+      }
+      if (url.endsWith('/v1/models')) return { ok: true, status: 200, text: async () => compatBody };
+      return { ok: false, status: 404, text: async () => '' };
+    };
+    // (a) A model in /v1/models with empty loaded_instances is NOT loaded.
+    const notLoaded = await lmLoad.listNativeLmStudioModels({ baseUrl: 'http://localhost:1234', fetchImpl: makeNativeStub('v1-not-loaded') });
+    const notLoadedState = lmLoad.loadedContextForModel(notLoaded.models, 'qwen/qwen3-coder-30b-a3b-instruct');
+    check('verify logic: a model present in /v1/models but absent from loaded_instances is NOT loaded',
+      notLoaded.ok === true && notLoaded.source === 'v1' && notLoaded.downloadedList === true
+      && notLoadedState.found === true && notLoadedState.loaded === false && notLoadedState.loadedContextLength === null
+      && mainJs.includes("listNativeLmStudioModels") && mainJs.includes('is downloaded but not loaded — load it in Settings')
+      && !mainJs.includes('which only lists loaded ones'));
+    // (a2) Same model, loaded: loaded with its served context.
+    const loaded = await lmLoad.listNativeLmStudioModels({ baseUrl: 'http://localhost:1234', fetchImpl: makeNativeStub('v1-loaded') });
+    const loadedState = lmLoad.loadedContextForModel(loaded.models, 'qwen/qwen3-coder-30b-a3b-instruct');
+    check('native list: a loaded model reports loaded with its served context, embeddings filtered',
+      loaded.ok === true && loadedState.found === true && loadedState.loaded === true && loadedState.loadedContextLength === 16384
+      && !loaded.models.some(m => m.id.includes('nomic-embed')));
+    // (b) v0 fallback when /api/v1/models 404s.
+    const v0 = await lmLoad.listNativeLmStudioModels({ baseUrl: 'http://localhost:1234', fetchImpl: makeNativeStub('v0') });
+    const v0Qwen = lmLoad.loadedContextForModel(v0.models, 'qwen/qwen3-coder-30b-a3b-instruct');
+    const v0Gemma = lmLoad.loadedContextForModel(v0.models, 'google/gemma-3-4b-it');
+    check('listDownloaded falls back to /api/v0/models when /api/v1/models 404s (state + loaded context mapped)',
+      v0.ok === true && v0.source === 'v0' && v0.downloadedList === true
+      && v0Qwen.found === true && v0Qwen.loaded === true && v0Qwen.loadedContextLength === 8192
+      && v0Gemma.found === true && v0Gemma.loaded === false && v0Gemma.loadedContextLength === null
+      && !v0.models.some(m => m.id.includes('nomic-embed')));
+    // (b2) Compat fallback when neither native endpoint exists.
+    const compat = await lmLoad.listNativeLmStudioModels({ baseUrl: 'http://localhost:1234', fetchImpl: makeNativeStub('compat') });
+    const compatState = lmLoad.loadedContextForModel(compat.models, 'qwen/qwen3-coder-30b-a3b-instruct');
+    check('native list falls back to the loaded-only /v1/models list with unknown context',
+      compat.ok === true && compat.source === 'compat' && compat.downloadedList === false
+      && compatState.found === true && compatState.loaded === true && compatState.loadedContextLength === null);
+    // (c) The context cap math (Inkwell's budget pattern).
+    check('context cap: min(configured, half the loaded window); unknown context falls back to 4096',
+      lmLoad.effectiveMaxTokens(4096, 16384) === 4096
+      && lmLoad.effectiveMaxTokens(4096, 4096) === 2048
+      && lmLoad.effectiveMaxTokens(4096, null) === 4096
+      && lmLoad.effectiveMaxTokens(4096, undefined) === 4096
+      && lmLoad.effectiveMaxTokens(8192, 16384) === 8192
+      && lmLoad.effectiveMaxTokens(1024, null) === 1024);
+    // (d) Connection failures use Inkwell's plain wording, not a raw error.
+    const down = await lmLoad.listNativeLmStudioModels({ baseUrl: 'http://localhost:1234', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
+    check('native list: an unreachable server fails with Inkwell\u2019s plain wording',
+      down.ok === false && /Can't reach LM Studio at http:\/\/localhost:1234/.test(down.error || '')
+      && /Start the local server in LM Studio/.test(down.error || ''));
+    check('main.js uses the plain unreachable wording in the model list and chat paths',
+      mainJs.includes('lmStudioConnectionError') && mainJs.includes('listNativeLmStudioModels'));
+    // (e) The tuned loading flow is untouched — the load body still
+    // comes only from the global defaults.
+    check('tuned loading untouched: load body still built only from the global defaults',
+      lmLoad.buildLoadBody('qwen/qwen3-coder-30b-a3b-instruct').context_length === 16384
+      && lmLoad.buildLoadBody('qwen/qwen3-coder-30b-a3b-instruct').eval_batch_size === 512
+      && lmLoad.buildLoadBody('qwen/qwen3-coder-30b-a3b-instruct').flash_attention === true);
+    check('Settings shows the loaded context line and verify/status expose it',
+      appJs.includes('s-lm-context') && appJs.includes('Loaded context: ')
+      && appJs.includes('function updateLoadedContextLine')
+      && mainJs.includes('loadedContextLength') && mainJs.includes('loadState') && mainJs.includes("'not-loaded'"));
   }
   // Bulk approve: run the REAL approveAllComfyuiWorkflows from
   // app.js (extracted by brace matching, not a copy) against a

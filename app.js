@@ -37,6 +37,7 @@ let state = {
   lmDownloadedList: true, // false when the server only reports loaded models
   lmDownloadedError: null,
   lmLoadingModel: null, // id of the model currently being loaded, if any
+  lmLoadedContext: null, // loaded context of the active model (v0.8.4); null = unknown, never invented
   temperature: 0.2,
   maxTokens: 4096,
   unityExePath: '',
@@ -218,10 +219,18 @@ async function refreshDownloadedModels() {
     state.lmDownloaded = res.models || [];
     state.lmDownloadedList = res.downloadedList !== false;
     state.lmDownloadedError = null;
+    // Loaded context of the active model, from the same list — the
+    // window it was actually loaded with, or unknown when it is not
+    // loaded / the server does not report it.
+    const active = state.lmDownloaded.find(m => m.id === state.lmstudioModel);
+    state.lmLoadedContext = active && active.loaded ? (active.loadedContextLength || null) : null;
+    updateLoadedContextLine();
   } else {
     state.lmDownloaded = [];
     state.lmDownloadedList = false;
     state.lmDownloadedError = res.error || 'Could not list downloaded models.';
+    state.lmLoadedContext = null;
+    updateLoadedContextLine();
   }
   renderDownloadedModels();
 }
@@ -314,6 +323,16 @@ function updateHomeModelLabel() {
   el.textContent = currentModel() || 'No model selected';
 }
 
+// Loaded-context line under the model dropdown (v0.8.4): the
+// window the active model was actually loaded with, or "unknown" —
+// never an invented number.
+function updateLoadedContextLine() {
+  const el = document.getElementById('s-lm-context');
+  if (!el) return;
+  const ctx = state.lmLoadedContext;
+  el.textContent = 'Loaded context: ' + (ctx ? Number(ctx).toLocaleString('en-US') + ' tokens' : 'unknown');
+}
+
 async function verifyLmStudio() {
   const statusEl = document.getElementById('s-lm-status');
   const url = document.getElementById('s-lm-url')?.value?.trim() || state.lmstudioUrl;
@@ -321,6 +340,8 @@ async function verifyLmStudio() {
   const model = document.getElementById('s-lm-model')?.value || '';
   if (statusEl) { statusEl.style.color = 'var(--text3)'; statusEl.textContent = 'Checking ' + url + ' …'; }
   const res = await rb.llm.verify({ provider: 'lmstudio', lmstudioUrl: url, lmstudioApiKey: apiKey, model });
+  state.lmLoadedContext = (res && res.loadedContextLength) || null;
+  updateLoadedContextLine();
   if (res.ok) {
     state.lmstudioModels = res.models || [];
     updateModelDropdown();
@@ -2343,6 +2364,7 @@ function renderModelPane(body) {
             <option value="">— Select a model —</option>
           </select>
         </label>
+        <div id="s-lm-context" style="font-size:12px;color:var(--text3);">Loaded context: unknown</div>
         <div>
           <div class="field-label">Downloaded models — load one with tuned settings</div>
           <div style="font-size:12px;color:var(--text3);margin:4px 0 8px;">Loads with full GPU offload, KV cache Q8, 1 concurrent prediction, 16K context, flash attention. CodeFox loads a model into the running LM Studio server — it does not start the server, and speed depends on the model and the machine.</div>
@@ -2396,6 +2418,7 @@ function renderModelPane(body) {
       <p class="settings-note">Settings save without losing the current thread — no reload.</p>
     </div>`;
   updateModelDropdown();
+  updateLoadedContextLine();
   // Try to populate the model list right away if LM Studio is up.
   if (isLm) refreshModels();
   rb.ollama.status().then(st => {
