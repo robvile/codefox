@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.12.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.13.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -24,7 +24,7 @@ Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default
 - **Rulesets** — define project rules, architecture contracts, naming conventions. Auto-injected into every prompt.
 - **Plans** — describe what you want done. The AI proposes steps and lists files before touching anything. You approve, then execute.
 - **References** — pages and plans in one list: AI-authored architecture docs (pages) and step-by-step plans, kept per project so they grow into a living knowledge base
-- **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it
+- **Skills** — one-click actions from Home: draft a Game Design Document, plan a feature prototype, migrate UGUI to UI Toolkit, or audit the project structure. Figma and Jira skills need a connection first (see Connections) and say so honestly instead of faking it. File-based skills (Settings → Skills) are a separate mechanism: folders of markdown the assistant reads on demand, starting with multiplayer networking
 - **Connections** — a single view for LM Studio, Ollama, the Unity bridge, Figma, Jira, and GitHub, each with a real status and an action that either does the thing or says what is still needed. The Unity bridge really installs `CodeFoxBridge.cs` into `Assets/Editor/` (and can be removed again from Settings → Connections, which deletes the file); it installs automatically whenever a Unity project is connected, and opening Settings → Connections on a project without a bridge installs it then. Figma/Jira tokens are stored locally and used only for those imports
 - **MCPs** — configure local MCP servers (command, arguments, environment) in Settings → MCPs, with ten recommended presets and a guided setup prompt that walks through the steps and checks each token or app for real. Servers run on this machine; the assistant does not call MCP tools yet, and the UI says so — the settings are stored so that wiring can be added without reconfiguring
 - **ComfyUI** — a native integration with a locally running ComfyUI (default `http://127.0.0.1:8188`): **Scan for ComfyUI** finds the install, workflows and models in the usual places; import your own workflow JSON files, see which nodes and models each one needs, generate images from a simple prompt-first form in the ComfyUI panel (or from the Agent loop), and import the results into the project under `Assets/Generated/<workflow>/`. Only workflows you approve run from the Agent loop without asking
@@ -346,7 +346,7 @@ Menu items added in Unity: **CodeFox > Refresh**, **CodeFox > Run EditMode Tests
 
 ## Settings
 
-Click ⚙ **Settings** in the sidebar or the top bar. Settings is a full window in the centre column (not a popup), with its own sub-nav: **Model**, **Connections**, **MCPs**, **Rules**, **Advanced**.
+Click ⚙ **Settings** in the sidebar or the top bar. Settings is a full window in the centre column (not a popup), with its own sub-nav: **Model**, **Connections**, **MCPs**, **Rules**, **Skills**, **Advanced**.
 
 ### Model
 
@@ -395,6 +395,16 @@ Adding a preset never adds a duplicate — if it is already configured, the card
 ### Rules
 
 Per-ruleset enabled toggles and priorities (higher = sent first), a **prompt budget** (default 4000 characters, 1000–12000) that caps how many characters of rules go with each message — whole rulesets only, never cut off mid-way — and a readout of what was included in the last message and what was left out. **Condense rules** asks the model for a sub-500-character version that keeps every hard constraint; with **Use condensed rules when over budget** on, that version is sent instead of dropping rules. If the model can't be reached, condensing fails honestly and changes nothing.
+
+### Skills
+
+Instruction files the assistant loads on demand — specialized workflows, like multiplayer networking. A skill is a folder of markdown files: a `SKILL.md` (the procedure and rules) plus reference files it points to. Only each enabled skill's name and one-line description sit in the system prompt; the full `SKILL.md` is read by the model with the file tools when a task matches, and referenced files after that — so a skill costs almost nothing until it is actually needed, which matters on a local model's small context window.
+
+A skill is inert until you opt into it, per project: install it from Settings → Skills (built-in skills ship with CodeFox; drop your own skill folders into the app-data `skills` folder to add more), which copies it into the project under `.codefox/skills/<name>/`, then enable it. You can read a skill's `SKILL.md` from the same screen before enabling it — it is a plain text file in your project, and you can see exactly what it tells the model. Disabling keeps the files (delete the folder to remove it entirely); reinstalling updates a project copy when the shipped version changed. The screen shows a rough token cost of the enabled descriptions and warns when more than 5 are enabled — routing gets less reliable with more candidates.
+
+Two rules govern skills: **Project Rules always win** — if a skill's instruction conflicts with a Project Rule, the model follows the rule and says so; a skill never overrides a rule. And **`/skill <name>`** in chat forces a named skill to load for that turn even when the model's routing misses it (a bare `/skill` lists what is available). Skills are different from the Home screen's Discover Skills, which are one-click workflow prompts — these are instruction files the assistant follows.
+
+The first built-in skill is **unity-multiplayer-networking** (`skills/unity-multiplayer-networking/` in the repo), written from scratch for CodeFox from public Unity documentation: it detects which networking stack is installed (Netcode, Photon PUN/Fusion, FishNet, Nakama, Metaplay) and asks before building on it, or asks the user's goals and lets them pick when none is installed; it reads the stack's setup and examples before writing networked code; it verifies project configuration (physics simulation mode, fixed timestep, Input System backend, layers and collision matrix, transport) before and after writing code; debugging is docs-first, with the project config as the first hypothesis for networking-shaped symptoms; and it never installs packages programmatically or creates documentation unasked.
 
 ### Advanced
 

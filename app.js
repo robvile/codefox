@@ -16,6 +16,8 @@ let state = {
   activeProject: null,
   projects: [],
   skillsInstalled: {},
+  skillFiles: [],      // file-based skills (v0.13.0) — scan results for the active project
+  skillFilesUserDir: '',
   localFolders: [],
   homeMentionFile: null,
   ollamaModel: 'qwen2.5-coder:32b-instruct',
@@ -497,6 +499,7 @@ async function init() {
   if (homeSel) homeSel.value = state.chatMode;
 
   await loadSkills();
+  await loadSkillFiles();
   await refreshSidebar();
   await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
   // Build flat index in background for search
@@ -1072,6 +1075,54 @@ async function sendChat() {
 
   // Build system prompt — use override if set by executePlan
   const usedExecPlanPrompt = !!(window._execPlanActive && window._execPlanSystemPrompt);
+  // Skills (v0.13.0): /skill <name> forces a named skill to load
+  // for this turn, even when the model's routing would miss it.
+  // The skill must exist (built-in, user, or already installed);
+  // a builtin/user skill is installed into the project first —
+  // typing the command is the opt-in. This is the one case where
+  // the app loads a skill instead of the model reading it with
+  // view: the SKILL.md content is appended to the system prompt.
+  // A bare "/skill" or "/skill list" shows the available skills
+  // instead of calling the model. Not applied to an executePlan
+  // override prompt.
+  const skillCmd = !usedExecPlanPrompt ? parseSkillCommand(text) : null;
+  let forcedSkillNote = '';
+  if (skillCmd) {
+    const known = (state.skillFiles || []).find(s => s.name === skillCmd.name);
+    if (!skillCmd.name || skillCmd.name === 'list') {
+      const names = (state.skillFiles || []).map(s => s.name + (s.installedInProject ? (s.enabled ? ' (enabled)' : ' (installed)') : ' (available)')).join(', ') || 'none yet';
+      addSystemMessage('Skills: ' + names + '. Type /skill <name> followed by your request to force one for a turn — for example "/skill unity-multiplayer-networking add co-op to my game". Enable skills for this project in Settings → Skills.');
+      return;
+    }
+    if (!known) {
+      addSystemMessage('No skill named "' + skillCmd.name + '". Available: ' + ((state.skillFiles || []).map(s => s.name).join(', ') || 'none yet') + '.');
+      return;
+    }
+    if (!state.projectPath) {
+      addSystemMessage('Pick a project first — skills live in the project folder.');
+      return;
+    }
+    let skillPath = known.skillPath;
+    if (!known.installedInProject) {
+      const installed = await rb.skillFiles.install(known.name, known.source, state.projectPath);
+      if (!installed || !installed.ok) {
+        addSystemMessage('Could not install the "' + known.name + '" skill: ' + (installed && installed.error ? installed.error : 'unknown error'));
+        return;
+      }
+      await loadSkillFiles();
+      skillPath = state.projectPath + '/.codefox/skills/' + known.name + '/SKILL.md';
+    }
+    const read = await rb.fs.readFile(skillPath);
+    if (!read || !read.ok) {
+      addSystemMessage('Could not read the "' + known.name + '" skill file: ' + (read && read.error ? read.error : 'unknown error'));
+      return;
+    }
+    forcedSkillNote = '\n\n[CodeFox note: the user forced the "' + known.name + '" skill with /skill — its SKILL.md follows. Follow it for this turn, including its stop-and-ask points; it overrides your default way of doing this task, but Project Rules still win over it.]\n\n' + read.content + '\n';
+    if (state.chatMode !== 'agent') {
+      setChatMode('agent');
+      addSystemMessage('Switched to Agent mode for the forced skill — skills need the file tools.');
+    }
+  }
   // Log triage (v0.12.0): a pasted log, or a message asking why
   // there are many errors, routes the turn into triage mode — the
   // ## Log triage section is Agent-mode only, so the mode switch
@@ -1092,7 +1143,7 @@ async function sendChat() {
       addSystemMessage('Switched to Agent mode for log triage — diagnosing from the log needs the file and console tools.');
     }
     const rulesets = await rb.db.getAll('rulesets');
-    systemPrompt = buildSystemPrompt(rulesets);
+    systemPrompt = buildSystemPrompt(rulesets, enabledSkillFiles());
   }
 
   // Diagnose-error context (v0.5.2): if the user's message reports
@@ -1102,6 +1153,8 @@ async function sendChat() {
   if (!usedExecPlanPrompt) systemPrompt += await diagnoseErrorContext(text);
   // Log triage (v0.12.0): point the model at the triage section.
   if (wantsTriage) systemPrompt += LOG_TRIAGE_TURN_NOTE;
+  // Skills (v0.13.0): the forced skill's content, if any.
+  if (forcedSkillNote) systemPrompt += forcedSkillNote;
 
   // Capture thread ID now — state may change if user navigates away
   const currentThreadId = state.activeThreadId;
@@ -2784,7 +2837,7 @@ function pumpPackageQueue() {
   });
 }
 
-function buildSystemPrompt(rulesets) {
+function buildSystemPrompt(rulesets, skills) {
   const ctx = state.projectContext || 'a software project';
   let prompt = 'You are an expert software developer working on ' + ctx + '.\n';
   // Capability statement (v0.5.2) — first, in every mode, in plain
@@ -2904,6 +2957,14 @@ function buildSystemPrompt(rulesets) {
       prompt += 'You can inspect the project\'s git state with a ```git block (Agent mode only): {"action": "status"} — what changed and what branch you are on; {"action": "diff", "ref": "<sha>"} — what changed since a backup commit (add "nameStatus": true for a file list instead of the full diff); {"action": "log", "count": 10} — recent commits, backup commits are marked. After a change, compare what changed against the last backup to find what broke.\n';
       prompt += 'To restore the last backup: {"action": "restore", "ref": "<sha>"} — restoring asks the user first, and it checks out the tracked files from that commit and deletes files the change created. If the build breaks after your change, CodeFox checks the build, gives you one round to fix it, and restores the backup itself if the fix fails — never leave the project broken, and never silently restore: say what broke and what was restored.\n';
       prompt += 'Do not put a **File Path:** line before a ```git block — the block is a command, not a file.\n';
+      // Skills (v0.13.0): only the enabled skills of this project,
+      // one line each — name, "use when..." description, and the
+      // exact path to read. The full SKILL.md is never in the
+      // prompt until the model reads it with view (or the user
+      // forces it with /skill). Agent mode only: Ask/Plan have no
+      // file tools to read a skill with.
+      const skillsSection = buildSkillsPromptSection(skills);
+      if (skillsSection) prompt += skillsSection + '\n';
     }
   }
   return prompt;
@@ -3026,6 +3087,38 @@ function isLogTriageRequest(text) {
 // the prompt; this just points the model at it.
 const LOG_TRIAGE_TURN_NOTE = '\n\n[CodeFox note: this is a log-triage turn — the user attached or pasted a log, or asks why there are many errors. Follow the ## Log triage section: diagnose read-only, do not fix anything, and end with the report format (or the "Request for more information" block if the cause cannot be established).]\n';
 
+// ── File-based skills (v0.13.0) — pure helpers ────────────────────
+// Inline mirrors of parseSkillCommand and buildSkillsPromptSection
+// in skill-files.js (the renderer cannot require that file — the
+// same reason unity-assets.js, file-tools.js and log-triage.js
+// have inline mirrors). The smoke test pins the two copies to
+// agree: if you change one, change both.
+const SKILLS_PROJECT_DIR = '.codefox/skills';
+function parseSkillCommand(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  let firstIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim()) { firstIdx = i; break; }
+  }
+  if (firstIdx === -1) return null;
+  const m = lines[firstIdx].trim().match(/^\/skill(?:\s+([A-Za-z0-9][A-Za-z0-9-]*))?\s*$/);
+  if (!m) return null;
+  const rest = lines.slice(firstIdx + 1).join('\n').trim();
+  return { name: m[1] ? m[1].toLowerCase() : '', rest };
+}
+function buildSkillsPromptSection(skills) {
+  const enabled = (skills || []).filter(s => s && s.name && s.description);
+  if (!enabled.length) return '';
+  let section = '## Skills\n';
+  section += 'Skills are instruction files the user opted into for this project — specialized workflows, loaded on demand. Only the skills below are enabled; do not load any other skill, and do not go looking for skills outside this list.\n';
+  for (const s of enabled) {
+    section += '- ' + s.name + ' — ' + s.description + ' (read ' + (s.relPath || SKILLS_PROJECT_DIR + '/' + s.name + '/SKILL.md') + ' with view when a task matches)\n';
+  }
+  section += 'Project Rules always win: if a skill\'s instruction conflicts with a Project Rule, follow the rule and say so. A skill never overrides a rule.\n';
+  section += 'When the user\'s task matches a skill\'s description, read that skill\'s SKILL.md first with the file tools (view), then read the reference files it points to as needed. Do not read a skill\'s full content when the task does not match it — the list above is all you carry until then.\n';
+  return section;
+}
+
 // When a message reports a Unity error naming a file (e.g.
 // "Assets/Editor/CodeFoxBridge.cs(156,45): error CS1501 ..."),
 // read that file and attach the lines around the reported line to
@@ -3119,7 +3212,7 @@ async function executePlan() {
 
   // Build prompt before switching threads
   const rulesets = await rb.db.getAll('rulesets');
-  const systemPrompt = buildSystemPrompt(rulesets);
+  const systemPrompt = buildSystemPrompt(rulesets, enabledSkillFiles());
   const scan = projectScanSummary();
   const prompt = `You are executing a development plan for this project.
 
@@ -3433,7 +3526,7 @@ async function renameThread() {
 // ── Settings (full window, v0.4.0) ──────────────────────────────
 // Settings is a centre view (mode 'settings'), not a popup modal.
 // The left sidebar stays visible; the view has its own sub-nav:
-// Model / Connections / MCPs / Rules / Advanced. There is deliberately
+// Model / Connections / MCPs / Rules / Skills / Advanced. There is deliberately
 // no account, subscription, or multi-user section — CodeFox is a
 // single-user local app.
 
@@ -3455,6 +3548,7 @@ function renderSettingsView() {
     { id: 'connections', label: 'Connections' },
     { id: 'mcps', label: 'MCPs' },
     { id: 'rules', label: 'Rules' },
+    { id: 'skills', label: 'Skills' },
     { id: 'advanced', label: 'Advanced' },
   ];
   const meta = {
@@ -3462,6 +3556,7 @@ function renderSettingsView() {
     connections: ['Your Connections', 'Local integrations for this project. Nothing here phones home.'],
     mcps: ['MCPs', 'Connect local MCP servers so the assistant can use their tools. Servers run on this machine; CodeFox never sends your code to them or anywhere else.'],
     rules: ['Rules', 'Rules are your instructions to the assistant — how CodeFox should write code, what to never do, your architecture contracts. They are the system prompt the model sees.'],
+    skills: ['Skills', 'Instruction files the assistant loads on demand — specialized workflows like multiplayer networking. A skill is inert until you enable it for this project, and you can read its SKILL.md first. Project Rules always win over a skill.'],
     advanced: ['Advanced', 'Shell tool, agent loop, approvals, and which files CodeFox ignores.'],
   };
   const sec = state.settingsSection || 'model';
@@ -3487,6 +3582,7 @@ function renderSettingsPane() {
   else if (sec === 'connections') renderConnectionsPane(body);
   else if (sec === 'mcps') renderMcpsPane(body);
   else if (sec === 'rules') renderRulesPane(body);
+  else if (sec === 'skills') renderSkillsPane(body);
   else if (sec === 'advanced') renderAdvancedPane(body);
 }
 
@@ -5585,6 +5681,95 @@ async function condenseRules() {
   renderSettingsView();
 }
 
+// ── Skills section (v0.13.0) ─────────────────────────────────────
+// File-based skills: folders of markdown the model reads on
+// demand. A skill is inert until it is installed in the project
+// (copied to .codefox/skills/<name>/) AND enabled here, per
+// project. Disabling never deletes files. These are different
+// from the Home screen's Discover Skills, which are one-click
+// workflow prompts — these are instruction files the assistant
+// follows, and you can read SKILL.md before enabling one.
+function renderSkillsPane(body) {
+  body.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <p class="settings-note">When a task matches an enabled skill, the model reads that skill's SKILL.md with the file tools, then its reference files as needed. Only each skill's name and one-line description sit in the prompt until then — the full content is never loaded for a task that does not match. Project Rules always win: if a skill conflicts with a rule, the rule wins. Force a skill for one turn with <span style="font-family:var(--mono);">/skill &lt;name&gt;</span> in chat.</p>
+      <div id="skill-files-estimate" style="font-size:12px;color:var(--text3);">Loading skills…</div>
+      <div id="skill-files-list"><div style="color:var(--text3);font-size:12px;">Loading skills…</div></div>
+      <p class="settings-note">Disabling keeps the files — delete .codefox/skills/&lt;name&gt; in the project folder to remove a skill entirely. Drop your own skill folders into ${escHtml(state.skillFilesUserDir || 'the app data skills folder')} to add more.</p>
+    </div>`;
+  loadSkillFiles().then(renderSkillFilesList);
+}
+
+function renderSkillFilesList() {
+  const el = document.getElementById('skill-files-list');
+  const estEl = document.getElementById('skill-files-estimate');
+  if (!el) return;
+  const list = state.skillFiles || [];
+  const enabled = list.filter(s => s.installedInProject && s.enabled);
+  // Rough prompt cost of the enabled descriptions (~4 chars/token).
+  const chars = enabled.reduce((n, s) => n + String(s.name || '').length + 3 + String(s.description || '').length + 1, 0);
+  const tokens = Math.ceil(chars / 4);
+  if (estEl) {
+    estEl.innerHTML = enabled.length
+      ? `${enabled.length} enabled · ~${tokens} tokens added to every Agent-mode prompt${enabled.length > 5 ? '<br><span style="color:var(--amber);">More than 5 skills enabled — routing gets less reliable with more candidates. Keep the enabled set small.</span>' : ''}`
+      : 'None enabled — enabled skills add their one-line descriptions to every Agent-mode prompt.';
+  }
+  if (!list.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;">No skills found. Built-in skills ship with CodeFox.</div>';
+    return;
+  }
+  const installed = list.filter(s => s.installedInProject);
+  const available = list.filter(s => !s.installedInProject);
+  const sourceTag = (s) => s.source === 'project' ? 'installed' : s.source === 'user' ? 'your skills' : 'built-in';
+  const row = (s) => {
+    const on = s.installedInProject && s.enabled;
+    const toggle = s.installedInProject
+      ? `<label class="switch" title="Include this skill in prompts for this project"><input type="checkbox" ${on ? 'checked' : ''} onchange="toggleSkillFileEnabled('${escHtml(s.name)}', this.checked)"><span class="slider"></span></label>`
+      : `<button class="btn btn-secondary" onclick="installSkillFile('${escHtml(s.name)}', '${escHtml(s.installSource || s.source)}')">Install</button>`;
+    const reinstall = (s.installedInProject && s.updateAvailable)
+      ? `<button class="btn btn-secondary" onclick="installSkillFile('${escHtml(s.name)}', '${escHtml(s.installSource || 'builtin')}')" title="The shipped copy changed since this project copy was installed">Reinstall</button>` : '';
+    return `<div class="conn-row">
+      <span class="conn-row-info"><span class="conn-name">${escHtml(s.name)}</span><br>
+      <span class="conn-status">${escHtml(s.description)} · ${sourceTag(s)}${s.updateAvailable ? ' · update available' : ''}</span></span>
+      ${reinstall}
+      <button class="btn btn-secondary" onclick="viewSkillFile('${escHtml(s.name)}', '${escHtml(s.skillPath)}')">View SKILL.md</button>
+      ${toggle}
+    </div>`;
+  };
+  el.innerHTML = ''
+    + (installed.length ? '<div class="field-label">In this project</div>' + installed.map(row).join('') : '')
+    + (available.length ? '<div class="field-label" style="margin-top:8px;">Available to install</div>' + available.map(row).join('') : '');
+}
+
+async function toggleSkillFileEnabled(name, enabled) {
+  const res = await rb.skillFiles.setEnabled(state.activeProjectId, name, enabled);
+  if (!res || res.ok === false) { showToast('⚠ ' + (res && res.error ? res.error : 'Could not save the skill setting')); return; }
+  await loadSkillFiles();
+  renderSkillFilesList();
+}
+
+async function installSkillFile(name, source) {
+  if (!state.projectPath) { showToast('⚠ Pick a project first — skills live in the project folder.'); return; }
+  const res = await rb.skillFiles.install(name, source, state.projectPath);
+  if (!res || !res.ok) { showToast('⚠ ' + (res && res.error ? res.error : 'Could not install the skill')); return; }
+  await loadSkillFiles();
+  renderSkillFilesList();
+  showToast('✓ Skill installed — enable it to use it');
+}
+
+async function viewSkillFile(name, absPath) {
+  const res = await rb.fs.readFile(absPath);
+  const content = res && res.ok ? res.content : 'Could not read ' + absPath;
+  openSubModal(`
+    <h2>${escHtml(name)}</h2>
+    <p style="color:var(--text2);font-size:12px;">${escHtml(absPath)}</p>
+    <pre style="max-height:55vh;overflow:auto;white-space:pre-wrap;font-size:12px;">${escHtml(content)}</pre>
+    <div class="sub-modal-actions">
+      <button class="btn btn-secondary" onclick="closeSubModal()">Close</button>
+    </div>
+  `);
+}
+
 // ── Advanced section ──────────────────────────────────────────────
 function renderAdvancedPane(body) {
   const disabled = state.shellEnabled ? '' : 'settings-disabled';
@@ -6539,6 +6724,7 @@ async function switchProject(id) {
   document.getElementById('file-tree').innerHTML = '';
   allFiles = [];
   await loadFileTree(state.projectPath, document.getElementById('file-tree'), 0);
+  await loadSkillFiles();
   buildFileIndex(state.projectPath);
   await showHome();
   showToast('Switched to ' + proj.name);
@@ -6829,6 +7015,29 @@ async function loadSkills() {
     state.skillsInstalled = {};
     for (const r of rows) state.skillsInstalled[r.name] = !!r.installed;
   } catch { state.skillsInstalled = {}; }
+}
+
+// ── File-based skills (v0.13.0) ────────────────────────────────────
+// Distinct from the Home screen's one-click workflow shortcuts
+// above: these are folders of markdown the model reads on demand.
+// scan merges the builtin, user-data and project roots and reports
+// per-project enablement; the model only ever sees the enabled
+// ones, in the system prompt.
+async function loadSkillFiles() {
+  try {
+    const res = await rb.skillFiles.scan(state.projectPath, state.activeProjectId);
+    state.skillFiles = res && res.ok ? (res.skills || []) : [];
+    state.skillFilesUserDir = res && res.userDir ? res.userDir : '';
+  } catch { state.skillFiles = []; state.skillFilesUserDir = ''; }
+}
+
+// The enabled skills of the active project, in the shape the
+// prompt builder takes: name, one-line description, and the
+// project-relative path the model reads with view.
+function enabledSkillFiles() {
+  return (state.skillFiles || [])
+    .filter(s => s.installedInProject && s.enabled)
+    .map(s => ({ name: s.name, description: s.description, relPath: s.relPath || ('.codefox/skills/' + s.name + '/SKILL.md') }));
 }
 
 function renderSkillsGrid() {

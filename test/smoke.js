@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'skill-files.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.12.0.
+// 2. package.json version is 0.13.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.12.0', pkg.version === '0.12.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.12.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.12.0 — Local'));
+check('package.json version is 0.13.0', pkg.version === '0.13.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.13.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.13.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1968,12 +1968,22 @@ check('Unity prompt section is gated on a connected project, not a scan',
   && !/if \(state\.projectScan && state\.projectScan\.unityVersion\)/.test(appJs));
 const promptSrc = extractFunction(appJs, 'buildSystemPrompt');
 check('buildSystemPrompt can be extracted for testing', !!promptSrc);
+// v0.13.0: buildSystemPrompt calls the top-level
+// buildSkillsPromptSection, so the extracted prompt needs its
+// helpers in scope — the section builder and the project-dir
+// constant it closes over. (The app uses the same code at
+// runtime; the test just re-assembles the scope.)
+const skillsSectionSrc = extractFunction(appJs, 'buildSkillsPromptSection');
+const skillsDirConst = /const SKILLS_PROJECT_DIR = '[^']+';/.exec(appJs);
+check('skills prompt helpers extractable for testing', !!skillsSectionSrc && !!skillsDirConst);
+const promptHelpersSrc = (skillsSectionSrc && skillsDirConst)
+  ? skillsDirConst[0] + '\n' + skillsSectionSrc + '\n' : '';
 if (promptSrc) {
   // buildSystemPrompt closes over the top-level example constant —
   // pass unity-assets.js's copy in as the parameter of the same
   // name (the equality check below proves app.js holds the same
   // string, so this is the value the app itself uses).
-  const buildPrompt = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const buildPrompt = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
   const agentPrompt = buildPrompt(
     { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
     {},
@@ -2192,7 +2202,7 @@ check('snapshotForDelete can be extracted for testing', !!snapSrc93 && !!resolve
 // Prompt: deleteAsset, the ScrollRect recipes, the remove shapes,
 // and no File Path line before a unity-command block.
 if (promptSrc) {
-  const buildPrompt93 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const buildPrompt93 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
   const agentPrompt93 = buildPrompt93(
     { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
     {},
@@ -2453,7 +2463,7 @@ check('parser skips ```git fences as files, still extracts a real file change',
   })());
 // Prompt: the agent prompt carries the git docs (re-extract like 0.9.2).
 if (promptSrc) {
-  const buildPrompt10 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const buildPrompt10 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
   const agentPrompt10 = buildPrompt10(
     { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
     {},
@@ -2737,7 +2747,7 @@ check('bridge readConsole refuses "All" and takes Error / Warning only',
 // Prompt: the agent prompt carries the file-tool docs and the
 // readConsole example, and its JSON examples parse.
 if (promptSrc) {
-  const buildPrompt11 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const buildPrompt11 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
   const agentPrompt11 = buildPrompt11(
     { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
     {},
@@ -2795,7 +2805,7 @@ check('bridge version pins are 0.11.0 everywhere',
   && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.11.0'));
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.12.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.12.0')
+  && readme.includes('readConsole') && readme.includes('version-0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.12.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -2851,7 +2861,7 @@ if (triageMirrorSrc && triageMirrorConst) {
 // Prompt: the agent prompt carries the triage section (Agent mode,
 // project connected); the Ask prompt and a no-project prompt do not.
 if (promptSrc) {
-  const buildPrompt12 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const buildPrompt12 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn buildSystemPrompt([]);');
   const agentPrompt12 = buildPrompt12(
     { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
     {},
@@ -2904,6 +2914,229 @@ check('README has the log-triage section + CHANGELOG has the 0.12.0 triage entry
   readme.includes('### Log triage') && readme.includes('strictly read-only')
   && readme.includes('Editor-prev.log')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Log triage as an automatic pipeline stage'));
+
+// 37. v0.13.0 — skills: progressive loading, per-project
+// enable/disable, manual override, and the first built-in skill.
+// The bridge is untouched (still 0.11.0).
+const skillFiles = require('../skill-files');
+
+// Frontmatter parsing.
+check('skill frontmatter: name + description parsed',
+  JSON.stringify(skillFiles.parseSkillFrontmatter('---\nname: foo-bar\ndescription: Use when testing.\n---\n# Foo\n')) === JSON.stringify({ name: 'foo-bar', description: 'Use when testing.' }));
+check('skill frontmatter: quoted values unquoted, unknown keys ignored, missing keys null',
+  JSON.stringify(skillFiles.parseSkillFrontmatter('---\ndescription: "Quoted desc."\nversion: 3\n---\n')) === JSON.stringify({ name: null, description: 'Quoted desc.' }));
+check('skill frontmatter: no frontmatter block is null',
+  skillFiles.parseSkillFrontmatter('# No frontmatter\nUse when testing.\n') === null);
+check('skill frontmatter: CRLF line endings parse',
+  skillFiles.parseSkillFrontmatter('---\r\nname: crlf-skill\r\ndescription: CRLF desc.\r\n---\r\n') !== null
+  && skillFiles.parseSkillFrontmatter('---\r\nname: crlf-skill\r\ndescription: CRLF desc.\r\n---\r\n').name === 'crlf-skill');
+
+// describeSkillFile: frontmatter wins; without it, the name comes
+// from the folder and the description from the first non-heading
+// line; null when there is no usable description.
+check('describeSkillFile: frontmatter name + description win',
+  JSON.stringify(skillFiles.describeSkillFile('---\nname: fm-skill\ndescription: From frontmatter.\n---\n# Title\nBody line.\n', 'folder-name')) === JSON.stringify({ name: 'fm-skill', description: 'From frontmatter.' }));
+check('describeSkillFile: no frontmatter — folder name + first paragraph line',
+  JSON.stringify(skillFiles.describeSkillFile('# Plain Skill\n\nPlain skill does things.\n', 'plain-skill')) === JSON.stringify({ name: 'plain-skill', description: 'Plain skill does things.' }));
+check('describeSkillFile: no description is null (cannot be routed on)',
+  skillFiles.describeSkillFile('# Title only\n', 'empty-skill') === null);
+check('describeSkillFile: unsafe frontmatter name is null',
+  skillFiles.describeSkillFile('---\nname: ../escape\ndescription: Evil.\n---\n', 'escape') === null);
+
+// Name helpers.
+check('isSafeSkillName / normalizeSkillName / skillProjectRelPath',
+  skillFiles.isSafeSkillName('unity-multiplayer-networking') === true
+  && skillFiles.isSafeSkillName('Bad Name') === false
+  && skillFiles.isSafeSkillName('a/b') === false
+  && skillFiles.isSafeSkillName('') === false
+  && skillFiles.normalizeSkillName('  MultiPlayer-Net ') === 'multiplayer-net'
+  && skillFiles.skillProjectRelPath('foo') === '.codefox/skills/foo/SKILL.md');
+
+// parseSkillCommand: the command is the first non-blank line,
+// "/skill <name>" optionally followed by the task on the
+// FOLLOWING lines — a task on the same line is not a command.
+check('parseSkillCommand: name + task on following lines',
+  JSON.stringify(skillFiles.parseSkillCommand('/skill multiplayer\nmake a lobby')) === JSON.stringify({ name: 'multiplayer', rest: 'make a lobby' }));
+check('parseSkillCommand: bare /skill lists (empty name), leading blanks skipped, name normalized to lowercase',
+  JSON.stringify(skillFiles.parseSkillCommand('\n\n/skill')) === JSON.stringify({ name: '', rest: '' })
+  && JSON.stringify(skillFiles.parseSkillCommand('/skill Multiplayer')) === JSON.stringify({ name: 'multiplayer', rest: '' }));
+check('parseSkillCommand: not a command is null; task on the same line is null',
+  skillFiles.parseSkillCommand('please /skill multiplayer') === null
+  && skillFiles.parseSkillCommand('/skill multiplayer make a lobby') === null
+  && skillFiles.parseSkillCommand('') === null
+  && skillFiles.parseSkillCommand('/skills multiplayer') === null);
+
+// Token estimate: name + ' — ' (3) + description + newline (1),
+// ~4 chars per token. Only the one-line descriptions count —
+// the full SKILL.md is never in the prompt until it is loaded.
+check('estimateSkillPromptTokens: one skill, empty list, rounding',
+  skillFiles.estimateSkillPromptTokens([{ name: 'ab', description: 'x'.repeat(10) }]) === 4
+  && skillFiles.estimateSkillPromptTokens([]) === 0
+  && skillFiles.estimateSkillPromptTokens([{ name: 'a', description: 'b' }]) === 2);
+
+// Prompt section.
+check('buildSkillsPromptSection: empty when no skills',
+  skillFiles.buildSkillsPromptSection([]) === '' && skillFiles.buildSkillsPromptSection(null) === '');
+check('buildSkillsPromptSection: one skill — name, description, exact path, rules-win precedence',
+  (() => {
+    const s = skillFiles.buildSkillsPromptSection([{ name: 'unity-multiplayer-networking', description: 'Use when adding multiplayer.', relPath: '.codefox/skills/unity-multiplayer-networking/SKILL.md' }]);
+    return s.includes('## Skills')
+      && s.includes('- unity-multiplayer-networking — Use when adding multiplayer.')
+      && s.includes('(read .codefox/skills/unity-multiplayer-networking/SKILL.md with view when a task matches)')
+      && s.includes('Project Rules always win')
+      && s.includes("if a skill's instruction conflicts with a Project Rule, follow the rule and say so")
+      && s.includes("Do not read a skill's full content when the task does not match");
+  })());
+check('buildSkillsPromptSection: missing relPath falls back to the project path',
+  skillFiles.buildSkillsPromptSection([{ name: 'foo', description: 'Does foo.' }]).includes('.codefox/skills/foo/SKILL.md'));
+check('buildSkillsPromptSection: entries without a description are dropped',
+  skillFiles.buildSkillsPromptSection([{ name: 'foo' }]) === '');
+
+// The app.js mirrors must agree with skill-files.js: the renderer
+// cannot require that file, so the command parser and the prompt
+// section live in both places.
+const mirrorCmdSrc = extractFunction(appJs, 'parseSkillCommand');
+const mirrorSectionSrc = extractFunction(appJs, 'buildSkillsPromptSection');
+const mirrorDirConst = /const SKILLS_PROJECT_DIR = '[^']+';/.exec(appJs);
+check('app.js skill mirrors extractable for testing', !!mirrorCmdSrc && !!mirrorSectionSrc && !!mirrorDirConst);
+if (mirrorCmdSrc && mirrorSectionSrc && mirrorDirConst) {
+  const mirrorParse = new Function(mirrorCmdSrc + '\nreturn parseSkillCommand;')();
+  const mirrorSection = new Function(mirrorDirConst[0] + '\n' + mirrorSectionSrc + '\nreturn buildSkillsPromptSection;')();
+  const cmdCases = ['/skill multiplayer\nmake a lobby', '/skill', '/SKILL Multiplayer', 'please /skill x', '/skill multiplayer make a lobby', '', '/skills x', '\n\n/skill foo-bar\nrest here'];
+  check('app.js parseSkillCommand mirror agrees with skill-files.js on every case',
+    cmdCases.every(t => JSON.stringify(mirrorParse(t)) === JSON.stringify(skillFiles.parseSkillCommand(t))));
+  const sectionCases = [
+    [],
+    [{ name: 'foo', description: 'Does foo.' }],
+    [{ name: 'foo', description: 'Does foo.', relPath: 'custom/path/SKILL.md' }, { name: 'bar', description: 'Does bar.' }],
+    [{ name: 'foo' }, { name: 'bar', description: 'Does bar.' }],
+  ];
+  check('app.js buildSkillsPromptSection mirror agrees with skill-files.js on every case',
+    sectionCases.every(c => mirrorSection(c) === skillFiles.buildSkillsPromptSection(c)));
+}
+
+// Discovery across builtin / user / project roots: the first root
+// wins on a name clash, folders without SKILL.md or without a
+// usable description are skipped, and a skill written straight
+// into the project folder still shows up.
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-skills-'));
+  try {
+    const builtin = path.join(tmp, 'builtin');
+    const user = path.join(tmp, 'user');
+    const project = path.join(tmp, 'project');
+    const write = (dir, name, content) => {
+      fs.mkdirSync(path.join(dir, name), { recursive: true });
+      fs.writeFileSync(path.join(dir, name, 'SKILL.md'), content);
+    };
+    write(builtin, 'multiplayer', '---\nname: multiplayer\ndescription: Use when adding multiplayer.\n---\n');
+    write(builtin, 'plain', '# Plain Skill\n\nPlain skill does things.\n');
+    fs.mkdirSync(path.join(builtin, 'broken'), { recursive: true });
+    write(user, 'multiplayer', '---\nname: multiplayer\ndescription: A DIFFERENT description.\n---\n');
+    write(user, 'user-only', '---\nname: user-only\ndescription: Only in user root.\n---\n');
+    write(project, 'multiplayer', '---\nname: multiplayer\ndescription: Use when adding multiplayer.\n---\n');
+    write(project, 'local-only', '---\nname: local-only\ndescription: Written straight into the project.\n---\n');
+    const found = skillFiles.discoverSkills(fs, path, [
+      { source: 'builtin', dir: builtin },
+      { source: 'user', dir: user },
+      { source: 'project', dir: project },
+    ]);
+    const byName = Object.fromEntries(found.skills.map(s => [s.name, s]));
+    check('discoverSkills: first root wins, project-only skill included, fallback description used',
+      found.skills.length === 4
+      && byName['multiplayer'].source === 'builtin'
+      && byName['multiplayer'].description === 'Use when adding multiplayer.'
+      && byName['plain'].description === 'Plain skill does things.'
+      && byName['user-only'].source === 'user'
+      && byName['local-only'].source === 'project');
+    check('discoverSkills: skipped lists the folder without SKILL.md and the duplicates',
+      found.skipped.some(s => s.name === 'broken' && s.reason === 'no SKILL.md')
+      && found.skipped.some(s => s.name === 'multiplayer' && s.source === 'user' && s.reason.startsWith('duplicate name')));
+    check('discoverSkills: a missing root is skipped, not an error',
+      skillFiles.discoverSkills(fs, path, [{ source: 'builtin', dir: path.join(tmp, 'does-not-exist') }]).skills.length === 0);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+
+// Wiring: main.js IPCs + project_skills table, preload surface,
+// app.js call sites, packaging, and the bridge staying put.
+check('main.js wires the skillFiles IPCs + project_skills table',
+  mainJs.includes("ipcMain.handle('skillFiles:scan'") && mainJs.includes("ipcMain.handle('skillFiles:install'") && mainJs.includes("ipcMain.handle('skillFiles:setEnabled'") && mainJs.includes('CREATE TABLE IF NOT EXISTS project_skills'));
+const preloadJs13 = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+check('preload exposes rb.skillFiles (scan/install/setEnabled)',
+  preloadJs13.includes('skillFiles: {') && preloadJs13.includes("ipcRenderer.invoke('skillFiles:scan'") && preloadJs13.includes("ipcRenderer.invoke('skillFiles:install'") && preloadJs13.includes("ipcRenderer.invoke('skillFiles:setEnabled'"));
+check('app.js: /skill handling, Skills settings section, prompt call site',
+  appJs.includes('parseSkillCommand(text)') && appJs.includes('rb.skillFiles.scan') && appJs.includes('rb.skillFiles.install') && appJs.includes('rb.skillFiles.setEnabled') && appJs.includes('id="skill-files-list"') && appJs.includes('buildSystemPrompt(rulesets, enabledSkillFiles())'));
+check('Settings Skills section shows the token estimate and the >5 warning',
+  appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
+check('package.json build.files ships skill-files.js and the skills folder',
+  Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
+check('bridge still 0.11.0 (app version only moved)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.11.0';"));
+
+// The built-in multiplayer skill: frontmatter, file set, and the
+// workflow points the skill must encode.
+const mpSkill = path.join(root, 'skills', 'unity-multiplayer-networking');
+const mpSkillMd = fs.readFileSync(path.join(mpSkill, 'SKILL.md'), 'utf8');
+const mpFm = skillFiles.parseSkillFrontmatter(mpSkillMd);
+check('multiplayer skill: SKILL.md frontmatter has name + strong use-when description',
+  mpFm && mpFm.name === 'unity-multiplayer-networking' && /Use when adding multiplayer/i.test(mpFm.description || ''));
+const mpFiles = [];
+(function walkMd(dir) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) walkMd(path.join(dir, e.name));
+    else if (e.name.endsWith('.md')) mpFiles.push(path.relative(mpSkill, path.join(dir, e.name)));
+  }
+})(mpSkill);
+check('multiplayer skill: SKILL.md + per-stack references present (29 files)',
+  mpFiles.length === 29 && mpFiles.includes('SKILL.md')
+  && mpFiles.includes(path.join('references', 'netcode', 'SETUP.md'))
+  && mpFiles.includes(path.join('references', 'photon', 'EXAMPLES_FUSION.md'))
+  && mpFiles.includes(path.join('references', 'metaplay', 'BEST_PRACTICES.md')));
+check('multiplayer skill: every stack has README/SETUP/EXAMPLES/DEBUGGING/BEST_PRACTICES',
+  ['netcode', 'photon', 'fishnet', 'nakama', 'metaplay'].every(stack =>
+    ['README.md', 'SETUP.md', 'DEBUGGING.md', 'BEST_PRACTICES.md'].every(f =>
+      mpFiles.includes(path.join('references', stack, f)))
+    && mpFiles.some(f => f.startsWith(path.join('references', stack, 'EXAMPLES')))));
+check('multiplayer skill: SKILL.md encodes the workflow (detect, stop and ask, docs-first, config check, no programmatic install, no unasked docs)',
+  mpSkillMd.includes('Detect the installed stack.')
+  && mpSkillMd.includes('Then STOP and wait. Never silently adopt a stack, and never guess one.')
+  && mpSkillMd.includes('Suggest 2–4 candidates with concrete trade-offs')
+  && mpSkillMd.includes('Installing is a manual user step — never install a package programmatically.')
+  && mpSkillMd.includes('verify the project configuration matches the approach')
+  && mpSkillMd.includes('triggers never fire when the physics simulation mode is Script')
+  && mpSkillMd.includes('Debug — docs FIRST, then fix.')
+  && mpSkillMd.includes('physics or configuration bugs wearing a networking costume')
+  && mpSkillMd.includes('Never freelance a fix from memory before reading the debugging docs.')
+  && mpSkillMd.includes('Do not generate guides, READMEs, tutorials, or summary pages.')
+  && mpSkillMd.includes('Never attempt to install packages or import assets programmatically'));
+check('multiplayer skill: Metaplay examples are marked schematic (SDK names vary by version)',
+  fs.readFileSync(path.join(mpSkill, 'references', 'metaplay', 'EXAMPLES.md'), 'utf8').includes('must be verified against the installed SDK docs')
+  || fs.readFileSync(path.join(mpSkill, 'references', 'metaplay', 'EXAMPLES.md'), 'utf8').includes('check them against the official docs for that version'));
+
+// Prompt: the agent prompt lists enabled skills (Agent mode,
+// project connected); the Ask prompt and a no-skills prompt do not.
+if (promptSrc) {
+  const buildPrompt13 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptHelpersSrc + promptSrc + '\nreturn (r, s) => buildSystemPrompt(r, s);');
+  const agentState13 = { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' };
+  const mpEnabled = [{ name: 'unity-multiplayer-networking', description: 'Use when adding multiplayer to a Unity game.', relPath: '.codefox/skills/unity-multiplayer-networking/SKILL.md' }];
+  const agentPrompt13 = buildPrompt13(agentState13, {}, () => '', assets.UNITY_CREATE_PREFAB_EXAMPLE)([], mpEnabled);
+  check('agent prompt lists enabled skills with name, description, path, and rules-win precedence',
+    agentPrompt13.includes('## Skills')
+    && agentPrompt13.includes('- unity-multiplayer-networking — Use when adding multiplayer to a Unity game.')
+    && agentPrompt13.includes('.codefox/skills/unity-multiplayer-networking/SKILL.md')
+    && agentPrompt13.includes('Project Rules always win'));
+  const askPrompt13 = buildPrompt13({ ...agentState13, chatMode: 'ask' }, {}, () => '', assets.UNITY_CREATE_PREFAB_EXAMPLE)([], mpEnabled);
+  check('ask prompt has no Skills section (no file tools to read one with)', !askPrompt13.includes('## Skills'));
+  const noSkillsPrompt13 = buildPrompt13(agentState13, {}, () => '', assets.UNITY_CREATE_PREFAB_EXAMPLE)([], []);
+  check('agent prompt with no skills enabled has no Skills section (an empty section costs tokens)', !noSkillsPrompt13.includes('## Skills'));
+}
+
+check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
+  readme.includes('### Skills') && readme.includes('Project Rules always win')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
+check('README badge reads 0.13.0', readme.includes('version-0.13.0'));
+
 (async () => {
   await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
   const base = 'http://127.0.0.1:' + mockServer.address().port;

@@ -14,6 +14,7 @@ const comfyui = require('./comfyui');
 const { UNITY_ASSET_EXTS } = require('./unity-assets');
 const { MCP_PRESETS } = require('./mcp-presets');
 const lmLoad = require('./lmstudio-load');
+const skillFiles = require('./skill-files');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -259,6 +260,18 @@ async function initDB() {
     name TEXT PRIMARY KEY,
     installed INTEGER NOT NULL DEFAULT 0,
     installed_at TEXT
+  )`);
+  // v0.13.0: per-project enable/disable for file-based skills.
+  // Separate from the `skills` table above, which is the install
+  // state of the Home screen's one-click workflow shortcuts — a
+  // different mechanism. A row here only matters once the skill
+  // is installed in the project (<project>/.codefox/skills/<name>/);
+  // a missing row means disabled.
+  db.run(`CREATE TABLE IF NOT EXISTS project_skills (
+    project_id INTEGER NOT NULL,
+    skill_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (project_id, skill_name)
   )`);
   for (const t of ['threads', 'rulesets', 'plans', 'pages']) {
     try { db.run(`ALTER TABLE ${t} ADD COLUMN project_id INTEGER`); } catch {}
@@ -605,6 +618,125 @@ ipcMain.handle('skills:set', (_, name, installed) => {
     [String(name), on, on ? new Date().toISOString() : null]);
   saveDB();
   return true;
+});
+
+// ── File-based skills (v0.13.0) ───────────────────────────────────
+// Distinct from the Home screen's one-click workflow shortcuts
+// above (the `skills` table): these are folders of markdown the
+// model reads on demand. Built-in skills ship in the repo under
+// skills/<name>/; user skills live in the user-data folder under
+// skills/; a skill only acts in a project once it is installed
+// there (<project>/.codefox/skills/<name>/) and enabled for that
+// project (project_skills table).
+function skillFilesRoots(projectPath) {
+  const roots = [
+    { source: 'builtin', dir: path.join(__dirname, 'skills') },
+    { source: 'user', dir: path.join(app.getPath('userData'), 'skills') },
+  ];
+  if (projectPath) roots.push({ source: 'project', dir: path.join(projectPath, skillFiles.SKILLS_PROJECT_DIR) });
+  return roots;
+}
+
+function skillFilesEnabledMap(projectId) {
+  const out = {};
+  if (projectId == null) return out;
+  try {
+    const result = db.exec('SELECT skill_name, enabled FROM project_skills WHERE project_id = ' + Number(projectId));
+    if (result.length) {
+      const { columns, values } = result[0];
+      for (const row of values) {
+        const obj = Object.fromEntries(columns.map((c, i) => [c, row[i]]));
+        out[obj.skill_name] = Number(obj.enabled) !== 0;
+      }
+    }
+  } catch { /* a missing table just means nothing enabled */ }
+  return out;
+}
+
+// List every discoverable skill, merged across the three roots.
+// A project copy replaces the builtin/user entry of the same name
+// (it IS that skill, installed); the entry keeps the install
+// source so the UI can offer a reinstall when the shipped copy
+// changed (updateAvailable compares SKILL.md contents).
+ipcMain.handle('skillFiles:scan', (_, payload) => {
+  const projectPath = (payload && payload.projectPath) || '';
+  const projectId = payload && payload.projectId != null ? Number(payload.projectId) : null;
+  const enabledMap = skillFilesEnabledMap(projectId);
+  const roots = skillFilesRoots(projectPath);
+  const bySource = {};
+  for (const root of roots) {
+    bySource[root.source] = skillFiles.discoverSkills(fs, path, [root]);
+  }
+  const merged = {};
+  const order = [];
+  const put = (entry, installedInProject) => {
+    if (!merged[entry.name]) { merged[entry.name] = { ...entry, installedInProject, enabled: false, updateAvailable: false, installSource: null }; order.push(entry.name); }
+    return merged[entry.name];
+  };
+  for (const e of (bySource.builtin ? bySource.builtin.skills : [])) { const m = put(e, false); m.installSource = 'builtin'; }
+  for (const e of (bySource.user ? bySource.user.skills : [])) { const m = put(e, false); if (!m.installSource) m.installSource = 'user'; }
+  for (const e of (bySource.project ? bySource.project.skills : [])) {
+    const m = put(e, true);
+    m.installedInProject = true;
+    m.source = 'project';
+    m.dir = e.dir;
+    m.skillPath = e.skillPath;
+    m.description = e.description;
+    m.enabled = enabledMap[e.name] === true;
+    // A shipped copy changed since this project copy was
+    // installed: compare SKILL.md contents.
+    try {
+      const origin = m.installSource === 'user'
+        ? path.join(app.getPath('userData'), 'skills', e.name, 'SKILL.md')
+        : path.join(__dirname, 'skills', e.name, 'SKILL.md');
+      m.updateAvailable = fs.existsSync(origin)
+        && fs.readFileSync(origin, 'utf8') !== fs.readFileSync(e.skillPath, 'utf8');
+    } catch { m.updateAvailable = false; }
+  }
+  for (const name of order) {
+    if (merged[name].installedInProject) merged[name].relPath = skillFiles.skillProjectRelPath(name);
+  }
+  return { ok: true, userDir: path.join(app.getPath('userData'), 'skills'), skills: order.map(n => merged[n]), skipped: [].concat(bySource.builtin ? bySource.builtin.skipped : [], bySource.user ? bySource.user.skipped : [], bySource.project ? bySource.project.skipped : []) };
+});
+
+// Install (or reinstall) a skill into the project: copy its folder
+// from the builtin or user root to <project>/.codefox/skills/<name>/.
+// Overwrites on reinstall — a project copy the user edited is
+// replaced, so reinstall only when the UI says an update is
+// available (or the user asks). Installing does not enable the
+// skill; that is a separate toggle.
+ipcMain.handle('skillFiles:install', (_, payload) => {
+  const name = skillFiles.normalizeSkillName(payload && payload.name);
+  const source = payload && payload.source === 'user' ? 'user' : 'builtin';
+  const projectPath = (payload && payload.projectPath) || '';
+  if (!skillFiles.isSafeSkillName(name)) return { ok: false, error: 'Not a valid skill name: ' + String(payload && payload.name) };
+  if (!projectPath) return { ok: false, error: 'Pick a project first — skills live in the project folder.' };
+  const srcRoot = source === 'user' ? path.join(app.getPath('userData'), 'skills') : path.join(__dirname, 'skills');
+  const src = path.join(srcRoot, name);
+  // Containment: the source must be a direct child of its root.
+  if (path.dirname(src) !== srcRoot) return { ok: false, error: 'Refused: skill path escapes its folder.' };
+  const skillMd = path.join(src, 'SKILL.md');
+  if (!fs.existsSync(skillMd)) return { ok: false, error: 'No skill named "' + name + '" in the ' + source + ' skills folder.' };
+  const dest = path.join(projectPath, skillFiles.SKILLS_PROJECT_DIR, name);
+  try {
+    fs.cpSync(src, dest, { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, error: 'Could not install the skill: ' + e.message };
+  }
+  return { ok: true, relPath: skillFiles.skillProjectRelPath(name) };
+});
+
+// Enable or disable a skill for one project. Disabling never
+// deletes files — the skill is simply not listed in the prompt.
+ipcMain.handle('skillFiles:setEnabled', (_, payload) => {
+  const name = skillFiles.normalizeSkillName(payload && payload.name);
+  const projectId = payload && payload.projectId != null ? Number(payload.projectId) : null;
+  if (!skillFiles.isSafeSkillName(name)) return { ok: false, error: 'Not a valid skill name.' };
+  if (projectId == null) return { ok: false, error: 'No project selected.' };
+  db.run('INSERT OR REPLACE INTO project_skills (project_id, skill_name, enabled) VALUES (?, ?, ?)',
+    [projectId, name, payload && payload.enabled ? 1 : 0]);
+  saveDB();
+  return { ok: true };
 });
 
 // ── File system IPC handlers ─────────────────────────────────────

@@ -149,6 +149,17 @@ contextBridge.exposeInMainWorld('rb', {
     list: () => ipcRenderer.invoke('skills:list'),
     set: (name, installed) => ipcRenderer.invoke('skills:set', name, installed),
   },
+  // File-based skills (v0.13.0) — folders of markdown the model
+  // reads on demand. Distinct from `skills` above, which is the
+  // install state of the Home screen's one-click workflow
+  // shortcuts. scan merges the builtin, user-data and project
+  // roots and reports per-project enablement; install copies a
+  // skill into the project; setEnabled toggles it for a project.
+  skillFiles: {
+    scan: (projectPath, projectId) => ipcRenderer.invoke('skillFiles:scan', { projectPath: projectPath || '', projectId: projectId == null ? null : projectId }),
+    install: (name, source, projectPath) => ipcRenderer.invoke('skillFiles:install', { name, source, projectPath: projectPath || '' }),
+    setEnabled: (projectId, name, enabled) => ipcRenderer.invoke('skillFiles:setEnabled', { projectId, name, enabled }),
+  },
   llm: {
     status: () => ipcRenderer.invoke('llm:status'),
     listModels: (payload) => ipcRenderer.invoke('llm:listModels', payload || {}),
