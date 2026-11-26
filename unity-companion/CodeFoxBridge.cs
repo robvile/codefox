@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.9.0
+// CodeFoxBridge version: 0.9.1
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 // Watches for file changes from the CodeFox app and auto-refreshes Unity's AssetDatabase.
 // Also watches Assets/.codefox-command.json: when CodeFox writes a command there,
@@ -57,7 +57,7 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
-    public const string BridgeVersion = "0.9.0";
+    public const string BridgeVersion = "0.9.1";
     private const string TriggerFileName = ".codefox-refresh-trigger";
     private const string CommandFileName = ".codefox-command.json";
     private const string ResultFileName = ".codefox-result.json";
@@ -914,7 +914,7 @@ public static class CodeFoxBridge
         {
             // The scene copy is only scaffolding — the prefab asset
             // is the deliverable. Destroy it even on success.
-            if (rootGO != null) { try { Object.DestroyImmediate(rootGO); } catch { } }
+            if (rootGO != null) { try { UnityEngine.Object.DestroyImmediate(rootGO); } catch { } }
         }
     }
 
@@ -984,7 +984,7 @@ public static class CodeFoxBridge
                 Component comp = target.GetComponent(type);
                 if (comp == null) return "Object '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "' has no " + type.Name + " component.";
                 if (comp is Transform) return "The Transform cannot be removed.";
-                Object.DestroyImmediate(comp);
+                UnityEngine.Object.DestroyImmediate(comp);
             }
         }
         var sets = JArr(cmd, "set");

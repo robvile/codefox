@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.9.0.
+// 2. package.json version is 0.9.1.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.9.0', pkg.version === '0.9.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.9.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.0 — Local'));
+check('package.json version is 0.9.1', pkg.version === '0.9.1', 'got ' + pkg.version);
+check('sidebar footer shows 0.9.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.1 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,30 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.9.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.9.0') && bridgeCs.includes('BridgeVersion = "0.9.0"'));
-check('embedded bridge has the 0.9.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.9.0');
+check('bridge .cs has the 0.9.1 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.9.1') && bridgeCs.includes('BridgeVersion = "0.9.1"'));
+check('embedded bridge has the 0.9.1 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.1'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.1',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.9.1');
+// v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
+// UnityEngine.Object and System.Object when both namespaces are in
+// scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
+// Object.DestroyImmediate in two places). The bridge must always
+// qualify it. Strip strings and comments first so "Object '...'" in
+// error messages cannot false-positive, then remove the qualified
+// forms and assert no bare Object token is left. Identifiers such as
+// ParseObject, RegisterCreatedObjectUndo, Enum.ToObject and
+// gameObject do not match \bObject\b, so they need no special case.
+const bridgeCsBare = bridgeCs
+  .replace(/"(?:\\.|[^"\\])*"/g, '""')
+  .replace(/'(?:\\.|[^'\\])*'/g, "''")
+  .replace(/\/\/.*$/gm, '')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/UnityEngine\.Object/g, '')
+  .replace(/System\.Object/g, '');
+check('bridge .cs has no bare Object reference (CS0104)',
+  !/\bObject\b/.test(bridgeCsBare));
 check('unity-bridge.js has version helpers',
   typeof bridge.getInstalledBridgeVersion === 'function'
   && typeof bridge.isBridgeUpdateAvailable === 'function'
@@ -479,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.9.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.9.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.1' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.9.1 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.9.1');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -1913,6 +1931,8 @@ check('README documents the bridge-command prefab workflow and the Unity-writes-
   && readme.includes('listComponentTypes') && readme.includes('describeComponent'));
 check('CHANGELOG has the 0.9.0 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.0 — 2026-11-26'));
+check('CHANGELOG has the 0.9.1 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.1 — 2026-11-26'));
 // Functional: the refusal predicate (unity-assets.js) refuses
 // .prefab/.unity and accepts .cs/.mat, and the refusal names the
 // file and points at the unity-command block.

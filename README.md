@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.9.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.9.1-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
