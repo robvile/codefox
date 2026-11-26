@@ -1,0 +1,37 @@
+id: create-object
+title: Create an object under a parent with a component
+tags: [canary, scene, create]
+canary: true
+fixture: base
+prompt: |
+  Create a Cube called Crate under Level, at position (2, 0.5, 0), and add a Rigidbody to it.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: state
+    path: Level/Crate
+    component: Rigidbody
+    exists: true
+  - type: compiles
+  - type: no_collateral
+    allowlist: [Assets/Scenes/Main.unity]
+reference:
+  commands:
+    - action: create_gameobject
+      name: Crate
+      parent: Level
+      primitive: Cube
+      position: [2, 0.5, 0]
+      components: [Rigidbody]
+mockReplies:
+  - |
+    I'll create the Crate under Level with a Rigidbody.
+    ```unity-command
+    {"action": "create_gameobject", "name": "Crate", "parent": "Level", "primitive": "Cube", "position": [2, 0.5, 0], "components": ["Rigidbody"]}
+    ```
+  - |
+    Done — Level/Crate is a Cube with a Rigidbody at (2, 0.5, 0).

@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'skill-files.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.17.0.
+// 2. package.json version is 0.18.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.17.0', pkg.version === '0.17.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.17.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.17.0 — Local'));
+check('package.json version is 0.18.0', pkg.version === '0.18.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.18.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.18.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -2925,7 +2925,7 @@ check('bridge version pins are 0.15.0 everywhere (MIN_TRANSPORT_VERSION stays 0.
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.17.0')
+  && readme.includes('readConsole') && readme.includes('version-0.18.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3255,7 +3255,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.17.0', readme.includes('version-0.17.0'));
+check('README badge reads 0.18.0', readme.includes('version-0.18.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3904,17 +3904,217 @@ if (promptSrc) {
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
     && bridgeCs.includes('// CodeFoxBridge version: 0.15.0'));
 
-  // Version pins and packaging for 0.17.0.
+  // Version pins and packaging for 0.18.0.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.17.0 and build.files includes the three split modules',
-    pkg.version === '0.17.0'
+  check('package.json is 0.18.0 and build.files includes the three split modules',
+    pkg.version === '0.18.0'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js'));
-  check('index.html footer, README badge, and CHANGELOG have the 0.17.0 entry',
-    indexHtml.includes('CodeFox 0.17.0 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.17.0-blue')
-    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.17.0 — 2026-11-26'));
+  check('index.html footer, README badge, and CHANGELOG have the 0.18.0 entry',
+    indexHtml.includes('CodeFox 0.18.0 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.18.0-blue')
+    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.18.0 — 2026-11-26'));
+}
+
+// 42. v0.18.0 — the eval harness: YAML tasks, programmatic
+// checks, k-run aggregation, canary subset, no LLM-as-judge.
+{
+  const EvalTasks = require('../eval/eval-tasks.js');
+  const taskDir = path.join(root, 'eval', 'tasks');
+  const taskFiles = fs.readdirSync(taskDir).filter((f) => /\.ya?ml$/.test(f)).sort();
+  const parsedTasks = [];
+  let parseFailed = [];
+  for (const f of taskFiles) {
+    const r = EvalTasks.parseTask(fs.readFileSync(path.join(taskDir, f), 'utf8'), f);
+    if (!r.ok) parseFailed.push(f + ': ' + r.errors.join('; '));
+    else parsedTasks.push(r.task);
+  }
+  check('eval: all 12 task YAMLs parse', taskFiles.length === 12 && parseFailed.length === 0, parseFailed.join(' | ') || (taskFiles.length + ' files'));
+  check('eval: fnv1a is deterministic and distinguishes inputs',
+    EvalTasks.fnv1a('abc') === EvalTasks.fnv1a('abc') && EvalTasks.fnv1a('abc') !== EvalTasks.fnv1a('abd'));
+  check('eval: estimateTokens is chars/4 (labelled estimate)', EvalTasks.estimateTokens('abcdabcd') === 2);
+  check('eval: canary subset is 10 tasks', EvalTasks.selectTasks(parsedTasks, { suite: 'canary' }).length === 10);
+  check('eval: full suite is 12 tasks', EvalTasks.selectTasks(parsedTasks, { suite: 'full' }).length === 12);
+  check('eval: single-task selection by id', (EvalTasks.selectTasks(parsedTasks, { taskId: 'fix-syntax' }) || []).length === 1);
+  check('eval: unknown task id selects nothing', EvalTasks.selectTasks(parsedTasks, { taskId: 'no-such-task' }) === null);
+  // The YAML subset keeps blank lines inside block scalars (the
+  // mock replies contain fenced code blocks separated by blanks).
+  const blankYaml = EvalTasks.parseYaml('id: t\nprompt: |\n  line one\n\n  line three\n', 't.yaml');
+  check('eval: YAML block scalar keeps blank lines', blankYaml.ok && blankYaml.value.prompt === 'line one\n\nline three\n', JSON.stringify(blankYaml.value && blankYaml.value.prompt));
+  const fixType = parsedTasks.find((t) => t.id === 'fix-type-error');
+  check('eval: quoted JSON with escaped quotes survives the parser',
+    !!fixType && fixType.mockReplies[0].includes('SetHealth(\\"100\\")'));
+  const denied = parsedTasks.find((t) => t.id === 'denied-approval');
+  check('eval: denied-approval has null reference and deny policy',
+    !!denied && denied.reference === null && denied.approvals === 'deny');
+  const readOnly = parsedTasks.find((t) => t.id === 'read-only');
+  check('eval: read-only task does not require the baseline to fail',
+    !!readOnly && readOnly.baselineMustFail === false && readOnly.mode === 'ask');
+  check('eval: every task has mock replies and a reference or an explicit null',
+    parsedTasks.every((t) => t.mockReplies.length > 0 && (t.reference === null || typeof t.reference === 'object')));
+  // Check evaluation against plain world objects.
+  const withUnity = { unityAvailable: true };
+  const noUnity = { unityAvailable: false };
+  check('eval: state check passes on a matching value',
+    EvalTasks.evaluateCheck({ type: 'state', path: 'Player', component: 'Rigidbody', property: 'm_Mass', equals: 2.5 },
+      Object.assign({}, withUnity, { state: { 'Player|Rigidbody': { ok: true, values: { m_Mass: 2.5 } } } })).pass === true);
+  check('eval: state check fails on a wrong value',
+    EvalTasks.evaluateCheck({ type: 'state', path: 'Player', component: 'Rigidbody', property: 'm_Mass', equals: 2.5 },
+      Object.assign({}, withUnity, { state: { 'Player|Rigidbody': { ok: true, values: { m_Mass: 1 } } } })).pass === false);
+  check('eval: state exists:false passes when the object is gone',
+    EvalTasks.evaluateCheck({ type: 'state', path: 'Level/Enemies/Enemy2', component: 'Enemy', exists: false },
+      Object.assign({}, withUnity, { state: { 'Level/Enemies/Enemy2|Enemy': { ok: false, error: 'not found' } } })).pass === true);
+  check('eval: state check skips with no Unity',
+    EvalTasks.evaluateCheck({ type: 'state', path: 'Player', component: 'Rigidbody', property: 'm_Mass', equals: 2.5 }, noUnity).skipped === true);
+  check('eval: compiles passes on success, fails on errors, skips with no Unity',
+    EvalTasks.evaluateCheck({ type: 'compiles' }, Object.assign({}, withUnity, { compiles: { success: true, errors: [] } })).pass === true
+    && EvalTasks.evaluateCheck({ type: 'compiles' }, Object.assign({}, withUnity, { compiles: { success: false, errors: [{ file: 'A.cs', line: 3, message: 'CS1002' }] } })).pass === false
+    && EvalTasks.evaluateCheck({ type: 'compiles' }, noUnity).skipped === true);
+  check('eval: console_clean passes on zero errors, fails on errors',
+    EvalTasks.evaluateCheck({ type: 'console_clean' }, Object.assign({}, withUnity, { consoleReport: { errorCount: 0 } })).pass === true
+    && EvalTasks.evaluateCheck({ type: 'console_clean' }, Object.assign({}, withUnity, { consoleReport: { errorCount: 2, firstErrors: ['NullReferenceException'] } })).pass === false);
+  check('eval: probe passes on matching lines, fails on a missing key',
+    EvalTasks.evaluateCheck({ type: 'probe', expect: { jumped: 'true' } },
+      Object.assign({}, withUnity, { probeLines: [{ key: 'jumped', value: 'true' }] })).pass === true
+    && EvalTasks.evaluateCheck({ type: 'probe', expect: { jumped: 'true' } },
+      Object.assign({}, withUnity, { probeLines: [{ key: 'rotated', value: 'true' }] })).pass === false);
+  check('eval: probe check skips with no Unity',
+    EvalTasks.evaluateCheck({ type: 'probe', expect: { jumped: 'true' } }, noUnity).skipped === true);
+  check('eval: file contains passes and fails honestly',
+    EvalTasks.evaluateCheck({ type: 'file', path: 'A.cs', contains: 'Rotate' }, { files: { 'A.cs': 'transform.Rotate(0, 1, 0);' } }).pass === true
+    && EvalTasks.evaluateCheck({ type: 'file', path: 'A.cs', contains: 'Rotate' }, { files: { 'A.cs': 'nothing here' } }).pass === false);
+  check('eval: file regex works',
+    EvalTasks.evaluateCheck({ type: 'file', path: 'A.cs', regex: 'SetHealth\\(\\d+' }, { files: { 'A.cs': 'target.SetHealth(100f);' } }).pass === true);
+  check('eval: no_collateral passes on allowlisted changes only',
+    EvalTasks.evaluateCheck({ type: 'no_collateral', allowlist: ['Assets/Scenes/Main.unity'] }, { fileChanges: ['Assets/Scenes/Main.unity'] }).pass === true
+    && EvalTasks.evaluateCheck({ type: 'no_collateral', allowlist: ['Assets/Scenes/Main.unity'] }, { fileChanges: ['Assets/Scripts/PlayerController.cs'] }).pass === false);
+  check('eval: no_collateral always protects the probe script',
+    EvalTasks.evaluateCheck({ type: 'no_collateral', allowlist: ['Assets/EvalProbe.cs'] }, { fileChanges: ['Assets/EvalProbe.cs'] }).pass === false);
+  check('eval: nothing_changed passes on no changes, fails on any',
+    EvalTasks.evaluateCheck({ type: 'nothing_changed' }, { fileChanges: [] }).pass === true
+    && EvalTasks.evaluateCheck({ type: 'nothing_changed' }, { fileChanges: ['Assets/Scripts/Enemy.cs'] }).pass === false);
+  check('eval: approval_denied passes when asked, declined, unchanged',
+    EvalTasks.evaluateCheck({ type: 'approval_denied', action: 'delete_gameobject' },
+      { transcriptActions: [{ type: 'delete_gameobject' }], declines: 1, fileChanges: [] }).pass === true);
+  check('eval: approval_denied fails with no decline, or when never asked',
+    EvalTasks.evaluateCheck({ type: 'approval_denied', action: 'delete_gameobject' },
+      { transcriptActions: [{ type: 'delete_gameobject' }], declines: 0, fileChanges: [] }).pass === false
+    && EvalTasks.evaluateCheck({ type: 'approval_denied', action: 'delete_gameobject' },
+      { transcriptActions: [], declines: 1, fileChanges: [] }).pass === false);
+  check('eval: pass rule needs at least one real pass — all-skipped fails',
+    EvalTasks.evaluateChecks([{ type: 'compiles' }, { type: 'state', path: 'P', component: 'C' }], noUnity).passed === false
+    && EvalTasks.evaluateChecks([{ type: 'compiles' }], Object.assign({}, withUnity, { compiles: { success: true, errors: [] } })).passed === true);
+  const agg3 = EvalTasks.aggregateRuns([{ pass: true }, { pass: true }, { pass: true }]);
+  check('eval: 3/3 aggregates to rate 1, consistent', agg3.passRate === 1 && agg3.consistent === true);
+  const agg2 = EvalTasks.aggregateRuns([{ pass: true }, { pass: false }, { pass: true }]);
+  check('eval: 2/3 aggregates to rate 2/3, inconsistent, CI inside [0,1]',
+    Math.abs(agg2.passRate - 2 / 3) < 1e-9 && agg2.consistent === false && agg2.ciLow >= 0 && agg2.ciHigh <= 1 && agg2.ciLow < agg2.ciHigh);
+  const flips = EvalTasks.detectFlips({ a: true, b: false }, { a: false, b: true, c: true });
+  check('eval: flip detection flags the regression and the improvement, ignores new tasks',
+    flips.length === 2 && flips.some((f) => f.id === 'a' && f.regression) && flips.some((f) => f.id === 'b' && !f.regression));
+  check('eval: flip detection reports no flips when nothing changed',
+    EvalTasks.detectFlips({ a: true }, { a: true }).length === 0);
+  const keyA = EvalTasks.buildResultKey({ model: { provider: 'lmstudio', model: 'qwen3-coder', loadedContext: 16384 }, appVersion: '0.18.0', promptHash: 'aaaa0001' });
+  const keyB = EvalTasks.buildResultKey({ model: { provider: 'lmstudio', model: 'qwen3-coder', loadedContext: 16384 }, appVersion: '0.18.0', promptHash: 'aaaa0001' });
+  const keyC = EvalTasks.buildResultKey({ model: { provider: 'lmstudio', model: 'qwen3-coder', loadedContext: 16384 }, appVersion: '0.18.0', promptHash: 'bbbb0002' });
+  const keyD = EvalTasks.buildResultKey({ model: { provider: 'lmstudio', model: 'other-model', loadedContext: 16384 }, appVersion: '0.18.0', promptHash: 'aaaa0001' });
+  check('eval: result key is stable for identical inputs, changes with prompt or model',
+    keyA.hash === keyB.hash && keyA.hash !== keyC.hash && keyA.hash !== keyD.hash);
+  // Fixture files exist on disk.
+  const baseFiles = ['ProjectSettings/ProjectVersion.txt', 'ProjectSettings/ProjectSettings.asset', 'Packages/manifest.json',
+    'Assets/Scripts/PlayerController.cs', 'Assets/Scripts/PlayerController.cs.meta',
+    'Assets/Scripts/Enemy.cs', 'Assets/Scripts/Enemy.cs.meta',
+    'Assets/EvalProbe.cs', 'Assets/EvalProbe.cs.meta', 'Assets/Scenes/Main.unity'];
+  const missingBase = baseFiles.filter((f) => !fs.existsSync(path.join(root, 'eval', 'fixtures', 'base', f)));
+  check('eval: base fixture files exist', missingBase.length === 0, missingBase.join(', '));
+  const overlayFiles = ['broken-syntax/Assets/Scripts/BrokenSyntax.cs', 'broken-syntax/Assets/Scripts/BrokenSyntax.cs.meta',
+    'type-error/Assets/Scripts/TypeErrorA.cs', 'type-error/Assets/Scripts/TypeErrorA.cs.meta',
+    'type-error/Assets/Scripts/TypeErrorB.cs', 'type-error/Assets/Scripts/TypeErrorB.cs.meta',
+    'nullref/Assets/Scripts/NullRef.cs', 'nullref/Assets/Scripts/NullRef.cs.meta',
+    'nullref/gen-scene.js', 'large-scene/gen-scene.js'];
+  const missingOverlay = overlayFiles.filter((f) => !fs.existsSync(path.join(root, 'eval', 'fixtures', 'overlays', f)));
+  check('eval: overlay fixture files exist', missingOverlay.length === 0, missingOverlay.join(', '));
+  // The large-scene generator writes 500 enemies + the base objects.
+  const largeGen = require('../eval/fixtures/overlays/large-scene/gen-scene.js');
+  const tmpLarge = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-eval-large-'));
+  try {
+    largeGen.generate(tmpLarge);
+    const scene = fs.readFileSync(path.join(tmpLarge, 'Assets', 'Scenes', 'Main.unity'), 'utf8');
+    const enemyNames = scene.match(/^  m_Name: Enemy_/gm) || [];
+    check('eval: large-scene generator writes exactly 500 enemies', enemyNames.length === 500, enemyNames.length + ' found');
+    check('eval: large-scene generator keeps the probe and the player', scene.includes('m_Name: EvalProbe') && scene.includes('m_Name: Player'));
+  } finally { fs.rmSync(tmpLarge, { recursive: true, force: true }); }
+  // The nullref generator appends its object to a copy of the base scene.
+  const nullGen = require('../eval/fixtures/overlays/nullref/gen-scene.js');
+  const tmpNull = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-eval-null-'));
+  try {
+    const baseScene = fs.readFileSync(path.join(root, 'eval', 'fixtures', 'base', 'Assets', 'Scenes', 'Main.unity'), 'utf8');
+    fs.mkdirSync(path.join(tmpNull, 'Assets', 'Scenes'), { recursive: true });
+    fs.writeFileSync(path.join(tmpNull, 'Assets', 'Scenes', 'Main.unity'), baseScene);
+    nullGen.generate(tmpNull);
+    const scene = fs.readFileSync(path.join(tmpNull, 'Assets', 'Scenes', 'Main.unity'), 'utf8');
+    check('eval: nullref generator appends the NullRef object', scene.includes('m_Name: NullRef') && scene.includes('m_Name: EvalProbe'));
+  } finally { fs.rmSync(tmpNull, { recursive: true, force: true }); }
+  // Wiring: main, preload, app, package, gitignore.
+  check('eval: main.js has the eval IPCs and argv parsing',
+    mainJs.includes("ipcMain.handle('eval:resetFixture'") && mainJs.includes("ipcMain.handle('eval:hashTree'")
+    && mainJs.includes("ipcMain.handle('app:quit'") && mainJs.includes('function parseEvalArgv'));
+  const preloadJs = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+  check('eval: preload exposes rb.eval and rb.app.quit',
+    preloadJs.includes('eval:resetFixture') && preloadJs.includes('eval:hashTree') && preloadJs.includes("quit: () => ipcRenderer.invoke('app:quit')"));
+  const appJs = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  check('eval: app.js starts eval mode after showHome in init',
+    appJs.includes('await maybeStartEvalMode()') && appJs.includes('function maybeStartEvalMode'));
+  check('eval: package.json has eval scripts and ships the harness',
+    typeof pkg.scripts.eval === 'string' && pkg.scripts.eval.includes('eval-runner.js')
+    && typeof pkg.scripts['eval:canary'] === 'string' && typeof pkg.scripts['eval:full'] === 'string'
+    && Array.isArray(pkg.build.files) && pkg.build.files.includes('eval/**/*') && pkg.build.files.includes('scripts/eval-runner.js'));
+  const gitignore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+  check('eval: gitignore keeps run work out of the repo', gitignore.includes('eval-work/') && gitignore.includes('eval/results/'));
+  check('eval: harness README exists', fs.existsSync(path.join(root, 'eval', 'README.md')));
+  // The driver only calls EvalTasks functions that exist.
+  const driverJs = fs.readFileSync(path.join(root, 'eval', 'eval-mode.js'), 'utf8');
+  const calledApis = [...driverJs.matchAll(/EvalTasks\.([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+  const missingApis = [...new Set(calledApis)].filter((name) => typeof EvalTasks[name] !== 'function');
+  check('eval: driver only calls EvalTasks functions that exist', missingApis.length === 0, missingApis.join(', '));
+  check('eval: driver never calls a removed helper', !driverJs.includes('taskPass') && !driverJs.includes('stateKey(') && !driverJs.includes('summarize('));
+  // The three fixes the first mock canary run caught: rb.fs.readFile
+  // returns { ok, content }, not a string; the fixture paths are
+  // relative to the eval folder (main.js passes evalDir as the eval
+  // folder, not the app root); file writes in 'auto' tasks use the
+  // direct-apply path because the apply bar's only success decision
+  // is 'applied', which the policy wrapper cannot produce.
+  check('eval: driver unwraps the { ok, content } readFile shape',
+    driverJs.includes('async function readText') && driverJs.includes('if (r && r.ok) return r.content'));
+  check('eval: fixture paths are relative to the eval folder',
+    mainJs.includes("path.join(evalDir, 'fixtures', 'base')") && mainJs.includes("path.join(evalDir, 'fixtures', 'overlays', fixture)")
+    && !mainJs.includes("path.join(evalDir, 'eval', 'fixtures'"));
+  check('eval: driver preserves the bridge across resets and re-ensures it',
+    mainJs.includes('CodeFoxBridge.cs') && mainJs.includes('could not restore the bridge')
+    && driverJs.includes('resetFixtureAndBridge') && driverJs.includes('rb.unity.ensureBridge(ctx.projectDir)'));
+  check('eval: baseline is re-hashed after the bridge ensure, and transient bridge files are skipped',
+    driverJs.includes('Re-hash AFTER the bridge ensure') && driverJs.includes('await rb.eval.hashTree({ projectDir: ctx.projectDir })')
+    && mainJs.includes('EVAL_TRANSIENT_FILES') && mainJs.includes('.codefox-refresh-trigger')); 
+  // resolvePath used to join with a backslash unconditionally — on
+  // Linux that wrote files literally named `project\Assets\…`.
+  // The mock canary caught it; the fix joins with the platform's
+  // separator.
+  const resolvePathSrc = extractFunction(appJs, 'resolvePath');
+  check('eval: resolvePath can be extracted for testing', !!resolvePathSrc);
+  if (resolvePathSrc) {
+    const makeResolve = (platform, projectPath) => new Function('navigator', 'state', resolvePathSrc + '\nreturn resolvePath;')({ platform }, { projectPath });
+    const resolveLinux = makeResolve('Linux x86_64', '/tmp/proj');
+    const resolveWindows = makeResolve('Win32', 'C:\\Users\\rob\\proj');
+    check('eval: resolvePath joins with / on Linux',
+      resolveLinux('Assets/Scripts/Rotator.cs') === '/tmp/proj/Assets/Scripts/Rotator.cs');
+    check('eval: resolvePath joins with \\ on Windows',
+      resolveWindows('Assets/Scripts/Rotator.cs') === 'C:\\Users\\rob\\proj\\Assets\\Scripts\\Rotator.cs');
+    check('eval: resolvePath passes absolute paths through',
+      resolveLinux('/abs/path.cs') === '/abs/path.cs' && resolveWindows('D:\\abs\\path.cs') === 'D:\\abs\\path.cs');
+  }
+  check('eval: auto-accept is per-task — on for auto, off for deny',
+    driverJs.includes("state.autoAcceptChanges = (policy === 'auto')"));
 }
 
 (async () => {
@@ -4255,7 +4455,7 @@ if (promptSrc) {
     const resolveSrcA = extractFunction(appJs, 'resolvePath');
     if (!snapSrcA || !resolveSrcA) throw new Error('snapshotForDelete or resolvePath not extractable');
     const inserts = [];
-    const snapshotForDelete = new Function('rb', 'state', 'async ' + snapSrcA + '\n' + resolveSrcA + '\nreturn snapshotForDelete;')(
+    const snapshotForDelete = new Function('rb', 'state', 'navigator', 'async ' + snapSrcA + '\n' + resolveSrcA + '\nreturn snapshotForDelete;')(
       {
         fs: {
           readFile: async (p) => {
@@ -4265,7 +4465,8 @@ if (promptSrc) {
         },
         db: { insert: async (table, row) => { inserts.push({ table, row }); } },
       },
-      { projectPath: 'C:\\TD Pizza Racer' });
+      { projectPath: 'C:\\TD Pizza Racer' },
+      { platform: 'Win32' });
     inserts.length = 0;
     const snapOk = await snapshotForDelete('Assets/Prefabs/ImageContainer.prefab');
     check('snapshotForDelete backs up the asset and its .meta before a delete',
@@ -4304,10 +4505,11 @@ if (promptSrc) {
       'C:\\TD Pizza Racer\\Assets\\Scripts\\Player.cs': 'public class Player {\n  int health = 100;\n}\n',
       'C:\\TD Pizza Racer\\Assets\\Scripts\\CRLF.cs': 'line1\r\nline2\r\n',
     };
-    const resolveStrReplaceChanges = new Function('rb', 'state',
+    const resolveStrReplaceChanges = new Function('rb', 'state', 'navigator',
       'async ' + resolveSrSrc + '\n' + safePathSrcA + '\n' + resolvePathSrcA + '\n' + replaceSrcA + '\n' + countSrcA + '\n' + mapSrcA + '\nreturn resolveStrReplaceChanges;')(
       { fs: { readFile: async (p) => (p in files ? { ok: true, content: files[p] } : { ok: false, error: 'ENOENT' }) } },
-      { projectPath: 'C:\\TD Pizza Racer' });
+      { projectPath: 'C:\\TD Pizza Racer' },
+      { platform: 'Win32' });
     const srOk = await resolveStrReplaceChanges([{ kind: 'str_replace', path: 'Assets/Scripts/Player.cs', old: '  int health = 100;', new: '  int health = 150;' }]);
     check('resolveStrReplaceChanges resolves a str_replace to a whole-file change',
       srOk.ok === true && srOk.changes.length === 1 && srOk.changes[0].path === 'Assets/Scripts/Player.cs'

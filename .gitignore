@@ -12,3 +12,5 @@ build/icon.ico
 # (like the icons above). It is regenerated at install/start/build time,
 # so it is not tracked — a build must never leave a tracked file dirty.
 unity-bridge-source.js
+eval-work/
+eval/results/

@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.17.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.18.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -511,6 +511,18 @@ Be honest about this — it shapes how you should use the tool:
 CodeFox is not trying to match a cloud assistant feature for feature. It is a free, local tool that does the most useful parts of the job — context, plans, step-by-step execution, tests, and safe apply/revert — on your own machine, with your code never leaving it.
 
 ---
+
+## Eval harness
+
+CodeFox grades itself. Twelve YAML tasks in `eval/tasks/` run the real agent loop against a tiny fixture Unity project (`eval/fixtures/`) and are graded by program — state assertions through the bridge, compile results, console-clean timed runs, scripted play-tests against the harness-owned `EvalProbe` component, file checks, and no-collateral guards. No model judges anything.
+
+```powershell
+npm run eval        # canary subset (10 tasks, ~15-30 min)
+npm run eval:full   # all 12 tasks
+npm run eval:mock   # canned replies, no Unity or LM Studio — proves the pipeline, not the model
+```
+
+A live run needs Unity open on the fixture project and the LM Studio model loaded. Results land in `eval/results/<run-id>/results.json` with a JSONL transcript per run; the runner prints pass rate per task with a confidence interval, flags inconsistent runs, and lists flips vs the previous run of the same suite. See `eval/README.md` for the task list, the check types, and how to add a task.
 
 ## Roadmap / Contributing
 

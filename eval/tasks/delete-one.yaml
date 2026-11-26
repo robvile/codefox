@@ -1,0 +1,32 @@
+id: delete-one
+title: Delete exactly one object without collateral
+tags: [canary, scene, delete]
+canary: true
+fixture: base
+prompt: |
+  Delete the Enemy2 object under Level/Enemies. Delete only that object — nothing else.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: state
+    path: Level/Enemies/Enemy2
+    component: Enemy
+    exists: false
+  - type: no_collateral
+    allowlist: [Assets/Scenes/Main.unity]
+reference:
+  commands:
+    - action: delete_gameobject
+      path: Level/Enemies/Enemy2
+mockReplies:
+  - |
+    I'll delete only Enemy2.
+    ```unity-command
+    {"action": "delete_gameobject", "path": "Level/Enemies/Enemy2"}
+    ```
+  - |
+    Done — Enemy2 is deleted and nothing else changed.

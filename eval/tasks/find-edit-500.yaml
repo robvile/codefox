@@ -1,0 +1,42 @@
+id: find-edit-500
+title: Find and edit one object in a 500-object scene
+tags: [scene, hierarchy, context]
+canary: false
+fixture: large-scene
+prompt: |
+  In this scene there are 500 enemy objects. Find the one named Enemy_042 and set its Enemy component's health to 7.
+mode: agent
+budget:
+  maxToolCalls: 25
+  maxTurns: 8
+  maxMinutes: 8
+approvals: auto
+checks:
+  - type: state
+    path: Level/Enemies/Enemy_042
+    component: Enemy
+    property: health
+    equals: 7
+  - type: no_collateral
+    allowlist: [Assets/Scenes/Main.unity]
+reference:
+  commands:
+    - action: set_property
+      path: Level/Enemies/Enemy_042
+      component: Enemy
+      changes:
+        - property: health
+          value: 7
+mockReplies:
+  - |
+    I'll find Enemy_042 in the hierarchy first.
+    ```unity-command
+    {"action": "list_hierarchy", "nameContains": "Enemy_042"}
+    ```
+  - |
+    Found it at Level/Enemies/Enemy_042. Now I'll set its health to 7.
+    ```unity-command
+    {"action": "set_property", "path": "Level/Enemies/Enemy_042", "component": "Enemy", "changes": [{"property": "health", "value": 7}]}
+    ```
+  - |
+    Done — Enemy_042 now has health 7.

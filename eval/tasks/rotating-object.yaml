@@ -1,0 +1,70 @@
+id: rotating-object
+title: Write a rotating MonoBehaviour, attach it, verify rotation in a timed run
+tags: [canary, script, playtest]
+canary: true
+fixture: base
+prompt: |
+  Write a MonoBehaviour called Rotator that rotates its GameObject around the Y axis at 45 degrees per second, attach it to the Player, and verify the rotation changes in a 5 second Play Mode run.
+mode: agent
+budget:
+  maxToolCalls: 25
+  maxTurns: 8
+  maxMinutes: 8
+approvals: auto
+checks:
+  - type: file
+    path: Assets/Scripts/Rotator.cs
+    contains: Rotate
+  - type: state
+    path: Player
+    component: Rotator
+    exists: true
+  - type: probe
+    expect:
+      rotated: "true"
+    seconds: 5
+  - type: no_collateral
+    allowlist: [Assets/Scripts/Rotator.cs, Assets/Scenes/Main.unity]
+reference:
+  files:
+    Assets/Scripts/Rotator.cs: |
+      // Rotator — rotates its GameObject around the Y axis.
+      using UnityEngine;
+
+      public class Rotator : MonoBehaviour
+      {
+          public float degreesPerSecond = 45f;
+
+          void Update()
+          {
+              transform.Rotate(0f, degreesPerSecond * Time.deltaTime, 0f);
+          }
+      }
+  commands:
+    - action: add_component
+      path: Player
+      type: Rotator
+mockReplies:
+  - |
+    I'll write the Rotator script first.
+    **File Path:** `Assets/Scripts/Rotator.cs`
+    ```csharp
+    using UnityEngine;
+
+    public class Rotator : MonoBehaviour
+    {
+        public float degreesPerSecond = 45f;
+
+        void Update()
+        {
+            transform.Rotate(0f, degreesPerSecond * Time.deltaTime, 0f);
+        }
+    }
+    ```
+  - |
+    Now I'll attach it to the Player and run the game for 5 seconds to verify the rotation changes.
+    ```unity-command
+    {"action": "add_component", "path": "Player", "type": "Rotator"}
+    ```
+  - |
+    Done — Rotator is attached to the Player and the rotation was verified in the timed run.

@@ -1,0 +1,44 @@
+id: fix-syntax
+title: Fix a seeded syntax error
+tags: [canary, fix, compile]
+canary: true
+fixture: broken-syntax
+prompt: |
+  The project has a compile error in Assets/Scripts/BrokenSyntax.cs. Find it and fix it so the project compiles.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: compiles
+  - type: file
+    path: Assets/Scripts/BrokenSyntax.cs
+    contains: Time.deltaTime);
+  - type: no_collateral
+    allowlist: [Assets/Scripts/BrokenSyntax.cs]
+reference:
+  files:
+    Assets/Scripts/BrokenSyntax.cs: |
+      // BrokenSyntax — seeded compile error for the fix-syntax eval task.
+      // One missing semicolon (CS1002). The reference solution adds it.
+      using UnityEngine;
+
+      public class BrokenSyntax : MonoBehaviour
+      {
+          public float speed = 3f;
+
+          void Update()
+          {
+              transform.Translate(Vector3.forward * speed * Time.deltaTime);
+          }
+      }
+mockReplies:
+  - |
+    The error is a missing semicolon after the Translate call. I'll fix it.
+    ```file
+    {"action": "str_replace", "path": "Assets/Scripts/BrokenSyntax.cs", "old": "        transform.Translate(Vector3.forward * speed * Time.deltaTime)\n    }", "new": "        transform.Translate(Vector3.forward * speed * Time.deltaTime);\n    }"}
+    ```
+  - |
+    Done — the missing semicolon is added and the project should compile now.

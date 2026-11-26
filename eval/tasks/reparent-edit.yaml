@@ -1,0 +1,45 @@
+id: reparent-edit
+title: Re-parent an object, then edit it by its new path
+tags: [canary, scene, pathchange]
+canary: true
+fixture: base
+prompt: |
+  Move the Enemy1 object from Level/Enemies to Level, then set its Enemy component's health to 50 — use the new path after the move.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: state
+    path: Level/Enemy1
+    component: Enemy
+    property: health
+    equals: 50
+  - type: no_collateral
+    allowlist: [Assets/Scenes/Main.unity]
+reference:
+  commands:
+    - action: set_parent
+      path: Level/Enemies/Enemy1
+      newParent: Level
+    - action: set_property
+      path: Level/Enemy1
+      component: Enemy
+      changes:
+        - property: health
+          value: 50
+mockReplies:
+  - |
+    I'll move Enemy1 up to Level first.
+    ```unity-command
+    {"action": "set_parent", "path": "Level/Enemies/Enemy1", "newParent": "Level"}
+    ```
+  - |
+    Now I'll set its health to 50 at the new path.
+    ```unity-command
+    {"action": "set_property", "path": "Level/Enemy1", "component": "Enemy", "changes": [{"property": "health", "value": 50}]}
+    ```
+  - |
+    Done — Enemy1 is now under Level with health 50.

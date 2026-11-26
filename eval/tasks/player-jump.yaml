@@ -1,0 +1,72 @@
+id: player-jump
+title: Player jumps on Space (inject input + probe)
+tags: [canary, script, playtest, input]
+canary: true
+fixture: base
+prompt: |
+  Make the Player jump when Space is pressed, using the new Input System: when Space is pressed, set the Rigidbody's vertical velocity to the jumpForce field (8). The Player has a Rigidbody and a floor to land on.
+mode: agent
+budget:
+  maxToolCalls: 25
+  maxTurns: 8
+  maxMinutes: 8
+approvals: auto
+checks:
+  - type: probe
+    expect:
+      jumped: "true"
+    seconds: 3
+    inject:
+      - key: Space
+        action: tap
+  - type: no_collateral
+    allowlist: [Assets/Scripts/PlayerController.cs]
+reference:
+  files:
+    Assets/Scripts/PlayerController.cs: |
+      // PlayerController — the fixture's player script (v0.18.0 eval fixture).
+      //
+      // Deliberately incomplete: it moves with WASD through the new Input
+      // System, but there is NO jump yet — the player-jump eval task is
+      // to add one. jumpForce exists so the model can use it.
+      using UnityEngine;
+      using UnityEngine.InputSystem;
+
+      public class PlayerController : MonoBehaviour
+      {
+          public float moveSpeed = 5f;
+          public float jumpForce = 8f;
+          private Rigidbody rb;
+
+          void Start()
+          {
+              rb = GetComponent<Rigidbody>();
+          }
+
+          void Update()
+          {
+              var kb = Keyboard.current;
+              if (kb == null) return;
+              float x = 0f, z = 0f;
+              if (kb.aKey.isPressed) x -= 1f;
+              if (kb.dKey.isPressed) x += 1f;
+              if (kb.wKey.isPressed) z += 1f;
+              if (kb.sKey.isPressed) z -= 1f;
+              Vector3 move = new Vector3(x, 0f, z).normalized * moveSpeed * Time.deltaTime;
+              transform.Translate(move, Space.World);
+              if (kb.spaceKey.wasPressedThisFrame && rb != null)
+              {
+                  Vector3 v = rb.linearVelocity;
+                  v.y = jumpForce;
+                  rb.linearVelocity = v;
+              }
+          }
+      }
+mockReplies:
+  - |
+    I'll add the Space jump to PlayerController, using the existing jumpForce field.
+    ```file
+    {"action": "str_replace", "path": "Assets/Scripts/PlayerController.cs", "old": "        Vector3 move = new Vector3(x, 0f, z).normalized * moveSpeed * Time.deltaTime;\n        transform.Translate(move, Space.World);", "new": "        Vector3 move = new Vector3(x, 0f, z).normalized * moveSpeed * Time.deltaTime;\n        transform.Translate(move, Space.World);\n        if (kb.spaceKey.wasPressedThisFrame && rb != null)\n        {\n            Vector3 v = rb.linearVelocity;\n            v.y = jumpForce;\n            rb.linearVelocity = v;\n        }"}
+    ```
+  - |
+    Done — pressing Space now sets the vertical velocity to jumpForce.

@@ -1,0 +1,44 @@
+id: fix-type-error
+title: Fix a type error across two files
+tags: [canary, fix, compile]
+canary: true
+fixture: type-error
+prompt: |
+  The project has a compile error: TypeErrorA calls a method on TypeErrorB with the wrong argument type. Find it and fix it so the project compiles.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: compiles
+  - type: file
+    path: Assets/Scripts/TypeErrorA.cs
+    contains: SetHealth(100
+  - type: no_collateral
+    allowlist: [Assets/Scripts/TypeErrorA.cs]
+reference:
+  files:
+    Assets/Scripts/TypeErrorA.cs: |
+      // TypeErrorA — seeded cross-file type error for the fix-type-error
+      // eval task. SetHealth takes a float; this passes a string (CS1503).
+      using UnityEngine;
+
+      public class TypeErrorA : MonoBehaviour
+      {
+          public TypeErrorB target;
+
+          void Start()
+          {
+              target.SetHealth(100f);
+          }
+      }
+mockReplies:
+  - |
+    The error is a string passed where a float is expected. I'll fix the call.
+    ```file
+    {"action": "str_replace", "path": "Assets/Scripts/TypeErrorA.cs", "old": "        target.SetHealth(\"100\");", "new": "        target.SetHealth(100f);"}
+    ```
+  - |
+    Done — the call now passes a float and the project should compile.

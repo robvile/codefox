@@ -255,5 +255,12 @@ contextBridge.exposeInMainWorld('rb', {
   app: {
     openDevTools: () => ipcRenderer.invoke('app:openDevTools'),
     ping: () => ipcRenderer.invoke('app:ping'),
+    quit: () => ipcRenderer.invoke('app:quit'),
+  },
+  // Eval harness (v0.18.0) — fixture reset + file hashing, main
+  // process only (the renderer has no Node fs).
+  eval: {
+    resetFixture: (payload) => ipcRenderer.invoke('eval:resetFixture', payload || {}),
+    hashTree: (payload) => ipcRenderer.invoke('eval:hashTree', payload || {}),
   },
 });

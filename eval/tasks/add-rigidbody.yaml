@@ -1,0 +1,47 @@
+id: add-rigidbody
+title: Add a Rigidbody and set its mass
+tags: [canary, scene, component]
+canary: true
+fixture: base
+prompt: |
+  Add a Rigidbody component to the Player object and set its mass to 2.5.
+mode: agent
+budget:
+  maxToolCalls: 20
+  maxTurns: 6
+  maxMinutes: 5
+approvals: auto
+checks:
+  - type: state
+    path: Player
+    component: Rigidbody
+    property: m_Mass
+    equals: 2.5
+  - type: compiles
+  - type: no_collateral
+    protect: [Assets/Scripts/PlayerController.cs, Assets/Scripts/Enemy.cs]
+    allowlist: [Assets/Scenes/Main.unity]
+reference:
+  commands:
+    - action: add_component
+      path: Player
+      type: Rigidbody
+    - action: set_property
+      path: Player
+      component: Rigidbody
+      changes:
+        - property: m_Mass
+          value: 2.5
+mockReplies:
+  - |
+    I'll add a Rigidbody to the Player.
+    ```unity-command
+    {"action": "add_component", "path": "Player", "type": "Rigidbody"}
+    ```
+  - |
+    Now I'll set the mass to 2.5.
+    ```unity-command
+    {"action": "set_property", "path": "Player", "component": "Rigidbody", "changes": [{"property": "m_Mass", "value": 2.5}]}
+    ```
+  - |
+    Done — the Player has a Rigidbody with mass 2.5.

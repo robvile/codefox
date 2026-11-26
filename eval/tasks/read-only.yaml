@@ -1,0 +1,20 @@
+id: read-only
+title: Read-only question (nothing may change)
+tags: [canary, readonly]
+canary: true
+fixture: base
+prompt: |
+  What does the PlayerController script do? Explain it — do not change anything.
+mode: ask
+budget:
+  maxToolCalls: 10
+  maxTurns: 2
+  maxMinutes: 3
+approvals: auto
+baselineMustFail: false
+checks:
+  - type: nothing_changed
+reference: {}
+mockReplies:
+  - |
+    PlayerController moves the Player with WASD through the new Input System: it reads the keyboard each frame, builds a movement vector from A/D (left/right) and W/S (forward/back), and translates the Player at moveSpeed. It holds a jumpForce field (8) and a Rigidbody reference, but nothing in the script currently makes the Player jump — there is no Space handling yet.

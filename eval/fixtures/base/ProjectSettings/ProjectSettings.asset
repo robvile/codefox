@@ -1,0 +1,12 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!129 &1
+PlayerSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 23
+  productGUID: cfbf0fa9c84a0947231a1104d30cad88
+  companyName: CodeFox
+  productName: EvalProject
+  defaultCursor: {fileID: 0}
+  cursorHotspot: {x: 0, y: 0}
+  activeInputHandler: 1

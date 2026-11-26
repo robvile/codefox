@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const { spawn, execFile } = require('child_process');
 const upm = require('./upm-manifest');
@@ -409,7 +410,25 @@ function createWindow() {
       nodeIntegration: false
     }
   });
-  mainWindow.loadFile('index.html');
+  const evalQuery = parseEvalArgv();
+  mainWindow.loadFile('index.html', evalQuery ? { query: evalQuery } : undefined);
+}
+
+// Eval mode (v0.18.0): --eval-* flags hand the renderer its
+// instructions as a URL query (?evalSuite=canary&evalMock=1…), so
+// the harness can run headless without any new window or settings
+// UI. No --eval-* flag means a normal launch.
+function parseEvalArgv() {
+  const q = {};
+  for (const arg of process.argv.slice(2)) {
+    if (!arg.startsWith('--eval-')) continue;
+    const m = /^--eval-([a-z]+)(?:=(.*))?$/.exec(arg);
+    if (!m) continue;
+    q['eval' + m[1][0].toUpperCase() + m[1].slice(1)] = m[2] == null ? '1' : m[2];
+  }
+  if (Object.keys(q).length === 0) return null;
+  q.evalDir = path.join(__dirname, 'eval'); // the harness folder: tasks, fixtures, results
+  return q;
 }
 
 app.whenReady().then(async () => {
@@ -755,6 +774,125 @@ ipcMain.handle('fs:writeFile', (_, filePath, content) => {
   }
   catch (e) { return { ok: false, error: e.message }; }
 });
+
+// ── Eval harness (v0.18.0) ───────────────────────────────────────
+// Fixture setup + file hashing run in main because the renderer
+// has no Node fs. resetFixture wipes the eval project folder
+// (except Library/Temp/Logs, which Unity regenerates and are slow
+// to rebuild) and copies the base fixture + the named overlay,
+// then runs the overlay's gen-scene.js when it has one. hashTree
+// walks a project and hashes every tracked file (sha256), skipping
+// Unity-generated and harness-local paths, so the
+// no_collateral / nothing_changed checks can compare "before" and
+// "after" without the renderer reading the disk.
+const EVAL_SKIP_DIRS = new Set(['Library', 'Temp', 'Logs', '.bridge', '.codefox', '.git', 'node_modules']);
+// Transient bridge files — written by the app itself whenever it
+// pokes Unity to refresh (writeRefreshTrigger, with a timestamp
+// for content, so the hash changes on every touch). They are never
+// a model change, so the hash walk skips them — the same three
+// names git-backup excludes from backup commits.
+const EVAL_TRANSIENT_FILES = new Set(['.codefox-command.json', '.codefox-result.json', '.codefox-refresh-trigger']);
+function evalWalkHashes(root, dir, out) {
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!EVAL_SKIP_DIRS.has(entry.name)) evalWalkHashes(root, full, out);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (entry.name.endsWith('.meta')) continue; // Unity-generated sidecars
+    if (EVAL_TRANSIENT_FILES.has(entry.name)) continue; // app-owned refresh noise
+    const rel = path.relative(root, full).split(path.sep).join('/');
+    try {
+      const hash = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
+      out[rel] = hash;
+    } catch (e) { /* unreadable file — leave it out of the tree */ }
+  }
+}
+function evalHashTree(root) {
+  const hashes = {};
+  evalWalkHashes(root, root, hashes);
+  return { ok: true, files: Object.keys(hashes).sort(), hashes };
+}
+function evalCopyDir(src, dest) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dest, entry.name);
+    if (entry.isDirectory()) { evalCopyDir(s, d); continue; }
+    if (entry.isFile() && entry.name !== 'gen-scene.js') fs.copyFileSync(s, d);
+  }
+}
+function evalWipeProject(projectDir) {
+  // Refuse to wipe anything that looks like a real project: the
+  // fixture project is a throwaway under eval-work/ and is never
+  // a git repo. This is the one destructive main-process call the
+  // harness makes, so the guard is explicit.
+  if (fs.existsSync(path.join(projectDir, '.git'))) {
+    return { ok: false, error: 'refusing to wipe a git repository: ' + projectDir };
+  }
+  fs.mkdirSync(projectDir, { recursive: true });
+  for (const entry of fs.readdirSync(projectDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && ['Library', 'Temp', 'Logs'].includes(entry.name)) continue;
+    const full = path.join(projectDir, entry.name);
+    // The bridge (Assets/Editor/CodeFoxBridge.cs) is the app's
+    // instrumentation, not fixture content: stash it across the
+    // wipe and restore it, so a reset does not force a Unity
+    // domain reload on every run. Its .meta goes with it so the
+    // asset keeps its GUID.
+    if (entry.isDirectory() && entry.name === 'Assets') {
+      const editorDir = path.join(full, 'Editor');
+      const bridgeFile = path.join(editorDir, 'CodeFoxBridge.cs');
+      let bridgeContent = null, bridgeMetaContent = null;
+      try { bridgeContent = fs.readFileSync(bridgeFile); } catch (e) {}
+      try { bridgeMetaContent = fs.readFileSync(bridgeFile + '.meta'); } catch (e) {}
+      try { fs.rmSync(full, { recursive: true, force: true }); } catch (e) { return { ok: false, error: 'could not wipe ' + full + ': ' + e.message }; }
+      if (bridgeContent != null) {
+        try {
+          fs.mkdirSync(editorDir, { recursive: true });
+          fs.writeFileSync(bridgeFile, bridgeContent);
+          if (bridgeMetaContent != null) fs.writeFileSync(bridgeFile + '.meta', bridgeMetaContent);
+        } catch (e) { return { ok: false, error: 'could not restore the bridge: ' + e.message }; }
+      }
+      continue;
+    }
+    try { fs.rmSync(full, { recursive: true, force: true }); } catch (e) { return { ok: false, error: 'could not wipe ' + full + ': ' + e.message }; }
+  }
+  return { ok: true };
+}
+ipcMain.handle('eval:resetFixture', (_, payload) => {
+  const p = payload || {};
+  const projectDir = String(p.projectDir || '');
+  const evalDir = String(p.evalDir || __dirname);
+  const fixture = String(p.fixture || 'base').replace(/[^a-z0-9-]/gi, '');
+  if (!projectDir) return { ok: false, error: 'no projectDir given' };
+  const wiped = evalWipeProject(projectDir);
+  if (!wiped.ok) return wiped;
+  try {
+    evalCopyDir(path.join(evalDir, 'fixtures', 'base'), projectDir);
+    if (fixture !== 'base') {
+      const overlayDir = path.join(evalDir, 'fixtures', 'overlays', fixture);
+      evalCopyDir(overlayDir, projectDir);
+      const genPath = path.join(overlayDir, 'gen-scene.js');
+      if (fs.existsSync(genPath)) {
+        const gen = require(genPath);
+        if (gen && typeof gen.generate === 'function') gen.generate(projectDir);
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: 'fixture copy failed: ' + e.message };
+  }
+  return evalHashTree(projectDir);
+});
+ipcMain.handle('eval:hashTree', (_, payload) => {
+  const projectDir = String((payload && payload.projectDir) || '');
+  if (!projectDir) return { ok: false, error: 'no projectDir given' };
+  return evalHashTree(projectDir);
+});
+ipcMain.handle('app:quit', () => { app.quit(); return { ok: true }; });
 
 ipcMain.handle('fs:deleteFile', (_, filePath) => {
   try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); return { ok: true }; }

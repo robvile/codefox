@@ -522,6 +522,12 @@ async function init() {
   // Home is the default view; make sure the project has a conversation.
   await showHome();
 
+  // Eval mode (v0.18.0): when the app was launched with --eval-*
+  // flags, the harness takes over from here — it drives the real
+  // agent loop headlessly and quits when the results are written.
+  // A normal launch never has the query args, so this is a no-op.
+  await maybeStartEvalMode();
+
   // Close the project dropdown when clicking anywhere else.
   document.addEventListener('click', (e) => {
     const dd = document.getElementById('project-dropdown');
@@ -534,6 +540,49 @@ async function init() {
       const dd = document.getElementById('project-dropdown');
       if (dd) dd.classList.add('hidden');
     }
+  });
+}
+
+// ── Eval mode (v0.18.0) ───────────────────────────────────────────
+// When the app was launched with --eval-* flags (main.js passes
+// them as a URL query), load the harness driver and hand it the
+// run. A normal launch has no eval query args and returns
+// immediately. The driver (eval/eval-mode.js) owns the run and
+// quits the app when the results file is written.
+async function maybeStartEvalMode() {
+  const q = new URLSearchParams(window.location.search);
+  if (!q.get('evalSuite') && !q.get('evalTask') && !q.get('evalMock')) return;
+  const evalDir = q.get('evalDir') || '';
+  const load = (src) => new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('could not load ' + src));
+    document.head.appendChild(s);
+  });
+  try {
+    await load('eval/eval-tasks.js');
+    await load('eval/eval-mode.js');
+  } catch (e) {
+    console.error('[eval] failed to load the harness:', e);
+    return;
+  }
+  if (!window.__evalMode || typeof window.__evalMode.start !== 'function') {
+    console.error('[eval] eval-mode.js loaded but __evalMode.start is missing');
+    return;
+  }
+  const runs = parseInt(q.get('evalRuns') || '1', 10) || 1;
+  await window.__evalMode.start({
+    suite: q.get('evalSuite') || 'canary',
+    task: q.get('evalTask') || null,
+    runs,
+    mock: q.get('evalMock') === '1' || q.get('evalMock') === 'true',
+    noSanity: q.get('evalNoSanity') === '1',
+    out: q.get('evalOut') || null,
+    projectDir: q.get('evalProject') || null,
+    runId: q.get('evalRunId') || null,
+    evalDir,
+    workDir: q.get('evalWork') || (evalDir ? evalDir + '/eval-work' : 'eval-work'),
   });
 }
 
@@ -7591,9 +7640,17 @@ function resolvePath(filePath) {
   if (filePath.length > 2 && filePath[1] === ':') return filePath;
   // Absolute Unix path
   if (filePath[0] === '/') return filePath;
-  // Relative — normalize forward slashes to backslashes and join
-  const normalized = filePath.split('/').join('\\');
-  return state.projectPath + '\\' + normalized;
+  // Relative — join with the platform's separator. This used to
+  // always join with a backslash, which is a separator on Windows
+  // but a legal filename character on Linux and macOS: on this VM
+  // a write to Assets/Scripts/Rotator.cs landed in a file literally
+  // named `project\Assets\Scripts\Rotator.cs`, and str_replace
+  // reads failed the same way. (v0.18.0: the eval harness runs on
+  // Linux, so this has to be right there too.)
+  const isWindows = typeof navigator !== 'undefined' && /win/i.test(navigator.platform || '');
+  const sep = isWindows ? '\\' : '/';
+  const normalized = filePath.split('/').join(sep);
+  return state.projectPath + sep + normalized;
 }
 
 function showRevertBar(snapshotId, label, backedUpCount, newFileCount) {

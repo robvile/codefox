@@ -1,0 +1,46 @@
+id: fix-nullref
+title: Fix a seeded NullReferenceException (console clean 5s)
+tags: [canary, fix, playtest]
+canary: true
+fixture: nullref
+prompt: |
+  Entering Play Mode throws a NullReferenceException. Find what is null, fix it, and confirm the game runs 5 seconds with a clean console.
+mode: agent
+budget:
+  maxToolCalls: 25
+  maxTurns: 8
+  maxMinutes: 8
+approvals: auto
+checks:
+  - type: console_clean
+    seconds: 5
+  - type: no_collateral
+    allowlist: [Assets/Scripts/NullRef.cs, Assets/Scenes/Main.unity]
+reference:
+  files:
+    Assets/Scripts/NullRef.cs: |
+      // NullRef — seeded NullReferenceException for the fix-nullref eval
+      // task. target is never assigned, so Start() throws the moment the
+      // game enters Play Mode. The fix is a null check (or assigning it).
+      using UnityEngine;
+
+      public class NullRef : MonoBehaviour
+      {
+          public Transform target;
+
+          void Start()
+          {
+              if (target != null)
+              {
+                  Debug.Log("Target is at " + target.position);
+              }
+          }
+      }
+mockReplies:
+  - |
+    The NullRef script logs target.position in Start, but target is never assigned. I'll guard it with a null check.
+    ```file
+    {"action": "str_replace", "path": "Assets/Scripts/NullRef.cs", "old": "        Debug.Log(\"Target is at \" + target.position);", "new": "        if (target != null)\n        {\n            Debug.Log(\"Target is at \" + target.position);\n        }"}
+    ```
+  - |
+    Done — the null check is in, and the game should run clean now.
