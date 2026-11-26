@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.20.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.21.0-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -333,6 +333,38 @@ The workflow must exist in the catalogue and be Available (missing dependencies 
 **API endpoints used** — `GET /system_stats` (status, with `/object_info` fallback), `GET /object_info` (nodes, models, capabilities; cached 5 minutes), `GET /api/workflow_templates` (built-in template titles and descriptions), `POST /prompt` (submit), `GET /queue` + `GET /history` (polling), `GET /view` (download outputs to disk), `POST /upload/image` (upload an input image), `POST /queue {"delete": [prompt_id]}` (cancel a queued prompt), `POST /interrupt` (stop the running prompt), `POST /free {"unload_models": true, "free_memory": true}` (free ComfyUI's GPU memory after a swap generation). No new npm dependencies: the client uses Node's global `fetch` + `FormData`.
 
 **Known limits** — polling, not a WebSocket, so progress updates arrive every 2 seconds; generation is local and can take minutes; a workflow's missing nodes/models are reported, not auto-installed; a workflow whose checkpoint is missing cannot run until you install it in ComfyUI. UI-format workflows can only be imported and run while ComfyUI is running (the node definitions come from `/object_info`); subgraph nesting deeper than 3 levels is not supported.
+
+### Unity docs
+
+The agent searches the Unity API docs instead of guessing signatures. **Settings → Model → Unity docs** downloads the official Unity offline-docs archive for your Unity version (about 470 MB for 6000.3, once) into app data and builds a local BM25 search index from the ScriptReference pages — nothing about the docs is bundled in the repo, and the archive is kept so the index can be rebuilt without re-downloading. Until the download exists, the docs tool says plainly "no docs index yet" and points at the download action; there is no live-URL lookup in this build. In Agent mode the model searches with a fenced block:
+
+```
+```docs
+{"query": "Transform.TransformPoint"}
+```
+```
+
+Results are the matching API pages with a short excerpt, and the tool result says which Unity version the index is for — the model quotes that version, never the project's. The index is versioned per Unity version, so a version mismatch is stated, never hidden. The BM25 engine is verified against real ScriptReference pages bundled as test fixtures.
+
+### Model profiles and vision
+
+**Settings → Model → Model profiles** holds one profile per model: the LM Studio model key, roles, capabilities (including vision), the tuned load settings, sampling, limits, and measured numbers (tokens per second, load seconds) once a swap has run. The **primary** profile is the coder that answers chat. The **vision** profile is a second model you pick from the live server list — only used to look at images. Routing is deterministic and never model-picks-model: if the primary model is vision-capable it answers vision questions with no swap; otherwise the configured vision model swaps in; if none is configured the vision tool says so plainly instead of pretending the coder saw the image.
+
+Vision is a tool, not a second agent. In Agent mode the model asks about one project image with a fenced block:
+
+```
+```vision
+{"image": "Assets/Screenshots/shot.png", "question": "Is the player sprite visible and facing right?"}
+```
+```
+
+The vision call uses a fresh, minimal context — the vision prompt, the question, and the image — and its findings come back as a capped text tool result (matches / issues when the reply has that structure, otherwise the raw text). The coder never sees the pixels, and no image ever enters the coder's history. One swap covers every vision question in a round, and the coder is reloaded before the next turn; a failed reload is told plainly in the transcript, never hidden. **Model swap** in Settings controls the policy: Auto (swap without asking, the cost is shown in the tool result), Ask (the model asks you, then re-sends the block with `"confirmSwap": true`), or Never (vision that needs a swap is refused). **Co-residency** keeps the coder loaded during a vision call instead of unloading it — only honest with a small vision model; two 30B models do not fit on a 24 GB GPU, and the setting says so. The estimated swap cost (load time plus prompt time) is shown in Settings and in the tool result, and the measured load time replaces the default estimate after the first real swap. Every message records which model wrote it, so a turn's answer can be attributed to the model that gave it.
+
+### MCP server
+
+CodeFox ships its own MCP server — a standalone stdio process other agents and editors can connect to, without running the app. **Settings → MCPs → CodeFox MCP server** shows the exact command to copy (it names the current project and the app-data folder). Run it with `npm run mcp -- --project <path>` in development, or the copied command from the packaged app.
+
+It exposes the read tools: `docs_search` (the local Unity docs index), `file_view`, `file_grep`, `git_status`, `git_diff`, `git_log`, and read-only Unity commands (`listComponentTypes`, `describeComponent`, `readConsole`, `read_component_values`, `list_hierarchy`, `list_assets`). Mutating tools are **denied by default**: `file_str_replace` and `comfyui_generate` are listed but refuse with a plain error saying approval is required in the CodeFox app, and a Unity write action through `unity_command` is denied the same way. Nothing bypasses the app's approval rules through the MCP surface. A blocking approval queue — the server waiting while the app shows an approval card — is a planned follow-up, not yet built.
 
 ### References
 Click **References** in the sidebar to see the project's pages and plans in one list — plans are labelled "Plan", pages are labelled "Reference". After a plan executes, create a Reference documenting what was done. The AI can draft it. References become permanent architecture docs you can discuss in chat.

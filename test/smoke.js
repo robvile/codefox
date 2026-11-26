@@ -4,6 +4,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 
 const root = path.join(__dirname, '..');
 let failures = 0;
@@ -13,7 +14,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'context-budget.js', 'turn-ledger.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'context-budget.js', 'turn-ledger.js', 'docs-search.js', 'model-profiles.js', 'docs-engine.js', 'mcp-server/server.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,22 +23,28 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.20.0.
+// 2. package.json version is 0.21.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.20.0', pkg.version === '0.20.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.20.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.20.0 — Local'));
+check('package.json version is 0.21.0', pkg.version === '0.21.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.21.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
 
 // 3. No occurrence of the forbidden word (case-insensitive) in any
-// tracked text file, excluding .git and node_modules.
+// tracked text file, excluding .git and node_modules. The Unity
+// docs fixtures under test/fixtures/unity-docs are excluded too:
+// they are third-party Unity documentation, and Unity's own pages
+// use a curve term that contains the forbidden substring — that is
+// not a mention of the name, and CodeFox's own writing is what this
+// check guards.
 const FORBIDDEN = String.fromCharCode(98, 101, 122, 105); // built from codes so this file itself does not contain the word
 const textExts = new Set(['.js', '.json', '.md', '.html', '.cs', '.ps1', '.nsh', '.txt']);
 function walk(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
+    if (entry.name === 'unity-docs' && dir.endsWith(path.join('test', 'fixtures'))) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walk(full));
     else if (textExts.has(path.extname(entry.name).toLowerCase())) out.push(full);
@@ -2925,7 +2932,7 @@ check('bridge version pins are 0.16.0 everywhere (MIN_TRANSPORT_VERSION stays 0.
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.20.0')
+  && readme.includes('readConsole') && readme.includes('version-0.21.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3255,7 +3262,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.20.0', readme.includes('version-0.20.0'));
+check('README badge reads 0.21.0', readme.includes('version-0.21.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3904,18 +3911,18 @@ if (promptSrc) {
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
     && bridgeCs.includes('// CodeFoxBridge version: 0.16.0'));
 
-  // Version pins and packaging for 0.20.0.
+  // Version pins and packaging for 0.21.0.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.20.0 and build.files includes the three split modules + context-budget.js',
-    pkg.version === '0.20.0'
+  check('package.json is 0.21.0 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.21.0'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js')
     && pkg.build.files.includes('context-budget.js')
     && pkg.build.files.includes('turn-ledger.js'));
-  check('index.html footer, README badge, and CHANGELOG have the 0.20.0 entry',
-    indexHtml.includes('CodeFox 0.20.0 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.20.0-blue')
+  check('index.html footer and README badge are 0.21.0, CHANGELOG keeps the 0.20.0 entry',
+    indexHtml.includes('CodeFox 0.21.0 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.21.0-blue')
     && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.20.0 — 2026-11-26'));
 }
 
@@ -4450,6 +4457,237 @@ check('v0.20.0 wiring: turn-ledger script + Agent Turn section in index.html, mo
   && readme.includes('Undo agent turn')
   && readme.includes('modifyPrefab')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.20.0 — 2026-11-26'));
+
+// 45. v0.21.0 — docs search + per-model profiles + MCP server:
+// BM25 over real ScriptReference pages, the minimal ZIP reader
+// (a hand-built zip, not the 470 MB archive), profile routing,
+// the swap state machine, the MCP tool list with deny-by-default,
+// and the wiring (version pins, script tags, IPCs, prompt
+// sections). Bridge unchanged at 0.16.0.
+const DS = require('../docs-search');
+const DE = require('../docs-engine');
+const MP = require('../model-profiles');
+const MCP = require('../mcp-server/server');
+check('docs-search: tokenize splits camelCase and keeps the whole token',
+  JSON.stringify(DS.tokenize('TransformPoint')) === JSON.stringify(['transformpoint', 'transform', 'point'])
+  && DS.tokenize('the Rigidbody velocity').includes('rigidbody')
+  && !DS.tokenize('the and of').length);
+check('docs-search: parseUnityVersion takes the major.minor pair',
+  DS.parseUnityVersion('6000.3.9f1') === '6000.3'
+  && DS.parseUnityVersion('2022.3.5f1') === '2022.3'
+  && DS.parseUnityVersion('not-a-version') === null);
+check('docs-search: docsZipUrl is the official offline-docs archive',
+  DS.docsZipUrl('6000.3.9f1') === 'https://cloudmedia-docs.unity3d.com/docscloudstorage/en/6000.3/UnityDocumentation.zip'
+  && DS.docsZipUrl('junk') === null);
+check('docs-search: extractDocText finds the article in a real ScriptReference page',
+  (() => {
+    const html = fs.readFileSync(path.join(root, 'test', 'fixtures', 'unity-docs', 'Transform.TransformPoint.html'), 'utf8');
+    const doc = DS.extractDocText(html, 'Documentation/en/ScriptReference/Transform.TransformPoint.html');
+    return doc.id === 'Transform.TransformPoint' && doc.title === 'Transform.TransformPoint'
+      && doc.text.length > 1000 && doc.text.includes('TransformPoint')
+      && !doc.text.includes('MuiTreeItem');
+  })());
+const fixtureDocs = ['Transform.TransformPoint', 'Rigidbody', 'Vector3', 'Quaternion'].map((id) => {
+  const html = fs.readFileSync(path.join(root, 'test', 'fixtures', 'unity-docs', id + '.html'), 'utf8');
+  return DS.extractDocText(html, 'Documentation/en/ScriptReference/' + id + '.html');
+});
+const fixtureIndex = DS.buildIndex(fixtureDocs);
+check('docs-search: BM25 ranks the exact API page first on real pages',
+  DS.search(fixtureIndex, 'TransformPoint')[0].id === 'Transform.TransformPoint'
+  && DS.search(fixtureIndex, 'rigidbody velocity')[0].id === 'Rigidbody'
+  && DS.search(fixtureIndex, 'quaternion euler angles')[0].id === 'Quaternion'
+  && DS.search(fixtureIndex, 'vector3 magnitude')[0].id === 'Vector3'
+  && DS.search(fixtureIndex, 'zzz-no-such-term').length === 0
+  && DS.search(fixtureIndex, '').length === 0);
+check('docs-search: snippets come from the page lead, not invented text',
+  DS.search(fixtureIndex, 'TransformPoint')[0].snippet.length > 0
+  && DS.search(fixtureIndex, 'TransformPoint')[0].snippet.length <= 300
+  && DS.search(fixtureIndex, 'TransformPoint')[0].snippet.includes('local space'));
+check('docs-search: extractDocText cuts the offline archive feedback form out of the text',
+  (() => {
+    const html = '<html><body><article><h1>TransformPoint</h1><p>Transform .TransformPoint Leave feedback Suggest a change Success! Thank you for helping us improve the quality of Unity Documentation. Although we cannot accept all submissions, we do read each suggested change from our users and will make updates where applicable. Close Submission failed For some reason your suggested change could not be submitted. Please try again in a few minutes. And thank you for taking the time to help us improve the quality of Unity Documentation. Close Your name Your email Suggestion * Submit suggestion Cancel Switch to Manual Declaration public Vector3 TransformPoint ( Vector3 position ); Description Transforms position from local space to world space.</p></article></body></html>';
+    const doc = DS.extractDocText(html, 'Documentation/en/ScriptReference/Transform.TransformPoint.html');
+    return !doc.text.includes('Leave feedback') && !doc.text.includes('Switch to Manual')
+      && doc.text.includes('Transforms position from local space to world space')
+      && doc.lead.includes('Declaration');
+  })());
+// The minimal ZIP reader, tested against a zip built by hand in
+// the test (one stored entry, one deflated entry) — no 470 MB
+// archive, no zip dependency.
+const CRC_TABLE = (() => {
+  const t = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function testCrc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function buildTestZip(entries) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, 'utf8');
+    const data = Buffer.from(e.data, 'utf8');
+    const stored = e.method === 0 ? data : zlib.deflateRawSync(data);
+    const crc = testCrc32(data);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0);
+    lh.writeUInt16LE(20, 4);
+    lh.writeUInt16LE(0, 6);
+    lh.writeUInt16LE(e.method, 8);
+    lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(stored.length, 18);
+    lh.writeUInt32LE(data.length, 22);
+    lh.writeUInt16LE(name.length, 26);
+    locals.push(Buffer.concat([lh, name, stored]));
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 8);
+    cd.writeUInt16LE(e.method, 10);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(stored.length, 20);
+    cd.writeUInt32LE(data.length, 24);
+    cd.writeUInt16LE(name.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    centrals.push(Buffer.concat([cd, name]));
+    offset += lh.length + name.length + stored.length;
+  }
+  const cdStart = offset;
+  const cdBuf = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(cdStart, 16);
+  return Buffer.concat([...locals, cdBuf, eocd]);
+}
+const testZipPath = path.join(os.tmpdir(), 'codefox-test-docs-' + process.pid + '.zip');
+fs.writeFileSync(testZipPath, buildTestZip([
+  { name: 'Documentation/en/ScriptReference/Transform.TransformPoint.html', method: 8, data: '<html><head><title>x</title></head><body><article><h1>TransformPoint</h1><p>Transforms position from local space to world space.</p></article></body></html>' },
+  { name: 'Documentation/en/ScriptReference/Rigidbody.html', method: 0, data: '<html><body><article><h1>Rigidbody</h1><p>Control of an object\'s position through physics simulation.</p></article></body></html>' },
+  { name: 'Documentation/en/Manual/Physics.html', method: 8, data: '<html><body><p>Manual page — not a ScriptReference entry.</p></body></html>' },
+]));
+const zipEntries = DE.listZipEntries(testZipPath);
+check('docs-engine: minimal ZIP reader lists entries with methods and offsets',
+  zipEntries.length === 3
+  && zipEntries[0].name === 'Documentation/en/ScriptReference/Transform.TransformPoint.html' && zipEntries[0].method === 8
+  && zipEntries[1].method === 0);
+check('docs-engine: readZipEntry inflates deflated entries and passes stored ones through',
+  DE.readZipEntry(testZipPath, zipEntries[0]).toString('utf8').includes('Transforms position from local space')
+  && DE.readZipEntry(testZipPath, zipEntries[1]).toString('utf8').includes('physics simulation'));
+const zipIndex = DE.buildIndexFromZip(testZipPath, '6000.3');
+check('docs-engine: buildIndexFromZip indexes only ScriptReference pages and searches them',
+  zipIndex.totalDocs === 2 && zipIndex.unityVersion === '6000.3'
+  && DS.search(zipIndex, 'transformpoint')[0].id === 'Transform.TransformPoint'
+  && DS.search(zipIndex, 'rigidbody')[0].id === 'Rigidbody');
+fs.unlinkSync(testZipPath);
+check('model-profiles: default profiles carry the tuned load settings',
+  (() => {
+    const p = MP.defaultCoderProfile('qwen3-coder-30b');
+    return p.id === 'primary' && p.lmStudioKey === 'qwen3-coder-30b'
+      && p.load.kvCacheQuant === 'q8_0' && p.load.parallel === 1 && p.load.offloadRatio === 1
+      && p.load.contextLength === 16384 && p.load.evalBatch === 512 && p.load.flashAttention === true
+      && p.sampling.temperature === 0.2 && p.sampling.chatTemperature === 0.7;
+  })());
+check('model-profiles: validateProfile catches a missing model key and a bad context',
+  MP.validateProfile(MP.createProfile({ id: 'vision', lmStudioKey: '' })).length > 0
+  && MP.validateProfile(MP.createProfile({ id: 'vision', lmStudioKey: 'x', load: { contextLength: 0 } })).length > 0
+  && MP.validateProfile(MP.createProfile({ id: 'vision', lmStudioKey: 'x' })).length === 0);
+check('model-profiles: routeVision prefers a vision-capable primary, then the vision profile, then none',
+  (() => {
+    const primaryVision = MP.createProfile({ id: 'primary', lmStudioKey: 'coder-vision', capabilities: { vision: true } });
+    const primaryPlain = MP.createProfile({ id: 'primary', lmStudioKey: 'coder', capabilities: { vision: false } });
+    const vision = MP.createProfile({ id: 'vision', lmStudioKey: 'qwen2-vl' });
+    const a = MP.routeVision({ primary: primaryVision, vision });
+    const b = MP.routeVision({ primary: primaryPlain, vision });
+    const c = MP.routeVision({ primary: primaryPlain, vision: null });
+    return a.kind === 'primary' && a.swap === false
+      && b.kind === 'swap' && b.swap === true && b.profile.lmStudioKey === 'qwen2-vl'
+      && c.kind === 'none' && /No vision model/.test(c.reason);
+  })());
+check('model-profiles: swap cost is load time plus prompt time, measured beats default',
+  MP.estimateSwapCost(MP.createProfile({}), 0).seconds === 30
+  && MP.estimateSwapCost(MP.createProfile({ measured: { loadSeconds: 12, promptTokensPerSecond: 40 } }), 400).seconds === 22);
+check('model-profiles: the state machine allows the swap sequence and refuses a busy unload',
+  (() => {
+    let s = { state: 'ready', current: 'coder', busy: false };
+    const step = (ev, id) => { const r = MP.modelTransition(s, ev, id); if (r.ok) s = r.state; return r; };
+    const ok1 = step('unload-start').ok && s.state === 'unloading';
+    const ok2 = step('unload-ok').ok && s.state === 'unloaded' && s.current === null;
+    const ok3 = step('load-start', 'vision').ok && s.state === 'loading';
+    const ok4 = step('load-ok', 'vision').ok && s.state === 'ready' && s.current === 'vision';
+    const ok5 = step('busy').ok && s.state === 'busy';
+    const bad = step('unload-start');
+    const ok6 = !bad.ok && /busy/.test(bad.error) && s.state === 'busy';
+    const ok7 = step('free').ok && s.state === 'ready';
+    const bad2 = step('load-start', 'x');
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && !bad2.ok;
+  })());
+check('model-profiles: parseVisionResult structures bullets and never invents findings',
+  (() => {
+    const r = MP.parseVisionResult('Matches:\n- player sprite is visible\n- facing right\nIssues:\n- the health bar is cut off');
+    const plain = MP.parseVisionResult('The sprite looks fine, nothing wrong here.');
+    return r.matches.length === 2 && r.issues.length === 1 && r.raw.length > 0
+      && plain.matches.length === 0 && plain.issues.length === 0 && plain.raw.includes('sprite looks fine');
+  })());
+check('model-profiles: stripImagesFromHistory removes image parts and keeps text',
+  (() => {
+    const msgs = [
+      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } }] },
+      { role: 'assistant', content: 'plain string stays' },
+    ];
+    const out = MP.stripImagesFromHistory(msgs);
+    return out[0].content.every(p => p.type !== 'image_url') && out[0].content.some(p => /image removed/.test(p.text))
+      && out[1].content === 'plain string stays';
+  })());
+check('mcp-server: the tool list has the read tools and the denied mutating ones',
+  MCP.TOOLS.map(t => t.name).join(',') === 'docs_search,file_view,file_grep,git_status,git_diff,git_log,unity_command,file_str_replace,comfyui_generate'
+  && MCP.TOOLS.filter(t => t.kind === 'mutating').map(t => t.name).join(',') === 'file_str_replace,comfyui_generate'
+  && MCP.TOOLS.find(t => t.name === 'unity_command').kind === 'gated');
+check('mcp-server: classifyUnityAction allows reads and denies writes',
+  MCP.classifyUnityAction('list_hierarchy') === 'read'
+  && MCP.classifyUnityAction('describeComponent') === 'read'
+  && MCP.classifyUnityAction('readConsole') === 'read'
+  && MCP.classifyUnityAction('createPrefab') === 'mutating'
+  && MCP.classifyUnityAction('set_property') === 'mutating'
+  && MCP.classifyUnityAction('recompile_and_report_errors') === 'mutating');
+check('v0.21.0 wiring: version pins, script tags, IPCs, prompt sections, migration',
+  pkg.version === '0.21.0'
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.21.0 — Local')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="docs-search.js"></script>')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="model-profiles.js"></script>')
+  && pkg.build.files.includes('docs-search.js')
+  && pkg.build.files.includes('model-profiles.js')
+  && pkg.build.files.includes('docs-engine.js')
+  && pkg.build.files.includes('mcp-server/**/*')
+  && Array.isArray(pkg.build.asarUnpack) && pkg.build.asarUnpack.includes('mcp-server/**/*')
+  && typeof pkg.scripts.mcp === 'string' && pkg.scripts.mcp.includes('mcp-server/server.js')
+  && fs.readFileSync(path.join(root, 'main.js'), 'utf8').includes("ipcMain.handle('docs:search'")
+  && fs.readFileSync(path.join(root, 'main.js'), 'utf8').includes("ipcMain.handle('llm:visionChat'")
+  && fs.readFileSync(path.join(root, 'main.js'), 'utf8').includes("ipcMain.handle('mcp:serverInfo'")
+  && fs.readFileSync(path.join(root, 'main.js'), 'utf8').includes('ALTER TABLE messages ADD COLUMN model TEXT')
+  && fs.readFileSync(path.join(root, 'preload.js'), 'utf8').includes('visionChat:')
+  && fs.readFileSync(path.join(root, 'preload.js'), 'utf8').includes('serverInfo:')
+  && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('## Unity docs — search before you guess')
+  && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('## Seeing the game — vision as a tool')
+  && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('parseDocsBlocks')
+  && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('parseVisionBlocks')
+  && fs.readFileSync(path.join(root, 'app.js'), 'utf8').includes('restoreCoderAfterVision')
+  && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('Unity docs')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.21.0 — 2026-11-26'));
+check('v0.21.0 wiring: bridge unchanged at 0.16.0',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes('0.16.0')
+  && !/0\.17\.0/.test(fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8')));
 
 (async () => {
   // v0.14.0 runner: runUnityCommand against an injected fs and
@@ -5034,6 +5272,70 @@ check('v0.20.0 wiring: turn-ledger script + Agent Turn section in index.html, mo
       } finally { fs.rmSync(tmpRepo, { recursive: true, force: true }); }
     } else {
       check('real-git integration skipped — git not on this VM (stub tests cover the engine)', true);
+    }
+  }
+  // v0.21.0: MCP server dispatch — read tools run for real, mutating
+  // tools are denied with the approval message, and the gated Unity
+  // read path executes (and fails on the missing bridge) instead of
+  // being denied.
+  {
+    const MCPServer = require(path.join(root, 'mcp-server', 'server.js'));
+    const tmpProj = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-mcp-proj-'));
+    const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-mcp-data-'));
+    try {
+      fs.writeFileSync(path.join(tmpProj, 'Player.cs'), 'public class Player {\n  public float speed = 5f;\n}\n');
+      const idx = DS.buildIndex(fixtureDocs);
+      idx.unityVersion = '6000.3';
+      fs.mkdirSync(path.join(tmpData, 'unity-docs', '6000.3'), { recursive: true });
+      fs.writeFileSync(path.join(tmpData, 'unity-docs', '6000.3', 'index.json'), JSON.stringify(idx));
+      const ctx = MCPServer.createContext({ project: tmpProj, dataDir: tmpData });
+      const docsRes = await MCPServer.dispatch('docs_search', { query: 'transformpoint' }, ctx);
+      check('mcp dispatch: docs_search runs against the fixture index',
+        docsRes.isError === false && docsRes.content[0].text.includes('Transform.TransformPoint'), docsRes.content[0].text.slice(0, 120));
+      const noIndex = await MCPServer.dispatch('docs_search', { query: 'rigidbody' }, MCPServer.createContext({ project: tmpProj, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-mcp-empty-')) }));
+      check('mcp dispatch: docs_search says plainly when there is no index',
+        noIndex.isError === true && /No Unity docs index yet/.test(noIndex.content[0].text));
+      const viewRes = await MCPServer.dispatch('file_view', { path: 'Player.cs' }, ctx);
+      check('mcp dispatch: file_view reads a project file',
+        viewRes.isError === false && viewRes.content[0].text.includes('public float speed'));
+      const grepRes = await MCPServer.dispatch('file_grep', { pattern: 'speed' }, ctx);
+      check('mcp dispatch: file_grep finds the pattern',
+        grepRes.isError === false && grepRes.content[0].text.includes('Player.cs:2:'));
+      const deny1 = await MCPServer.dispatch('file_str_replace', { path: 'Player.cs', oldText: '5f', newText: '9f' }, ctx);
+      check('mcp dispatch: file_str_replace is denied, and the file is untouched',
+        deny1.isError === true && /Denied/.test(deny1.content[0].text) && /approval/i.test(deny1.content[0].text)
+        && fs.readFileSync(path.join(tmpProj, 'Player.cs'), 'utf8').includes('5f'));
+      const deny2 = await MCPServer.dispatch('comfyui_generate', { workflow: 'x', prompt: 'y' }, ctx);
+      check('mcp dispatch: comfyui_generate is denied',
+        deny2.isError === true && /Denied/.test(deny2.content[0].text));
+      const deny3 = await MCPServer.dispatch('unity_command', { action: 'createPrefab', args: {} }, ctx);
+      check('mcp dispatch: a Unity write action is denied',
+        deny3.isError === true && /Denied/.test(deny3.content[0].text) && /createPrefab/.test(deny3.content[0].text));
+      const readU = await MCPServer.dispatch('unity_command', { action: 'list_hierarchy', args: {} }, ctx);
+      check('mcp dispatch: a Unity read action executes (and reports the missing bridge, not a denial)',
+        readU.isError === true && !/Denied/.test(readU.content[0].text) && /bridge/i.test(readU.content[0].text));
+      let gitHere = false;
+      try { execFileSync('git', ['--version'], { stdio: 'pipe' }); gitHere = true; } catch {}
+      if (gitHere) {
+        execFileSync('git', ['init', tmpProj], { stdio: 'pipe' });
+        execFileSync('git', ['-C', tmpProj, 'config', 'user.email', 'test@codefox.local'], { stdio: 'pipe' });
+        execFileSync('git', ['-C', tmpProj, 'config', 'user.name', 'CodeFox Test'], { stdio: 'pipe' });
+        execFileSync('git', ['-C', tmpProj, 'add', '.'], { stdio: 'pipe' });
+        execFileSync('git', ['-C', tmpProj, 'commit', '-m', 'initial'], { stdio: 'pipe' });
+        const gitRes = await MCPServer.dispatch('git_status', {}, ctx);
+        check('mcp dispatch: git_status runs against a real repo',
+          gitRes.isError === false && gitRes.content[0].text.includes('"clean": true'), gitRes.content[0].text.slice(0, 120));
+        const logRes = await MCPServer.dispatch('git_log', { count: 5 }, ctx);
+        check('mcp dispatch: git_log lists the commit',
+          logRes.isError === false && logRes.content[0].text.includes('initial'));
+      } else {
+        check('mcp dispatch: git_status skipped — git not on this VM', true);
+      }
+      const unknown = await MCPServer.dispatch('no_such_tool', {}, ctx);
+      check('mcp dispatch: an unknown tool is a plain error', unknown.isError === true && /Unknown tool/.test(unknown.content[0].text));
+    } finally {
+      fs.rmSync(tmpProj, { recursive: true, force: true });
+      fs.rmSync(tmpData, { recursive: true, force: true });
     }
   }
   finish();

@@ -72,6 +72,13 @@ let state = {
   useCondensedRules: false,
   condensedRules: '',
   mcpServers: [],
+  // v0.21.0: per-model profiles (primary coder + optional vision
+  // model), the model state machine, the docs index status, and the
+  // MCP server command for Settings → MCPs.
+  modelProfiles: null,
+  modelState: null,
+  docsStatus: null,
+  mcpServerInfo: null,
   agentMaxRounds: 5,
   // ComfyUI (v0.6.0) — native local provider, alongside LM Studio.
   // Inert until a connection succeeds; nothing here blocks the app.
@@ -336,6 +343,16 @@ function updateModelDropdown() {
       sel.innerHTML += `<option value="${escHtml(current)}" selected>${escHtml(current)} (not loaded)</option>`;
     }
   }
+  // v0.21.0: the vision model select shares the live server list.
+  const vsel = document.getElementById('s-lm-vision-model');
+  if (vsel) {
+    const visionKey = state.modelProfiles && state.modelProfiles.vision ? state.modelProfiles.vision.lmStudioKey : '';
+    vsel.innerHTML = '<option value="">— No vision model —</option>' +
+      state.lmstudioModels.map(m => `<option value="${escHtml(m.id)}" ${m.id === visionKey ? 'selected' : ''}>${escHtml(m.id)}</option>`).join('');
+    if (visionKey && !state.lmstudioModels.some(m => m.id === visionKey)) {
+      vsel.innerHTML += `<option value="${escHtml(visionKey)}" selected>${escHtml(visionKey)} (not in the server list)</option>`;
+    }
+  }
   updateHomeModelLabel();
 }
 
@@ -516,6 +533,16 @@ async function init() {
   try { state.mcpServers = JSON.parse(await rb.db.getSetting('mcp_servers') || '[]'); }
   catch { state.mcpServers = []; }
   if (!Array.isArray(state.mcpServers)) state.mcpServers = [];
+  // v0.21.0: per-model profiles. A missing or broken saved value
+  // falls back to defaults built from the current chat model — the
+  // vision profile stays empty until the user picks one.
+  try { state.modelProfiles = JSON.parse(await rb.db.getSetting('model_profiles') || 'null'); }
+  catch { state.modelProfiles = null; }
+  if (!state.modelProfiles || !state.modelProfiles.primary) {
+    state.modelProfiles = ModelProfiles.defaultProfiles(currentModel());
+    try { await rb.db.setSetting('model_profiles', JSON.stringify(state.modelProfiles)); } catch {}
+  }
+  resetModelState();
   try { state.localFolders = JSON.parse(await rb.db.getSetting('local_folders') || '[]'); }
   catch { state.localFolders = []; }
   if (!Array.isArray(state.localFolders)) state.localFolders = [];
@@ -1255,8 +1282,10 @@ async function sendChat() {
   input.value = '';
   autoResize(input);
 
-  // Save user message
-  await rb.db.insert('messages', { thread_id: state.activeThreadId, role: 'user', content: text });
+  // Save user message — the model that will answer is recorded on
+  // it (v0.21.0), so a turn's answer can be attributed to the model
+  // that gave it.
+  await rb.db.insert('messages', { thread_id: state.activeThreadId, role: 'user', content: text, model: currentModel() || null });
   state.messages.push({ role: 'user', content: text });
   renderMessages();
 
@@ -1906,6 +1935,59 @@ function parseWaitBlocks(text) {
   }
   return out;
 }
+// ```docs blocks (v0.21.0, Agent mode only): {"query": "Transform.TransformPoint"}
+// — a read-only search of the local Unity ScriptReference index.
+// No approval: it only reads the downloaded docs. If no index is
+// downloaded yet, the tool says so plainly instead of guessing.
+function parseDocsBlocks(text) {
+  const out = [];
+  const re = /```docs\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    const query = parsed && typeof parsed === 'object' ? parsed.query : null;
+    out.push({
+      query,
+      raw: m[1].trim(),
+      valid: typeof query === 'string' && !!query.trim(),
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
+
+// ```vision blocks (v0.21.0, Agent mode only):
+// {"image": "Assets/Screenshots/shot.png", "question": "Is the player sprite visible?"}
+// — a vision model looks at one image file in the project and
+// answers in text. The coder never sees the pixels. confirmSwap:
+// true lets the model re-send a block after an 'ask' policy
+// refusal. A vision question is never a file write.
+function parseVisionBlocks(text) {
+  const out = [];
+  const re = /```vision\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    const image = parsed && typeof parsed === 'object' ? parsed.image : null;
+    const question = parsed && typeof parsed === 'object' ? parsed.question : null;
+    out.push({
+      image,
+      question,
+      confirmSwap: !!(parsed && parsed.confirmSwap),
+      raw: m[1].trim(),
+      valid: typeof image === 'string' && !!image.trim() && typeof question === 'string' && !!question.trim(),
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
+
 // Intent-based mode routing (v0.8.2). Ask mode is instructed to
 // refuse file work ("Answer and explain only"), so a build request
 // sent in Ask mode gets an INSTRUCTED refusal — the model doing
@@ -2097,6 +2179,12 @@ function parseAgentActions(text) {
   for (const b of parseWaitBlocks(text)) {
     actions.push({ type: 'wait', seconds: b.seconds, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
+  for (const b of parseDocsBlocks(text)) {
+    actions.push({ type: 'docs', query: b.query, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
+  for (const b of parseVisionBlocks(text)) {
+    actions.push({ type: 'vision', image: b.image, question: b.question, confirmSwap: b.confirmSwap, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
   }
@@ -2261,7 +2349,7 @@ async function streamOneTurn(messages, systemPrompt, threadId) {
   }
   thinkingEl.remove();
   rb.llm.removeListeners();
-  try { await rb.db.insert('messages', { thread_id: threadId, role: 'assistant', content: assistantContent }); } catch {}
+  try { await rb.db.insert('messages', { thread_id: threadId, role: 'assistant', content: assistantContent, model: currentModel() || null }); } catch {}
   if (state.activeThreadId === threadId) state.messages.push({ role: 'assistant', content: assistantContent });
   await handleSkillSaveFlags(assistantContent);
   // v0.19.0: ground truth first (when the stream carried it),
@@ -2760,6 +2848,141 @@ async function runRoundCompileCheck() {
 // the loop resumes when the user clicks Run / Apply / Install
 // (action runs, result appended) or Dismiss (decline note appended,
 // so the model can try a different approach).
+// ── Model profiles + vision swap (v0.21.0) ────────────────────────
+
+// The model state machine tracks the model CodeFox is currently
+// using. At startup that is the chat model, ready — the machine is
+// only a guard against unloading a busy model or swapping twice, not
+// a claim about what LM Studio holds.
+function resetModelState() {
+  const m = currentModel();
+  state.modelState = m
+    ? { state: 'ready', current: m, busy: false }
+    : ModelProfiles.createModelState();
+}
+function transitionModel(event, modelId) {
+  const res = ModelProfiles.modelTransition(state.modelState, event, modelId);
+  if (res.ok) state.modelState = res.state;
+  return res;
+}
+async function saveModelProfiles() {
+  try { await rb.db.setSetting('model_profiles', JSON.stringify(state.modelProfiles)); } catch {}
+}
+
+// Rough prompt size for a vision call: the question plus ~1000
+// tokens for the image itself. Only used for the swap-cost estimate
+// shown to the user — never presented as a measured number.
+function visionPromptTokens(question) {
+  const q = typeof ContextBudget !== 'undefined'
+    ? ContextBudget.estimateTokens(String(question || ''), state.contextBudget ? state.contextBudget.charsPerToken : 3)
+    : 200;
+  return q + 1000;
+}
+
+// Swap the coder out for the vision model for this round. Returns
+// {ok, text} — text is the swap note for the tool result. On
+// failure the coder is left (or reloaded) and the vision action
+// does not run. One swap covers every vision action in the round;
+// the coder is restored at the end of processAgentActions.
+async function ensureVisionModel(route, profs) {
+  const coderModel = currentModel();
+  const visionModel = route.profile.lmStudioKey;
+  const cost = ModelProfiles.estimateSwapCost(route.profile, 0);
+  if (profs.coResidency) {
+    // Load alongside the coder — only honest on a GPU with room
+    // for both. The state machine keeps tracking the coder.
+    const loaded = await rb.llm.loadModel(visionModel);
+    if (!loaded || !loaded.ok) return { ok: false, text: 'Could not load the vision model ' + visionModel + ': ' + (loaded && loaded.error || 'unknown error') + ' — the coder model is still loaded.' };
+    loopState.visionSwap = { coderModel, visionModel, coResident: true };
+    return { ok: true, text: 'Vision model ' + visionModel + ' loaded alongside the coder (' + cost.text + ', co-residency on).' };
+  }
+  const t1 = transitionModel('unload-start');
+  if (!t1.ok) return { ok: false, text: t1.error + ' — vision needs the coder unloaded first.' };
+  const unloaded = await rb.llm.unloadModel(coderModel);
+  if (!unloaded || !unloaded.ok) {
+    // The unload failed, so the coder is still the model in use —
+    // reset the machine to match reality instead of leaving it in
+    // an 'unloading' state that never happened.
+    state.modelState = { state: 'ready', current: coderModel, busy: false };
+    return { ok: false, text: 'Could not unload the coder model ' + coderModel + ' to make room for the vision model: ' + (unloaded && unloaded.error || 'unknown error') + ' — the coder is still loaded.' };
+  }
+  transitionModel('unload-ok');
+  const t2 = transitionModel('load-start', visionModel);
+  if (!t2.ok) return { ok: false, text: t2.error };
+  const t0 = Date.now();
+  const loaded = await rb.llm.loadModel(visionModel);
+  if (!loaded || !loaded.ok) {
+    transitionModel('load-fail');
+    // The vision model did not load and the coder is already out —
+    // try to put the coder back before giving up.
+    const back = await rb.llm.loadModel(coderModel);
+    if (back && back.ok) {
+      transitionModel('load-start', coderModel);
+      transitionModel('load-ok', coderModel);
+      return { ok: false, text: 'Could not load the vision model ' + visionModel + ': ' + (loaded.error || 'unknown error') + ' — the coder model was reloaded, so nothing is lost.' };
+    }
+    return { ok: false, text: 'Could not load the vision model ' + visionModel + ': ' + (loaded.error || 'unknown error') + ' — and the coder ' + coderModel + ' could not be reloaded either. No model is loaded — load one in Settings → Model before the next turn.' };
+  }
+  transitionModel('load-ok', visionModel);
+  // Measure the swap so the next estimate is real, not the default.
+  route.profile.measured.loadSeconds = Math.max(1, Math.round((Date.now() - t0) / 1000));
+  await saveModelProfiles();
+  loopState.visionSwap = { coderModel, visionModel, coResident: false };
+  return { ok: true, text: 'Swapped to the vision model ' + visionModel + ' (' + cost.text + '); the coder is reloaded when the round ends.' };
+}
+
+// One vision question against the model the route chose. The busy
+// transition only applies when the vision model IS the current
+// model (a swap); under co-residency the machine keeps tracking
+// the coder, which is not busy.
+async function runVisionQuestion(action, route, coResident) {
+  let busy = null;
+  if (!coResident) busy = transitionModel('busy');
+  let res;
+  try {
+    res = await rb.llm.visionChat({
+      projectPath: state.projectPath,
+      image: action.image,
+      question: action.question,
+      model: route.profile.lmStudioKey,
+      lmstudioUrl: state.lmstudioUrl,
+      lmstudioApiKey: state.lmstudioApiKey,
+    });
+  } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+  if (busy && busy.ok) transitionModel('free');
+  return res;
+}
+
+// Restore the coder after a vision round. Returns a plain note for
+// the transcript when the restore did not happen cleanly, else null.
+async function restoreCoderAfterVision() {
+  const swap = loopState && loopState.visionSwap;
+  if (!swap) return null;
+  if (swap.coResident) {
+    // The coder never left; unload the vision model only.
+    const un = await rb.llm.unloadModel(swap.visionModel);
+    if (!un || !un.ok) return 'Note — the vision model ' + swap.visionModel + ' could not be unloaded after the vision call (' + (un && un.error || 'unknown error') + '); it is still loaded alongside the coder.';
+    return null;
+  }
+  const t1 = transitionModel('unload-start');
+  if (!t1.ok) return 'Note — could not start unloading the vision model after the vision call: ' + t1.error + '. The coder model may not be the one answering next — check Settings → Model.';
+  const un = await rb.llm.unloadModel(swap.visionModel);
+  if (!un || !un.ok) {
+    state.modelState = { state: 'ready', current: swap.visionModel, busy: false };
+    return 'Note — the vision model ' + swap.visionModel + ' could not be unloaded after the vision call (' + (un && un.error || 'unknown error') + '), so the coder was NOT reloaded. The next turn would run on the vision model — load the coder in Settings → Model first.';
+  }
+  transitionModel('unload-ok');
+  const t2 = transitionModel('load-start', swap.coderModel);
+  if (!t2.ok) return 'Note — could not start reloading the coder after the vision call: ' + t2.error + '.';
+  const loaded = await rb.llm.loadModel(swap.coderModel);
+  if (!loaded || !loaded.ok) {
+    transitionModel('load-fail');
+    return 'Note — the coder model ' + swap.coderModel + ' could not be reloaded after the vision call (' + (loaded && loaded.error || 'unknown error') + '). No model is loaded — load one in Settings → Model before the next turn.';
+  }
+  transitionModel('load-ok', swap.coderModel);
+  return null;
+}
+
 async function processAgentActions(actions) {
   let outcomes = 0;
   // v0.9.3: whether any action in this round failed — the loop's
@@ -3271,7 +3494,109 @@ async function processAgentActions(actions) {
       const waited = Math.min(seconds, waitedMs / 1000);
       await appendToolResult('Tool result — Waited ' + waited + 's' + (waited < seconds ? ' (stopped early)' : '') + '.');
       outcomes++;
+    } else if (action.type === 'docs') {
+      // Unity docs (v0.21.0, Agent mode only). Read-only, no
+      // approval. The tool result carries the index version, so the
+      // model can say which Unity version it quoted.
+      if (!action.valid) {
+        await appendToolResult('Tool result — Unity docs: could not parse the ```docs block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"query": "Transform.TransformPoint"}.');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      let res;
+      try { res = await rb.docs.search(action.query, 5); } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+      if (!res || !res.ok) {
+        await appendToolResult('Tool result — Unity docs: ' + (res && res.error || 'search failed.'));
+        failed++;
+        outcomes++;
+        continue;
+      }
+      if (!res.results.length) {
+        await appendToolResult('Tool result — Unity docs: no pages matched "' + action.query + '" (index v' + res.version + ', ' + res.pageCount + ' pages).');
+        outcomes++;
+        continue;
+      }
+      const lines = ['Tool result — Unity docs (v' + res.version + ', ' + res.pageCount + ' pages):'];
+      res.results.forEach((r, i) => lines.push((i + 1) + '. ' + r.title + ' — ' + r.snippet));
+      await appendToolResult(lines.join('\n'));
+      outcomes++;
+    } else if (action.type === 'vision') {
+      // Vision (v0.21.0, Agent mode only). The vision model looks
+      // at one project image and answers in text; the coder never
+      // sees the pixels. A swap is per-round: the first vision
+      // action swaps, later ones in the same round reuse the loaded
+      // vision model, and the coder is restored at the end of the
+      // round (see the restore below, before the compile check).
+      if (!action.valid) {
+        await appendToolResult('Tool result — Vision: could not parse the ```vision block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"image": "Assets/Screenshots/shot.png", "question": "…"} (the image must be a file in the project).');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      const profs = state.modelProfiles || ModelProfiles.defaultProfiles(currentModel());
+      const route = ModelProfiles.routeVision(profs);
+      if (route.kind === 'none') {
+        await appendToolResult('Tool result — Vision: ' + route.reason);
+        failed++;
+        outcomes++;
+        continue;
+      }
+      if (route.kind === 'swap' && profs.autoSwap === 'never') {
+        await appendToolResult('Tool result — Vision: this question needs the vision model (' + route.profile.lmStudioKey + '), which means swapping the coder out — and auto-swap is set to "never" in Settings → Model. Set it to "auto" or "ask" to allow swaps.');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      if (route.kind === 'swap' && profs.autoSwap === 'ask' && !action.confirmSwap && !(loopState && loopState.visionSwap)) {
+        const cost = ModelProfiles.estimateSwapCost(route.profile, visionPromptTokens(action.question));
+        await appendToolResult('Tool result — Vision: this question needs a model swap — unload ' + (currentModel() || 'the coder') + ', load ' + route.profile.lmStudioKey + ' (' + cost.text + '), then load the coder back. Auto-swap is set to "ask". Ask the user, and if they agree, re-send the vision block with "confirmSwap": true — or they can set auto-swap to "auto" in Settings → Model.');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      let swapNote = '';
+      if (route.kind === 'swap' && !(loopState && loopState.visionSwap)) {
+        const sw = await ensureVisionModel(route, profs);
+        if (!sw.ok) {
+          await appendToolResult('Tool result — Vision: ' + sw.text);
+          failed++;
+          outcomes++;
+          continue;
+        }
+        swapNote = sw.text;
+      } else if (route.kind === 'swap') {
+        swapNote = 'Vision model already loaded for this round — no second swap.';
+      }
+      const vres = await runVisionQuestion(action, route, !!(loopState && loopState.visionSwap && loopState.visionSwap.coResident));
+      if (!vres || !vres.ok) {
+        await appendToolResult('Tool result — Vision: the vision call failed — ' + (vres && vres.error || 'unknown error') + '.');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      const parsed = ModelProfiles.parseVisionResult(vres.text);
+      const vlines = ['Tool result — Vision: ' + route.profile.lmStudioKey + ' looked at ' + action.image + ' — "' + action.question + '"'];
+      if (parsed.matches.length) vlines.push('Matches: ' + parsed.matches.join('; '));
+      if (parsed.issues.length) vlines.push('Issues: ' + parsed.issues.join('; '));
+      vlines.push(parsed.raw);
+      if (swapNote) vlines.push('(' + swapNote + ')');
+      await appendToolResult(vlines.join('\n'));
+      outcomes++;
     }
+  }
+  // v0.21.0: a vision swap is per-round — the coder is restored
+  // before the next model turn, so the next turn always runs on the
+  // coder. A failed restore is a tool result, never hidden: the next
+  // turn would otherwise run on the wrong model.
+  if (loopState && loopState.visionSwap) {
+    const note = await restoreCoderAfterVision();
+    if (note) await appendToolResult(note);
+    loopState.visionSwap = null;
   }
   // v0.11.0: compile after every edit — one build check when this
   // round changed a .cs file, before the next model turn. The
@@ -3900,6 +4225,10 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += 'You can inspect the project\'s git state with a ```git block (Agent mode only): {"action": "status"} — what changed and what branch you are on; {"action": "diff", "ref": "<sha>"} — what changed since a backup commit (add "nameStatus": true for a file list instead of the full diff); {"action": "log", "count": 10} — recent commits, backup commits are marked. After a change, compare what changed against the last backup to find what broke.\n';
       prompt += 'To restore the last backup: {"action": "restore", "ref": "<sha>"} — restoring asks the user first, and it checks out the tracked files from that commit and deletes files the change created. If the build breaks after your change, CodeFox checks the build, gives you one round to fix it, and restores the backup itself if the fix fails — never leave the project broken, and never silently restore: say what broke and what was restored.\n';
       prompt += 'Do not put a **File Path:** line before a ```git block — the block is a command, not a file.\n';
+      prompt += '## Unity docs — search before you guess\n';
+      prompt += 'When you are unsure of a Unity API signature, a property name, or what a component does, search the local Unity docs instead of guessing: a ```docs block (Agent mode only) with JSON {"query": "Transform.TransformPoint"} — the docs tool searches the downloaded ScriptReference index and returns the matching pages with a short excerpt. Use the exact API name from the result; the result also says which Unity version the index is for, so quote that version, never the project\'s. If the result says there is no docs index yet, tell the user to download it from Settings → Model → Unity docs (about 470 MB, once) instead of inventing an answer. Do not put a **File Path:** line before a ```docs block — the block is a command, not a file.\n';
+      prompt += '## Seeing the game — vision as a tool\n';
+      prompt += 'You cannot see images. When the user asks what something looks like — a screenshot, a render, a sprite — ask a vision model about it with a ```vision block (Agent mode only): JSON {"image": "Assets/Screenshots/shot.png", "question": "Is the player sprite visible and facing right?"}. The image must be a file in the project. The vision model answers in text and its findings come back as a tool result; you never see the pixels, so never claim you did. Batch your visual questions in one turn — one model swap covers them all. If the tool says no vision model is configured, tell the user to pick one in Settings → Model → Vision model instead of pretending you saw the image. If it says a swap is needed and auto-swap is set to "ask", ask the user, then re-send the block with "confirmSwap": true. Do not put a **File Path:** line before a ```vision block — the block is a command, not a file.\n';
       // Skills (v0.13.0): only the enabled skills of this project,
       // one line each — name, "use when..." description, and the
       // exact path to read. The full SKILL.md is never in the
@@ -4049,7 +4378,11 @@ function resetContextBudgetForThread() {
 function messagesForModel(systemPrompt) {
   const CB = (typeof ContextBudget !== 'undefined') ? ContextBudget : null;
   const fallback = state.messages.map(m => ({ role: m.role, content: m.content }));
-  if (!CB || !state.contextBudget) return fallback;
+  // v0.21.0: no image ever reaches the coder's history — vision
+  // findings arrive as text tool results. The strip is a safety net
+  // for a message that somehow carries an image part.
+  const strip = (msgs) => (typeof ModelProfiles !== 'undefined') ? ModelProfiles.stripImagesFromHistory(msgs) : msgs;
+  if (!CB || !state.contextBudget) return strip(fallback);
   const budget = state.contextBudget;
   const loaded = state.lmLoadedContext || null;
   const reserve = CB.outputReserveFor(state.maxTokens, loaded);
@@ -4083,7 +4416,7 @@ function messagesForModel(systemPrompt) {
   });
   if (res.log && res.log.changed > 0) noteCompaction(res.log, res.action);
   updateContextMeter();
-  return working.map(m => ({ role: m.role, content: m.content }));
+  return strip(working.map(m => ({ role: m.role, content: m.content })));
 }
 
 // Record a compaction. Elide is routine — log only. Summarize and
@@ -4891,6 +5224,45 @@ function renderModelPane(body) {
           <button class="btn btn-secondary" onclick="browseUnityExe()" style="flex-shrink:0;">Browse</button>
         </div>
       </label>
+      <div style="border-top:1px solid var(--border);padding-top:12px;">
+        <div class="field-label">Model profiles</div>
+        <div style="font-size:12px;color:var(--text3);margin:4px 0 8px;">The coder is the model that answers chat. The vision model is only used to look at images — it swaps in for one round and the coder is reloaded straight after. Routing is fixed in code, never decided by a model.</div>
+        <label class="field-label">Primary (coder) model
+          <input value="${escHtml(currentModel() || '')}" disabled />
+          <span class="field-note">Set by the Model dropdown above. The primary profile carries the tuned load settings (KV cache Q8, full GPU offload, 16K context).</span>
+        </label>
+        <label class="field-label">Vision model
+          <select id="s-lm-vision-model">
+            <option value="">— No vision model —</option>
+          </select>
+          <span class="field-note">Pick a vision-capable model from the live server list (load it in LM Studio first). Until one is set, the vision tool says so plainly instead of pretending the coder saw the image.</span>
+        </label>
+        <label class="field-label">Model swap
+          <select id="s-vision-autoswap">
+            <option value="auto" ${state.modelProfiles && state.modelProfiles.autoSwap === 'auto' ? 'selected' : ''}>Auto — swap without asking (the cost is shown in the tool result)</option>
+            <option value="ask" ${state.modelProfiles && state.modelProfiles.autoSwap === 'ask' ? 'selected' : ''}>Ask — the model asks you before each swap</option>
+            <option value="never" ${state.modelProfiles && state.modelProfiles.autoSwap === 'never' ? 'selected' : ''}>Never — vision that needs a swap is refused</option>
+          </select>
+        </label>
+        <label class="field-label" style="display:flex;gap:6px;align-items:center;">
+          <input type="checkbox" id="s-vision-coresidency" ${state.modelProfiles && state.modelProfiles.coResidency ? 'checked' : ''} />
+          Keep the coder loaded during a vision call (co-residency)
+        </label>
+        <div style="font-size:12px;color:var(--text3);">Two 30B models do not fit on a 24 GB GPU — co-residency only works with a small vision model. Off by default.</div>
+        <div id="s-vision-cost" style="font-size:12px;color:var(--text3);margin-top:6px;"></div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;">
+        <div class="field-label">Unity docs</div>
+        <div style="font-size:12px;color:var(--text3);margin:4px 0 8px;">A local search index of the official Unity ScriptReference, downloaded once into app data (never the repo) and searched offline. The agent uses it instead of guessing API names.</div>
+        <div id="s-docs-status" style="font-size:12px;color:var(--text3);">Checking docs index…</div>
+        <div style="display:flex;gap:8px;align-items:flex-end;margin-top:8px;">
+          <label class="field-label" style="margin:0;">Unity version
+            <input id="s-docs-version" value="${escHtml(state.projectScan && state.projectScan.unityVersion || '6000.3')}" style="width:110px;" />
+          </label>
+          <button class="btn btn-secondary" onclick="downloadUnityDocs()">Download docs</button>
+        </div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px;">About 470 MB for 6000.3, once. The download runs in the background; the index is built from the archive after it finishes.</div>
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button class="btn btn-primary" onclick="saveSettings()">Save</button>
       </div>
@@ -4898,6 +5270,8 @@ function renderModelPane(body) {
     </div>`;
   updateModelDropdown();
   updateLoadedContextLine();
+  updateVisionCostLine();
+  refreshDocsStatusLine();
   // Try to populate the model list right away if LM Studio is up.
   if (isLm) refreshModels();
   rb.ollama.status().then(st => {
@@ -4911,6 +5285,62 @@ function onProviderChange() {
   document.getElementById('s-lm-section').style.display = provider === 'lmstudio' ? 'flex' : 'none';
   document.getElementById('s-ollama-section').style.display = provider === 'ollama' ? 'flex' : 'none';
   if (provider === 'lmstudio') refreshModels();
+}
+
+// ── Model profiles + Unity docs (v0.21.0) ─────────────────────────
+
+// The estimated cost of a vision swap, from the vision profile's
+// measured load time when one exists, else the default estimate.
+function updateVisionCostLine() {
+  const el = document.getElementById('s-vision-cost');
+  if (!el) return;
+  const profs = state.modelProfiles;
+  if (!profs || !profs.vision || !profs.vision.lmStudioKey) { el.textContent = ''; return; }
+  const cost = ModelProfiles.estimateSwapCost(profs.vision, 1000);
+  const primaryVision = profs.primary && profs.primary.capabilities && profs.primary.capabilities.vision;
+  el.textContent = primaryVision
+    ? 'The primary model is vision-capable — vision questions run on it with no swap.'
+    : 'Estimated swap cost: ' + cost.text + ' (unload the coder, load the vision model, reload the coder).';
+}
+
+function docsStatusText(st) {
+  if (!st) return 'Could not read the docs status.';
+  if (st.downloading) {
+    const pct = st.totalBytes ? Math.round(st.downloadedBytes / st.totalBytes * 100) : 0;
+    return st.downloadPhase === 'index'
+      ? 'Building the search index from the downloaded archive…'
+      : 'Downloading the Unity docs… ' + pct + '% (' + Math.round(st.downloadedBytes / 1024 / 1024) + ' MB of ' + Math.round(st.totalBytes / 1024 / 1024) + ' MB)';
+  }
+  if (!st.indexed) return 'No docs index yet — download it below (about 470 MB, once).';
+  return 'Indexed: Unity ' + st.version + ' ScriptReference — ' + st.pageCount.toLocaleString('en-US') + ' pages'
+    + (st.indexBytes ? ' (' + Math.round(st.indexBytes / 1024 / 1024) + ' MB index' + (st.zipPresent ? ', archive kept for re-indexing' : '') + ')' : '')
+    + '.';
+}
+
+// Refresh the docs status line, polling while a download runs.
+async function refreshDocsStatusLine() {
+  const el = document.getElementById('s-docs-status');
+  if (!el) return;
+  let st = null;
+  try { st = await rb.docs.status(); state.docsStatus = st; } catch (e) { st = null; }
+  el.textContent = docsStatusText(st);
+  if (st && st.downloading) {
+    setTimeout(() => { if (document.getElementById('s-docs-status')) refreshDocsStatusLine(); }, 2000);
+  }
+}
+
+async function downloadUnityDocs() {
+  const el = document.getElementById('s-docs-status');
+  const version = document.getElementById('s-docs-version')?.value?.trim() || '6000.3';
+  if (el) el.textContent = 'Starting the download…';
+  const res = await rb.docs.download(version);
+  if (!res || !res.ok) {
+    if (el) el.textContent = 'Download failed: ' + (res && res.error || 'unknown error');
+    showToast('⚠ Docs download failed: ' + (res && res.error || 'unknown error'));
+    return;
+  }
+  showToast('✓ Unity docs indexed — ' + res.pageCount.toLocaleString('en-US') + ' pages (v' + res.version + ').');
+  refreshDocsStatusLine();
 }
 
 async function browseOllamaExe() {
@@ -4974,6 +5404,23 @@ async function saveSettings() {
   const unityExe = document.getElementById('s-unity-exe')?.value?.trim() || '';
   state.unityExePath = unityExe;
   await rb.db.setSetting('unity_exe_path', unityExe);
+  // v0.21.0: model profiles — the vision model, the swap policy,
+  // and co-residency. The primary profile's key follows the model
+  // chosen above, so the profile and the chat model never drift.
+  if (state.modelProfiles) {
+    const visionKey = document.getElementById('s-lm-vision-model')?.value || '';
+    const autoSwap = document.getElementById('s-vision-autoswap')?.value || 'auto';
+    const coRes = !!document.getElementById('s-vision-coresidency')?.checked;
+    state.modelProfiles.vision = visionKey
+      ? ModelProfiles.createProfile({ id: 'vision', lmStudioKey: visionKey, roles: ['vision'], capabilities: { vision: true, tools: false, contextLength: 16384 } })
+      : null;
+    state.modelProfiles.autoSwap = ['auto', 'ask', 'never'].includes(autoSwap) ? autoSwap : 'auto';
+    state.modelProfiles.coResidency = coRes;
+    if (state.modelProfiles.primary) state.modelProfiles.primary.lmStudioKey = state.lmstudioModel || state.modelProfiles.primary.lmStudioKey;
+    await saveModelProfiles();
+    resetModelState();
+    updateVisionCostLine();
+  }
   // Re-init the LLM connection without losing the thread (no reload).
   setProjectPathLabels();
   if (state.mode === 'home') renderHome();
@@ -5230,6 +5677,12 @@ async function removeLocalFolderByIndex(i) {
 // card says what it needs.
 function renderMcpsPane(body) {
   body.innerHTML = `
+    <h3 style="font-size:13px;margin:14px 0 4px;">CodeFox MCP server</h3>
+    <p class="settings-note" style="margin:0 0 8px;">A standalone stdio server other agents and editors can connect to. It exposes the read tools — Unity docs search, file view/grep, git status/diff/log, and read-only Unity commands. Mutating tools (file edits, Unity writes, ComfyUI generations) are listed but DENIED by default: they need approval in this app. A blocking approval queue is a planned follow-up.</p>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input id="mcp-server-cmd" readonly style="flex:1;font-family:monospace;font-size:11px;" value="Loading…" />
+      <button class="btn btn-secondary" onclick="copyMcpServerCommand()">Copy</button>
+    </div>
     <p class="settings-note">MCP servers are configured here for now. The assistant does not call MCP tools yet — that wiring is the next step, and these settings are stored so it can be added without reconfiguring.</p>
     <h3 style="font-size:13px;margin:14px 0 4px;">Recommended for game development</h3>
     <p class="settings-note" style="margin:0 0 8px;">Ten presets, each genuinely useful for making a Unity game. Adding one only adds the configuration — the app, token, addon, or plugin it needs is separate, and each card says what it needs. <b>Add</b> opens a guided setup prompt that walks through the steps and checks the token or the app for real; <b>Quick add</b> (on cards that need a token or folder) skips the prompt and uses the values typed on the card.</p>
@@ -5241,6 +5694,31 @@ function renderMcpsPane(body) {
   renderMcpPresets();
   renderMcpList();
   renderMcpForm();
+  fillMcpServerCommand();
+}
+
+// The stdio command for the CodeFox MCP server (v0.21.0). The
+// server path and data dir come from the main process; the project
+// is the current one, so the info is refetched when it changes.
+async function fillMcpServerCommand() {
+  const el = document.getElementById('mcp-server-cmd');
+  if (!el) return;
+  if (!state.mcpServerInfo || state.mcpServerInfo.projectPath !== state.projectPath) {
+    try { state.mcpServerInfo = await rb.mcp.serverInfo(state.projectPath); } catch { state.mcpServerInfo = null; }
+  }
+  el.value = state.mcpServerInfo ? state.mcpServerInfo.command : 'Could not work out the server command — restart the app and try again.';
+}
+function copyMcpServerCommand() {
+  const el = document.getElementById('mcp-server-cmd');
+  if (!el || !el.value) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(el.value)
+      .then(() => showToast('✓ MCP server command copied'))
+      .catch(() => showToast('⚠ Could not copy — select the text manually.'));
+  } else {
+    el.select();
+    showToast('Command selected — copy it with Ctrl+C.');
+  }
 }
 
 // Per-preset inline input state, keyed by preset id:

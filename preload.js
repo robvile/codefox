@@ -176,6 +176,9 @@ contextBridge.exposeInMainWorld('rb', {
     // when the server does not report them; the renderer then
     // estimates and never invents a number.
     onMeta: (cb) => ipcRenderer.on('llm:stream-meta', (_, meta) => cb(meta)),
+    // Vision (v0.21.0) — one non-streaming call with a fresh,
+    // minimal context: the vision prompt, the question, one image.
+    visionChat: (payload) => ipcRenderer.invoke('llm:visionChat', payload || {}),
     removeListeners: () => {
       ipcRenderer.removeAllListeners('llm:stream-chunk');
       ipcRenderer.removeAllListeners('llm:stream-done');
@@ -237,6 +240,19 @@ contextBridge.exposeInMainWorld('rb', {
   mcp: {
     checkToken: (payload) => ipcRenderer.invoke('mcp:checkToken', payload || {}),
     checkApp: (payload) => ipcRenderer.invoke('mcp:checkApp', payload || {}),
+    // The CodeFox MCP server (v0.21.0) — the stdio command for an
+    // external client, with the real server path and data dir.
+    serverInfo: (projectPath) => ipcRenderer.invoke('mcp:serverInfo', { projectPath: projectPath || '' }),
+  },
+  // Unity docs (v0.21.0) — the local ScriptReference index in app
+  // data. status is polled while a download runs; search is the
+  // read-only docs tool; dir is shown in Settings → MCPs so the MCP
+  // server command can name it exactly.
+  docs: {
+    status: () => ipcRenderer.invoke('docs:status'),
+    download: (version) => ipcRenderer.invoke('docs:download', { version: version || '' }),
+    search: (query, maxResults) => ipcRenderer.invoke('docs:search', { query: query || '', maxResults: maxResults || 5 }),
+    dir: () => ipcRenderer.invoke('docs:dir'),
   },
   comfyui: {
     status: (payload) => ipcRenderer.invoke('comfyui:status', payload || {}),

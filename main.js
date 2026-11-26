@@ -17,6 +17,8 @@ const { MCP_PRESETS } = require('./mcp-presets');
 const lmLoad = require('./lmstudio-load');
 const skillFiles = require('./skill-files');
 const ContextBudget = require('./context-budget');
+const DocsEngine = require('./docs-engine');
+const ModelProfiles = require('./model-profiles');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -283,6 +285,12 @@ async function initDB() {
   // to the model first) for the Rules budget in Settings.
   try { db.run('ALTER TABLE rulesets ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
   try { db.run('ALTER TABLE rulesets ADD COLUMN priority INTEGER NOT NULL DEFAULT 0'); } catch {}
+
+  // v0.21.0: record which model wrote each message, so a turn's
+  // answer can be attributed to the model that gave it (and a vision
+  // swap is visible in the history). Older databases gain the column
+  // with NULLs; the renderer fills it from here on.
+  try { db.run('ALTER TABLE messages ADD COLUMN model TEXT'); } catch {}
 
   // Default settings. A brand-new database defaults to LM Studio; an
   // existing database (which already has a project_path) keeps Ollama
@@ -1559,6 +1567,105 @@ ipcMain.handle('git:restore', async (_, payload) => {
     filesToDelete: p.filesToDelete || null,
     dryRun: !!p.dryRun,
   });
+});
+
+// ── Unity docs (v0.21.0) ────────────────────────────────────────
+// The docs index lives in app data, never in the repo. The download
+// streams the official Unity offline-docs zip (~470 MB for 6000.3)
+// and builds the BM25 index from it; the renderer polls docs:status
+// for progress while it runs.
+ipcMain.handle('docs:status', async () => {
+  return DocsEngine.status(app.getPath('userData'));
+});
+ipcMain.handle('docs:download', async (_, payload) => {
+  const p = payload || {};
+  return DocsEngine.downloadDocs(app.getPath('userData'), p.version || '');
+});
+ipcMain.handle('docs:search', async (_, payload) => {
+  const p = payload || {};
+  return DocsEngine.searchDocs(app.getPath('userData'), p.query || '', p.maxResults);
+});
+ipcMain.handle('docs:dir', async () => {
+  return { dir: DocsEngine.docsDir(app.getPath('userData')) };
+});
+
+// ── Vision (v0.21.0) ─────────────────────────────────────────────
+// One non-streaming vision call with a fresh, minimal context: the
+// vision system prompt, the question, and one image read from the
+// project. The image must be a project file (never an arbitrary
+// path), at most 10 MB. The reply is capped at 600 tokens — the
+// coder gets the findings as text, never the pixels.
+const VISION_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']);
+const VISION_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+ipcMain.handle('llm:visionChat', async (_, payload) => {
+  const p = payload || {};
+  const cfg = resolveLlmConfig(p);
+  if (cfg.provider !== 'lmstudio') return { ok: false, error: 'Vision is only supported for LM Studio.' };
+  const modelId = String(p.model || '').trim();
+  if (!modelId) return { ok: false, error: 'No vision model selected — pick one in Settings → Model → Vision model.' };
+  const projectPath = p.projectPath || readSetting('project_path', '');
+  const full = fileTools.resolveInProject(projectPath, String(p.image || ''));
+  if (!full) return { ok: false, error: 'The image must be a file inside the project folder: ' + (p.image || '(empty)') };
+  const ext = path.extname(full).toLowerCase();
+  if (!VISION_IMAGE_EXTS.has(ext)) return { ok: false, error: 'Vision needs an image file (png, jpg, webp, gif, bmp): ' + (p.image || '') };
+  let buf;
+  try {
+    const stat = fs.statSync(full);
+    if (!stat.isFile()) return { ok: false, error: 'Not a file: ' + (p.image || '') };
+    if (stat.size > VISION_IMAGE_MAX_BYTES) return { ok: false, error: 'Image is too large for a vision call (' + Math.round(stat.size / 1024 / 1024) + ' MB, max 10 MB): ' + (p.image || '') };
+    buf = fs.readFileSync(full);
+  } catch (e) {
+    return { ok: false, error: 'Could not read the image: ' + String(e && e.message || e) };
+  }
+  const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : ext === '.bmp' ? 'image/bmp' : 'image/jpeg';
+  let res;
+  try {
+    res = await fetchJson(lmStudioChatUrl(cfg.url), {
+      method: 'POST',
+      headers: lmStudioHeaders(cfg.apiKey),
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          { role: 'system', content: ModelProfiles.visionSystemPrompt() },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: String(p.question || 'Describe what you see.') },
+              { type: 'image_url', image_url: { url: 'data:' + mime + ';base64,' + buf.toString('base64') } },
+            ],
+          },
+        ],
+        temperature: 0.2,
+        max_tokens: 600,
+        stream: false,
+      }),
+    }, 120000);
+  } catch (e) {
+    return { ok: false, model: modelId, error: lmLoad.lmStudioConnectionError(normalizeLmStudioRoot(cfg.url), e).message };
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    return { ok: false, model: modelId, error: 'LM Studio returned HTTP ' + res.status + (body ? ': ' + body.slice(0, 500) : '') };
+  }
+  let data;
+  try { data = await res.json(); } catch (e) { return { ok: false, model: modelId, error: 'Vision reply was not JSON: ' + String(e && e.message || e) }; }
+  const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+  return { ok: true, model: modelId, text: String(text) };
+});
+
+// ── MCP server info (v0.21.0) ────────────────────────────────────
+// The server script runs under the user's own node, not Electron, so
+// in the packaged app it must come from app-unpacked (asarUnpack in
+// package.json). In dev it is the plain file next to main.js.
+ipcMain.handle('mcp:serverInfo', async (_, payload) => {
+  const p = payload || {};
+  const serverPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app-unpacked', 'mcp-server', 'server.js')
+    : path.join(__dirname, 'mcp-server', 'server.js');
+  const dataDir = app.getPath('userData');
+  const projectPath = p.projectPath || readSetting('project_path', '');
+  const command = 'node "' + serverPath + '" --project "' + projectPath + '" --data-dir "' + dataDir + '"';
+  return { serverPath, dataDir, projectPath, command };
 });
 
 // Copies the bundled companion script into the project's Assets/Editor
