@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'context-budget.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'log-triage.js', 'context-budget.js', 'turn-ledger.js', 'skill-files.js', 'eval/eval-tasks.js', 'eval/eval-mode.js', 'scripts/eval-runner.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.19.0.
+// 2. package.json version is 0.20.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.19.0', pkg.version === '0.19.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.19.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.19.0 — Local'));
+check('package.json version is 0.20.0', pkg.version === '0.20.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.20.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.20.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.15.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.15.0') && bridgeCs.includes('BridgeVersion = "0.15.0"'));
-check('embedded bridge has the 0.15.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.15.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.15.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.15.0');
+check('bridge .cs has the 0.16.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.16.0') && bridgeCs.includes('BridgeVersion = "0.16.0"'));
+check('embedded bridge has the 0.16.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.16.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.16.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.16.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.15.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.15.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.15.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.16.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.16.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.16.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2917,15 +2917,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.15.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
-  bridgeCs.includes('// CodeFoxBridge version: 0.15.0')
-  && bridgeCs.includes('BridgeVersion = "0.15.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.15.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.15.0')
+check('bridge version pins are 0.16.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
+  bridgeCs.includes('// CodeFoxBridge version: 0.16.0')
+  && bridgeCs.includes('BridgeVersion = "0.16.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.16.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.16.0')
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.19.0')
+  && readme.includes('readConsole') && readme.includes('version-0.20.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3190,8 +3190,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge is now 0.15.0 (import profile in 0.17.0)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.15.0';"));
+check('bridge is now 0.16.0 (import profile in 0.17.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.16.0';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3255,7 +3255,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.19.0', readme.includes('version-0.19.0'));
+check('README badge reads 0.20.0', readme.includes('version-0.20.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3898,24 +3898,25 @@ if (promptSrc) {
 
   // Bridge: the import-profile handler is registered, confined,
   // and versioned.
-  check('bridge registers apply_import_profile, confined to Assets/Generated/, version 0.15.0',
+  check('bridge registers apply_import_profile, confined to Assets/Generated/, version 0.16.0',
     bridgeCs.includes('{ "apply_import_profile", (json, args) => ApplyImportProfileHandler.Handle(json, args) }')
     && bridgeCs.includes('TextureImporterType.Sprite') && bridgeCs.includes('SaveAndReimport')
     && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
-    && bridgeCs.includes('// CodeFoxBridge version: 0.15.0'));
+    && bridgeCs.includes('// CodeFoxBridge version: 0.16.0'));
 
-  // Version pins and packaging for 0.19.0.
+  // Version pins and packaging for 0.20.0.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  check('package.json is 0.19.0 and build.files includes the three split modules + context-budget.js',
-    pkg.version === '0.19.0'
+  check('package.json is 0.20.0 and build.files includes the three split modules + context-budget.js',
+    pkg.version === '0.20.0'
     && pkg.build.files.includes('comfyui-client.js')
     && pkg.build.files.includes('comfyui-workflows.js')
     && pkg.build.files.includes('comfyui-scan.js')
-    && pkg.build.files.includes('context-budget.js'));
-  check('index.html footer, README badge, and CHANGELOG have the 0.19.0 entry',
-    indexHtml.includes('CodeFox 0.19.0 — Local · No account needed')
-    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.19.0-blue')
-    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.19.0 — 2026-11-26'));
+    && pkg.build.files.includes('context-budget.js')
+    && pkg.build.files.includes('turn-ledger.js'));
+  check('index.html footer, README badge, and CHANGELOG have the 0.20.0 entry',
+    indexHtml.includes('CodeFox 0.20.0 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.20.0-blue')
+    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.20.0 — 2026-11-26'));
 }
 
 // 42. v0.18.0 — the eval harness: YAML tasks, programmatic
@@ -4300,6 +4301,155 @@ check('context-budget wiring: meter markup + module script in index.html, module
   && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('id="ctx-seg-history"')
   && pkg.build.files.includes('context-budget.js')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.19.0 — 2026-11-26'));
+
+// 44. v0.20.0 — Undo + diffs: prefab edits as snapshot-backed
+// file transactions, set_property on a prefab object, the
+// per-turn ledger with the Undo-agent-turn button, and the diffs
+// in the approval bar. Bridge 0.15.0 -> 0.16.0.
+const TL = require('../turn-ledger');
+check('turn-ledger: createTurnLedger starts empty',
+  (() => {
+    const l = TL.createTurnLedger('turn-abc');
+    return l.turnId === 'turn-abc' && l.snapshots.length === 0 && l.createdAssets.length === 0
+      && l.deleteSnapshots.length === 0 && l.prefabEdits.length === 0 && l.sceneWrites === false
+      && TL.ledgerHasWork(l) === false;
+  })());
+check('turn-ledger: isSnapshotRelPath accepts the bridge shape, refuses escapes',
+  TL.isSnapshotRelPath('.bridge/snapshots/turn-abc/Assets_Prefabs_X.prefab')
+  && !TL.isSnapshotRelPath('.bridge/snapshots/../evil.prefab')
+  && !TL.isSnapshotRelPath('Assets/Prefabs/X.prefab')
+  && !TL.isSnapshotRelPath('.bridge/inbox/turn-abc/x.json')
+  && !TL.isSnapshotRelPath(''));
+check('turn-ledger: addSnapshotToLedger records the bridge snapshot, dedupes, refuses a bad path',
+  (() => {
+    const l = TL.createTurnLedger('t1');
+    TL.addSnapshotToLedger(l, { asset: 'Assets/Prefabs/X.prefab', snapshot: '.bridge/snapshots/t1/Assets_Prefabs_X.prefab', hash: 'aa', kind: 'modifyPrefab' });
+    TL.addSnapshotToLedger(l, { asset: 'Assets/Prefabs/X.prefab', snapshot: '.bridge/snapshots/t1/Assets_Prefabs_X.prefab', hash: 'aa', kind: 'modifyPrefab' });
+    TL.addSnapshotToLedger(l, { asset: 'Assets/Prefabs/Y.prefab', snapshot: 'Assets/Prefabs/Y.prefab', hash: 'bb', kind: 'modifyPrefab' });
+    return l.snapshots.length === 1 && l.snapshots[0].asset === 'Assets/Prefabs/X.prefab' && l.snapshots[0].hash === 'aa'
+      && TL.ledgerHasWork(l) === true;
+  })());
+check('turn-ledger: created assets, delete snapshots, prefab edits dedupe; scene writes flag',
+  (() => {
+    const l = TL.createTurnLedger('t2');
+    TL.addCreatedAssetToLedger(l, 'Assets/Prefabs/New.prefab');
+    TL.addCreatedAssetToLedger(l, 'Assets/Prefabs/New.prefab');
+    TL.addDeleteSnapshotToLedger(l, 'snap-1');
+    TL.addDeleteSnapshotToLedger(l, 'snap-1');
+    TL.addPrefabEditToLedger(l, 'Assets/Prefabs/X.prefab', 'add child A');
+    TL.addPrefabEditToLedger(l, 'Assets/Prefabs/X.prefab', 'add child A; set Image.color');
+    TL.noteSceneWrites(l);
+    return l.createdAssets.length === 1 && l.deleteSnapshots.length === 1
+      && l.prefabEdits.length === 1 && l.prefabEdits[0].summary === 'add child A; set Image.color'
+      && l.sceneWrites === true && TL.ledgerHasWork(l) === true;
+  })());
+check('turn-ledger: ledgerSummaryLines lists prefab edits, created assets, delete snapshots, scene writes',
+  (() => {
+    const l = TL.createTurnLedger('t3');
+    TL.addPrefabEditToLedger(l, 'Assets/Prefabs/X.prefab', 'remove Image');
+    TL.addCreatedAssetToLedger(l, 'Assets/Materials/M.mat');
+    TL.addDeleteSnapshotToLedger(l, 'snap-2');
+    TL.noteSceneWrites(l);
+    const lines = TL.ledgerSummaryLines(l);
+    return lines.length === 4 && /Prefab Assets\/Prefabs\/X\.prefab — remove Image/.test(lines[0])
+      && /1 created asset/.test(lines[1]) && /1 deleted asset snapshot/.test(lines[2])
+      && /Scene changes \(one Ctrl\+Z in Unity\)/.test(lines[3]);
+  })());
+check('turn-ledger: describeLedgerForRevert names every revert step, and the scene-plan refusal',
+  (() => {
+    const l = TL.createTurnLedger('t4');
+    TL.addSnapshotToLedger(l, { asset: 'Assets/Prefabs/X.prefab', snapshot: '.bridge/snapshots/t4/Assets_Prefabs_X.prefab', hash: 'aa', kind: 'modifyPrefab' });
+    TL.addCreatedAssetToLedger(l, 'Assets/Prefabs/New.prefab');
+    const withScene = TL.describeLedgerForRevert(l, { canRevert: true });
+    const refused = TL.describeLedgerForRevert(l, { canRevert: false, reason: 'the undo stack moved on' });
+    const empty = TL.describeLedgerForRevert(TL.createTurnLedger('t5'), null);
+    return /restore Assets\/Prefabs\/X\.prefab/.test(withScene) && /delete Assets\/Prefabs\/New\.prefab/.test(withScene)
+      && /undo the scene changes as one step/.test(withScene)
+      && /cannot undo as one step \(the undo stack moved on\)/.test(refused)
+      && /Nothing to undo/.test(empty);
+  })());
+check('bridge 0.16.0: PrefabTransactions + restore_prefab + revert_turn registered',
+  bridgeCs.includes('private static class PrefabTransactions')
+  && bridgeCs.includes('{ "restore_prefab", (json, args) => PrefabTransactions.RestoreSnapshotAction(json, args) }')
+  && bridgeCs.includes('{ "revert_turn", (json, args) => MutationScope.RevertTurn(json, args) }')
+  && bridgeCs.includes('public static BridgeResult RevertTurn(string json, Dictionary<string, object> args)')
+  && bridgeCs.includes('public static BridgeResult Transact(string assetPath, Dictionary<string, object> args, Func<GameObject, List<string>, EditOutcome> edit)'));
+check('bridge 0.16.0: transaction snapshots before touching, saves, always unloads in finally',
+  bridgeCs.includes('SnapshotAsset(assetPath, turnId, out snapError)')
+  && bridgeCs.includes('PrefabUtility.SaveAsPrefabAsset(contents, assetPath)')
+  && bridgeCs.includes('PrefabUtility.UnloadPrefabContents(contents)')
+  && bridgeCs.includes('SessionState.SetString(ActiveEditKey, "")')
+  && bridgeCs.includes('public static void ClearStaleEdit()')
+  && bridgeCs.includes('PrefabUtility.IsPartOfPrefabContents(go)'));
+check('bridge 0.16.0: transaction guards — Prefab Mode, read-only, expectedHash, snapshot-path validation',
+  bridgeCs.includes('IsPrefabStageOpen(assetPath)')
+  && bridgeCs.includes('AssetDatabase.IsOpenForEdit(assetPath)')
+  && bridgeCs.includes("changed since the preview — run the preview again.")
+  && bridgeCs.includes("Refused snapshot path '")
+  && bridgeCs.includes('public static bool IsSnapshotRelPath(string rel)')
+  && bridgeCs.includes('ComputeAssetHash(assetPath)'));
+check('bridge 0.16.0: fresh undo group per turn, and the revert refuses when the stack moved on',
+  bridgeCs.includes('Undo.IncrementCurrentGroup();\n            int group = Undo.GetCurrentGroup();')
+  && bridgeCs.includes('SessionState.SetString(GroupNameKey, "Agent: " + label)')
+  && bridgeCs.includes('Undo.RevertAllInCurrentGroup()')
+  && bridgeCs.includes('The undo stack moved on since that turn')
+  && !/int group = Undo\.GetCurrentGroup\(\);\s*\n\s*if \(group < 0\)/.test(bridgeCs));
+check('bridge 0.16.0: modifyPrefab runs through the transaction with ops batching + a summary',
+  bridgeCs.includes('PrefabTransactions.Transact(assetPath, cmd, (contents, summary) =>')
+  && bridgeCs.includes('JArr(cmd, "ops")')
+  && bridgeCs.includes('ApplyPrefabEdits(contents, op, summary)')
+  && bridgeCs.includes('private static string ApplyPrefabEdits(GameObject root, Dictionary<string, object> cmd, List<string> summary)')
+  && bridgeCs.includes('summary.Add("add child \'')
+  && bridgeCs.includes('summary.Add("remove "')
+  && bridgeCs.includes('summary.Add("set "'));
+check('bridge 0.16.0: set_property prefab scope — staged the same way, applied without Undo, scene refs refused',
+  bridgeCs.includes('string prefab = JStr(args, "prefab", "");')
+  && bridgeCs.includes('if (!string.IsNullOrEmpty(prefab)) return HandlePrefab(args, prefab, path, dryRun);')
+  && bridgeCs.includes('private static BridgeResult HandlePrefab(Dictionary<string, object> args, string prefab, string path, bool dryRun)')
+  && bridgeCs.includes('so.ApplyModifiedPropertiesWithoutUndo()')
+  && bridgeCs.includes('private static void StageChanges(SerializedObject so, List<object> rawChanges, string resolvedComponent, bool prefabScope, out List<StagedChange> staged, out List<string> problems)')
+  && bridgeCs.includes("a prefab cannot reference a scene object")
+  && bridgeCs.includes('public static bool TryResolveOn(GameObject go, string componentName, int index, out Component component, out string error)'));
+check('bridge 0.16.0: no Newtonsoft anywhere, hand-rolled JSON only',
+  !/Newtonsoft/.test(bridgeCs) && !/JsonConvert/.test(bridgeCs) && !/JObject/.test(bridgeCs) && !/JArray/.test(bridgeCs));
+check('app 0.20.0: modifyPrefab joins the dry-run approval flow with the hash guard; prefab set_property skips scene-path rewriting',
+  appJs.includes("const SCENE_WRITE_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'set_parent', 'delete_gameobject', 'modifyPrefab'];")
+  && appJs.includes("if (SCENE_PATH_ACTIONS.indexOf(label) !== -1 && !action.command.prefab)")
+  && appJs.includes("if ((label === 'modifyPrefab' || (label === 'set_property' && action.command.prefab)) && preview.data && preview.data.assetHash)")
+  && appJs.includes('realCmd.expectedHash = preview.data.assetHash;'));
+check('app 0.20.0: the turn ledger is recorded on success and cleared when a new turn starts',
+  appJs.includes('recordTurnLedgerEntry(label, action.command, res, deleteSnapshot)')
+  && appJs.includes('function recordTurnLedgerEntry(label, command, res, deleteSnapshot)')
+  && appJs.includes('TL.addSnapshotToLedger(ledger, {')
+  && appJs.includes('TL.addCreatedAssetToLedger(ledger, res.path)')
+  && appJs.includes('state.lastTurnLedger = null;')
+  && appJs.includes('lastTurnLedger: null,'));
+check('app 0.20.0: Agent Turn sidebar section + undo flow + turn-revert bar',
+  appJs.includes("renderAgentTurnSection()")
+  && appJs.includes("document.getElementById('agent-turn-list')")
+  && appJs.includes('async function undoAgentTurn()')
+  && appJs.includes("command: { action: 'revert_turn', turnId: ledger.turnId, dryRun: true }")
+  && appJs.includes("command: { action: 'restore_prefab', snapshot: snap.snapshot, asset: snap.asset, expectedHash: snap.hash || '' }")
+  && appJs.includes('async function revertTurnLedger(ledger, scenePlan)')
+  && appJs.includes("function showTurnRevertBar(plan, cb)")
+  && appJs.includes("bar.id = 'turn-revert-bar';"));
+check('app 0.20.0: approval-bar labels show the prefab diff and the prefab scope',
+  appJs.includes("if (label === 'modifyPrefab') {")
+  && appJs.includes("const summary = (d.summary || []).slice(0, 3);")
+  && appJs.includes("const where = command.prefab ? ((command.prefab || '?') + ' / ' + (command.path || '?')) : (command.path || '?');")
+  && appJs.includes("if (label === 'modifyPrefab') return 'modifyPrefab ' + (command.path || '?') + ' (nothing changed).';"));
+check('app 0.20.0: prompt documents the prefab transaction, ops batching, and the turn undo',
+  appJs.includes('Several edits to one prefab go in one call as')
+  && appJs.includes('never try to undo a prefab edit yourself with Ctrl+Z')
+  && appJs.includes('pass \\"prefab\\": \\"Assets/Prefabs/….prefab\\" to set a property on an object inside a prefab asset instead')
+  && appJs.includes('Scene and prefab writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject, modifyPrefab) are previewed'));
+check('v0.20.0 wiring: turn-ledger script + Agent Turn section in index.html, module in build.files, docs',
+  fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('<script src="turn-ledger.js"></script>')
+  && fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('id="agent-turn-list"')
+  && pkg.build.files.includes('turn-ledger.js')
+  && readme.includes('Undo agent turn')
+  && readme.includes('modifyPrefab')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.20.0 — 2026-11-26'));
 
 (async () => {
   // v0.14.0 runner: runUnityCommand against an injected fs and

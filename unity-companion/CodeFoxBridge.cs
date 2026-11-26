@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.15.0
+// CodeFoxBridge version: 0.16.0
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -208,6 +208,10 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
+    // 0.16.0 is the first bridge with prefab transactions
+    // (snapshot-backed prefab edits, restore_prefab, and the
+    // per-turn scene undo revert). 0.15.0 is the first bridge
+    // with the ComfyUI import profile (apply_import_profile).
     // 0.14.0 is the first bridge with the scene tools
     // (set_property, create_gameobject, add_component,
     // delete_gameobject, set_parent, list_hierarchy,
@@ -217,7 +221,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.15.0";
+    public const string BridgeVersion = "0.16.0";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -244,6 +248,9 @@ public static class CodeFoxBridge
     static CodeFoxBridge()
     {
         BridgeTransport.Initialize();
+        // A domain reload mid-prefab-edit leaves the loaded
+        // contents orphaned — unload the leaked scene, if any.
+        PrefabTransactions.ClearStaleEdit();
         // Unsubscribe first: with Enter Play Mode Options set to
         // skip the domain reload, the static constructor runs again
         // in the same domain, and a second subscription would poll
@@ -675,6 +682,8 @@ public static class CodeFoxBridge
                 { "createUICanvas", (json, args) => CreateUICanvas(json) },
                 { "createPrefab", (json, args) => CreatePrefab(json, args) },
                 { "modifyPrefab", (json, args) => ModifyPrefab(json, args) },
+                { "restore_prefab", (json, args) => PrefabTransactions.RestoreSnapshotAction(json, args) },
+                { "revert_turn", (json, args) => MutationScope.RevertTurn(json, args) },
                 { "deleteAsset", (json, args) => DeleteAsset(json, args) },
                 { "listComponentTypes", (json, args) => ListComponentTypes(json, args) },
                 { "describeComponent", (json, args) => DescribeComponent(json, args) },
@@ -2308,32 +2317,48 @@ public static class CodeFoxBridge
         }
     }
 
+    // Modify a prefab in place (v0.16.0: a snapshot-backed
+    // transaction — the file is snapshotted before the edit, so
+    // the whole turn can be undone from the sidebar; a dry run
+    // loads, stages, and unloads without snapshotting or
+    // saving). "ops" (v0.20.0) batches several edits to one
+    // prefab in a single transaction — one snapshot, one
+    // reimport — each op the same shape as the top-level call
+    // (addChildren / add / remove / set). The summary lines are
+    // real before/after facts from the staged edit, never
+    // invented: they are what the approval bar shows.
     private static BridgeResult ModifyPrefab(string json, Dictionary<string, object> args)
     {
         var cmd = args;
         if (cmd == null) return BridgeResult.Error("Command JSON must be an object.");
         string assetPath = JStr(cmd, "path", "");
         if (string.IsNullOrEmpty(assetPath)) return BridgeResult.Error("modifyPrefab needs a \"path\" to the prefab.");
-        if (AssetDatabase.LoadAssetAtPath<GameObject>(assetPath) == null)
-            return BridgeResult.Error("Prefab not found: '" + assetPath + "' — the file is not in this project.");
-        GameObject contents = PrefabUtility.LoadPrefabContents(assetPath);
-        if (contents == null) return BridgeResult.Error("Could not load the prefab at " + assetPath + ".");
-        try
+        bool dryRun = JBool(cmd, "dryRun", false);
+        return PrefabTransactions.Transact(assetPath, cmd, (contents, summary) =>
         {
-            string err = ApplyPrefabEdits(contents, cmd);
-            if (err != null) return BridgeResult.Error(err);
-            GameObject saved = PrefabUtility.SaveAsPrefabAsset(contents, assetPath);
-            if (saved == null) return BridgeResult.Error("Unity could not save the prefab at " + assetPath + ".");
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-            return BridgeResult.Ok("Prefab updated.", assetPath);
-        }
-        finally
-        {
-            // Unload without saving on the failure path, so a failed
-            // edit never leaves the prefab file half-changed.
-            PrefabUtility.UnloadPrefabContents(contents);
-        }
+            var data = new Dictionary<string, object>();
+            data["path"] = assetPath;
+            var ops = JArr(cmd, "ops");
+            if (ops != null)
+            {
+                foreach (var item in ops)
+                {
+                    var op = item as Dictionary<string, object>;
+                    if (op == null) return new PrefabTransactions.EditOutcome { Error = "Each \"ops\" entry must be an object like {\"addChildren\": [...]}." };
+                    string err = ApplyPrefabEdits(contents, op, summary);
+                    if (err != null) return new PrefabTransactions.EditOutcome { Error = err };
+                }
+            }
+            else
+            {
+                string err = ApplyPrefabEdits(contents, cmd, summary);
+                if (err != null) return new PrefabTransactions.EditOutcome { Error = err };
+            }
+            string message = summary.Count > 0
+                ? (dryRun ? "Preview: " : "") + "Prefab " + assetPath + ": " + string.Join("; ", summary.ToArray()) + (dryRun ? " (nothing changed yet)." : "")
+                : "Prefab updated.";
+            return new PrefabTransactions.EditOutcome { Message = message, Data = data };
+        });
     }
 
     // Delete one asset (v0.9.3) — the answer to "delete the prefab".
@@ -2366,8 +2391,13 @@ public static class CodeFoxBridge
     // grow a prefab in place (add the Viewport/Content children,
     // then add a ScrollRect that references them). Returns null on
     // success, or a plain error naming the missing prefab object,
-    // type, or property.
-    private static string ApplyPrefabEdits(GameObject root, Dictionary<string, object> cmd)
+    // type, or property. The summary (v0.20.0) gets one line per
+    // edit that actually happened — real facts from the staged
+    // edit, never invented — so the approval bar can show the
+    // diff before anything is saved. A line is only added after
+    // its edit succeeded; a failure returns before saving, so a
+    // half-built summary is never shown.
+    private static string ApplyPrefabEdits(GameObject root, Dictionary<string, object> cmd, List<string> summary)
     {
         // addChildren (v0.9.3): create new child GameObjects under
         // an existing object, from the same tree specs createPrefab
@@ -2398,6 +2428,7 @@ public static class CodeFoxBridge
                     childGO.transform.SetParent(parent.transform, false);
                     string err = BuildTree(childGO, childSpec, root);
                     if (err != null) return err;
+                    if (summary != null) summary.Add("add child '" + childName + "' under '" + (string.IsNullOrEmpty(objectPath) ? parent.name : objectPath) + "'");
                 }
             }
         }
@@ -2413,6 +2444,18 @@ public static class CodeFoxBridge
                 if (target == null) return "No object '" + objectPath + "' in the prefab.";
                 string err = AddComponents(target, JArr(entry, "components"), root);
                 if (err != null) return err;
+                if (summary != null)
+                {
+                    var addedNames = new List<string>();
+                    var compArr = JArr(entry, "components");
+                    if (compArr != null)
+                        foreach (var c in compArr)
+                        {
+                            var cObj = c as Dictionary<string, object>;
+                            if (cObj != null) addedNames.Add(JStr(cObj, "type", "?"));
+                        }
+                    summary.Add("add " + string.Join(", ", addedNames.ToArray()) + " to '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "'");
+                }
             }
         }
         var removes = JArr(cmd, "remove");
@@ -2453,6 +2496,7 @@ public static class CodeFoxBridge
                     if (comp is Transform) return "The Transform cannot be removed.";
                     UnityEngine.Object.DestroyImmediate(comp);
                 }
+                if (summary != null) summary.Add("remove " + string.Join(", ", typeNames.ToArray()) + " from '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "'");
             }
         }
         var sets = JArr(cmd, "set");
@@ -2477,6 +2521,12 @@ public static class CodeFoxBridge
                     {
                         string err;
                         if (!SetMember(comp, kv.Key, kv.Value, root, out err)) return err;
+                    }
+                    if (summary != null)
+                    {
+                        var propNames = new List<string>();
+                        foreach (var kv in props) propNames.Add(kv.Key);
+                        summary.Add("set " + type.Name + "." + string.Join(", ", propNames.ToArray()) + " on '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "'");
                     }
                 }
             }
@@ -2650,19 +2700,29 @@ public static class CodeFoxBridge
                     : matches.Count + " objects match '" + path + "'. Use a more specific path.";
                 return false;
             }
+            int index = (int)JNum(args, "componentIndex", 0);
+            return TryResolveOn(matches[0], componentName, index, out component, out error);
+        }
+
+        // Resolve a component on a GameObject the caller already
+        // has — the scene flow (via TryResolve) and the prefab
+        // flow (the object lives inside loaded prefab contents,
+        // not in any scene, so FindGameObjects cannot see it).
+        public static bool TryResolveOn(GameObject go, string componentName, int index, out Component component, out string error)
+        {
+            component = null;
             var candidates = new List<Component>();
-            foreach (Component c in matches[0].GetComponents<Component>())
+            foreach (Component c in go.GetComponents<Component>())
                 if (c != null && string.Equals(c.GetType().Name, componentName, StringComparison.OrdinalIgnoreCase))
                     candidates.Add(c);
             if (candidates.Count == 0)
             {
                 var available = new List<string>();
-                foreach (Component c in matches[0].GetComponents<Component>())
+                foreach (Component c in go.GetComponents<Component>())
                     if (c != null) available.Add(c.GetType().Name);
-                error = "No component '" + componentName + "' on '" + path + "'. Available: " + string.Join(", ", available.ToArray()) + ".";
+                error = "No component '" + componentName + "' on '" + GetPath(go.transform) + "'. Available: " + string.Join(", ", available.ToArray()) + ".";
                 return false;
             }
-            int index = (int)JNum(args, "componentIndex", 0);
             component = candidates[Mathf.Clamp(index, 0, candidates.Count - 1)];
             error = null;
             return true;
@@ -3768,6 +3828,7 @@ public static class CodeFoxBridge
     {
         private const string TurnIdKey = "CodeFox.Mutation.TurnId";
         private const string GroupKey = "CodeFox.Mutation.Group";
+        private const string GroupNameKey = "CodeFox.Mutation.GroupName";
         public const string PlayModeWarning = "Play Mode: these changes will be lost when Play Mode stops.";
 
         // Returns an error message when the call must not run, or
@@ -3788,11 +3849,18 @@ public static class CodeFoxBridge
             string label = JStr(args, "label", defaultLabel);
             if (!string.IsNullOrEmpty(turnId) && SessionState.GetString(TurnIdKey, "") == turnId)
                 return SessionState.GetInt(GroupKey, 0);
+            // A fresh group for this turn (v0.16.0): increment
+            // first, so the turn's group holds ONLY this turn's
+            // operations. Before this, the first write of a turn
+            // reused whatever group was current — which could
+            // already hold the user's own edits, and a turn
+            // revert would have undone those too.
+            Undo.IncrementCurrentGroup();
             int group = Undo.GetCurrentGroup();
-            if (group < 0) { Undo.IncrementCurrentGroup(); group = Undo.GetCurrentGroup(); }
             Undo.SetCurrentGroupName("Agent: " + label);
             SessionState.SetString(TurnIdKey, string.IsNullOrEmpty(turnId) ? Guid.NewGuid().ToString() : turnId);
             SessionState.SetInt(GroupKey, group);
+            SessionState.SetString(GroupNameKey, "Agent: " + label);
             return group;
         }
 
@@ -3801,6 +3869,317 @@ public static class CodeFoxBridge
             Undo.CollapseUndoOperations(undoGroup);
             if (!EditorApplication.isPlaying && scene.IsValid())
                 EditorSceneManager.MarkSceneDirty(scene);
+        }
+
+        // Revert one agent turn's scene changes as a unit
+        // (v0.16.0). The gate is the group index: the revert only
+        // runs while the turn's group is still the current one —
+        // if the user (or a later turn) recorded anything since,
+        // the current group moved on and the revert refuses
+        // instead of undoing someone else's work. The dry run
+        // reports canRevert so the app can show the plan before
+        // asking. A successful revert clears the stored turn, so
+        // the same turn cannot be reverted twice. Prefab edits
+        // are NOT undone here — they are file transactions, and
+        // the app restores their snapshots separately.
+        public static BridgeResult RevertTurn(string json, Dictionary<string, object> args)
+        {
+            string turnId = JStr(args, "turnId", "");
+            bool dryRun = JBool(args, "dryRun", false);
+            if (string.IsNullOrEmpty(turnId)) return BridgeResult.Error("revert_turn needs a \"turnId\".");
+            string storedTurn = SessionState.GetString(TurnIdKey, "");
+            if (storedTurn != turnId)
+                return BridgeResult.Error("No scene undo group for turn '" + turnId + "' — that turn made no scene changes, or it was already reverted.");
+            int group = SessionState.GetInt(GroupKey, -1);
+            int current = Undo.GetCurrentGroup();
+            var data = new Dictionary<string, object>();
+            data["turnId"] = turnId;
+            data["turnGroup"] = group;
+            data["currentGroup"] = current;
+            data["groupName"] = SessionState.GetString(GroupNameKey, "");
+            if (current != group)
+            {
+                data["canRevert"] = false;
+                data["reason"] = "The undo stack moved on since that turn (the turn's group is " + group + ", the current group is " + current + ") — use Ctrl+Z in Unity to undo step by step.";
+                return BridgeResult.Ok("That turn cannot be undone as one step — the undo stack moved on.", null, JsonWrite(data));
+            }
+            data["canRevert"] = true;
+            if (dryRun)
+                return BridgeResult.Ok("Turn " + turnId + " can be undone as one step (" + SessionState.GetString(GroupNameKey, "") + ").", null, JsonWrite(data));
+            Undo.RevertAllInCurrentGroup();
+            SessionState.SetString(TurnIdKey, "");
+            SessionState.SetInt(GroupKey, -1);
+            SessionState.SetString(GroupNameKey, "");
+            return BridgeResult.Ok("Undid the turn's scene changes as one step.", null, JsonWrite(data));
+        }
+    }
+
+    // ── Prefab transactions ──────────────────────────────────
+    // Prefab edits are file transactions, not undo operations:
+    // LoadPrefabContents loads into an isolated in-memory scene
+    // and nothing in the docs says Undo covers edits to those
+    // contents — once UnloadPrefabContents runs, the objects are
+    // destroyed and any undo entry pointing at them is dead. So
+    // a prefab edit is (1) snapshot the asset file (and .meta)
+    // under .bridge/snapshots/<turnId>/, (2) load, (3) edit,
+    // (4) save, (5) unload in a finally. Undo = copy the
+    // snapshot back and reimport. A dry run loads, stages, and
+    // unloads without snapshotting or saving. The app keeps the
+    // per-turn ledger — which snapshots belong to which turn —
+    // and asks for a restore by snapshot path; the bridge only
+    // ever copies files inside .bridge/snapshots/ back to the
+    // asset they came from. The bridge stays dependency-free —
+    // the hand-rolled JsonMini / JsonWrite path the rest of the
+    // bridge uses, no JSON package.
+    private static class PrefabTransactions
+    {
+        private const string SnapshotsDirName = "snapshots";
+        private const string ActiveEditKey = "CodeFox.PrefabEdit.Active";
+
+        public class EditOutcome
+        {
+            public string Error;
+            public string Message;
+            public Dictionary<string, object> Data;
+        }
+
+        // The file name a snapshot gets: the asset path with
+        // every separator flattened, so no asset path can ever
+        // escape the snapshot folder. Deterministic — the same
+        // asset in the same turn always maps to the same
+        // snapshot file.
+        public static string SnapshotFileName(string assetPath)
+        {
+            return assetPath.Replace('/', '_').Replace('\\', '_');
+        }
+
+        public static string SnapshotRelPath(string turnId, string assetPath)
+        {
+            return ".bridge/" + SnapshotsDirName + "/" + turnId + "/" + SnapshotFileName(assetPath);
+        }
+
+        private static string ProjectFullPath(string projectRelPath)
+        {
+            return Path.Combine(Path.GetDirectoryName(Application.dataPath), projectRelPath);
+        }
+
+        // SHA-256 hex of the file, or null when it cannot be
+        // read. The hash is the staleness guard: the preview's
+        // hash rides back on the real call, and the ledger's
+        // post-edit hash guards a later restore.
+        public static string ComputeAssetHash(string projectRelPath)
+        {
+            try
+            {
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                using (var stream = File.OpenRead(ProjectFullPath(projectRelPath)))
+                {
+                    byte[] hash = sha.ComputeHash(stream);
+                    var sb = new System.Text.StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return null; }
+        }
+
+        // A snapshot path the app hands back must be exactly the
+        // shape the bridge writes: .bridge/snapshots/<turnId>/
+        // <file> with no ".." segment and no absolute path —
+        // anything else is refused, never copied.
+        public static bool IsSnapshotRelPath(string rel)
+        {
+            if (string.IsNullOrEmpty(rel)) return false;
+            string n = rel.Replace('\\', '/');
+            if (!n.StartsWith(".bridge/" + SnapshotsDirName + "/", StringComparison.Ordinal)) return false;
+            if (n.IndexOf("..", StringComparison.Ordinal) >= 0) return false;
+            if (n.StartsWith("/", StringComparison.Ordinal)) return false;
+            return true;
+        }
+
+        // Copy the asset file (and its .meta, when one exists)
+        // into the turn's snapshot folder. Returns the relative
+        // snapshot path, or null with an error.
+        public static string SnapshotAsset(string assetPath, string turnId, out string error)
+        {
+            error = null;
+            string full = ProjectFullPath(assetPath);
+            if (!File.Exists(full)) { error = "Prefab file not found: '" + assetPath + "'."; return null; }
+            string rel = SnapshotRelPath(turnId, assetPath);
+            string dest = ProjectFullPath(rel);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                File.Copy(full, dest, true);
+                string meta = full + ".meta";
+                if (File.Exists(meta)) File.Copy(meta, dest + ".meta", true);
+                return rel;
+            }
+            catch (Exception e) { error = "Could not snapshot '" + assetPath + "': " + e.Message; return null; }
+        }
+
+        // Copy a snapshot back over its asset and reimport. The
+        // expectedHash guard (the ledger's post-edit hash) refuses
+        // when the file changed since the turn — restoring stale
+        // bytes over a newer edit would be worse than refusing.
+        public static BridgeResult RestoreSnapshotAction(string json, Dictionary<string, object> args)
+        {
+            string snapshot = JStr(args, "snapshot", "");
+            string asset = JStr(args, "asset", "");
+            if (string.IsNullOrEmpty(snapshot) || string.IsNullOrEmpty(asset))
+                return BridgeResult.Error("restore_prefab needs a \"snapshot\" (.bridge/snapshots/…) and an \"asset\" (Assets/…).");
+            if (!IsSnapshotRelPath(snapshot))
+                return BridgeResult.Error("Refused snapshot path '" + snapshot + "' — snapshots live under .bridge/snapshots/.");
+            if (!asset.StartsWith("Assets/", StringComparison.Ordinal))
+                return BridgeResult.Error("restore_prefab asset must start with Assets/ — got '" + asset + "'.");
+            string expectedHash = JStr(args, "expectedHash", "");
+            if (!string.IsNullOrEmpty(expectedHash))
+            {
+                string current = ComputeAssetHash(asset);
+                if (current != null && !string.Equals(current, expectedHash, StringComparison.OrdinalIgnoreCase))
+                    return BridgeResult.Error("'" + asset + "' changed since the turn — the snapshot is stale. Restore it by hand from " + snapshot + ".");
+            }
+            string src = ProjectFullPath(snapshot);
+            if (!File.Exists(src)) return BridgeResult.Error("Snapshot not found: '" + snapshot + "'.");
+            try
+            {
+                string dest = ProjectFullPath(asset);
+                File.Copy(src, dest, true);
+                string srcMeta = src + ".meta";
+                if (File.Exists(srcMeta)) File.Copy(srcMeta, dest + ".meta", true);
+            }
+            catch (Exception e) { return BridgeResult.Error("Could not restore '" + asset + "': " + e.Message); }
+            AssetDatabase.ImportAsset(asset, ImportAssetOptions.ForceUpdate);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+            return BridgeResult.Ok("Restored '" + asset + "' from its snapshot.", asset);
+        }
+
+        // Is this prefab open in Prefab Mode right now? Agent
+        // edits never run against a prefab the user has open —
+        // the user is looking at it, and the transaction would
+        // fight their edits.
+        public static bool IsPrefabStageOpen(string assetPath)
+        {
+            try
+            {
+                var stage = PrefabStageUtility.GetCurrentPrefabStage();
+                return stage != null && string.Equals(stage.assetPath, assetPath, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        // The one transaction every prefab edit runs through.
+        // Validates, snapshots (real calls only), loads the
+        // contents, runs the edit callback, saves (real calls
+        // only), and always unloads in a finally. The callback
+        // returns its own message and extra result data; the
+        // transaction adds the asset path, the dry-run flag, the
+        // snapshot path (real calls), and the file hash (before
+        // the edit for a dry run — the staleness guard the real
+        // call carries back; after the save for a real call —
+        // the hash the ledger records for a later restore).
+        public static BridgeResult Transact(string assetPath, Dictionary<string, object> args, Func<GameObject, List<string>, EditOutcome> edit)
+        {
+            if (string.IsNullOrEmpty(assetPath)) return BridgeResult.Error("A prefab path (Assets/…) is required.");
+            if (!assetPath.StartsWith("Assets/", StringComparison.Ordinal)) return BridgeResult.Error("Prefab path must start with Assets/ — got '" + assetPath + "'.");
+            if (!assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) return BridgeResult.Error("'" + assetPath + "' is not a .prefab file.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string turnId = JStr(args, "turnId", "");
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            if (IsPrefabStageOpen(assetPath))
+                return BridgeResult.Error("'" + assetPath + "' is open in Prefab Mode — close it first, or the agent's edit would fight yours.");
+            if (!dryRun)
+            {
+                try { if (!AssetDatabase.IsOpenForEdit(assetPath)) return BridgeResult.Error("'" + assetPath + "' is not writable (read-only or under version control without a checkout)."); }
+                catch { }
+                if (string.IsNullOrEmpty(turnId) || !BridgeTransport.IsSafeRequestId(turnId))
+                    return BridgeResult.Error("A prefab edit needs a safe turn id — the app always sends one.");
+            }
+            if (AssetDatabase.LoadAssetAtPath<GameObject>(assetPath) == null)
+                return BridgeResult.Error("Prefab not found: '" + assetPath + "' — the file is not in this project.");
+            string expectedHash = JStr(args, "expectedHash", "");
+            string hashBefore = ComputeAssetHash(assetPath);
+            if (!string.IsNullOrEmpty(expectedHash) && hashBefore != null && !string.Equals(hashBefore, expectedHash, StringComparison.OrdinalIgnoreCase))
+                return BridgeResult.Error("'" + assetPath + "' changed since the preview — run the preview again.");
+            string snapshotRel = null;
+            if (!dryRun)
+            {
+                string snapError;
+                snapshotRel = SnapshotAsset(assetPath, turnId, out snapError);
+                if (snapshotRel == null) return BridgeResult.Error(snapError);
+            }
+            GameObject contents = PrefabUtility.LoadPrefabContents(assetPath);
+            if (contents == null) return BridgeResult.Error("Could not load the prefab at " + assetPath + ".");
+            // The active-edit flag is how a domain reload mid-edit
+            // is found on startup: the flag survives the reload,
+            // the contents do not, and the startup check unloads
+            // the leaked scene.
+            SessionState.SetString(ActiveEditKey, assetPath);
+            try
+            {
+                var summary = new List<string>();
+                EditOutcome outcome = edit(contents, summary);
+                if (outcome == null) return BridgeResult.Error("The prefab edit produced no result.");
+                if (!string.IsNullOrEmpty(outcome.Error)) return BridgeResult.Error(outcome.Error);
+                if (!dryRun)
+                {
+                    GameObject saved = PrefabUtility.SaveAsPrefabAsset(contents, assetPath);
+                    if (saved == null) return BridgeResult.Error("Unity could not save the prefab at " + assetPath + ".");
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.Refresh();
+                }
+                var data = new Dictionary<string, object>();
+                if (outcome.Data != null)
+                    foreach (var kv in outcome.Data) data[kv.Key] = kv.Value;
+                data["prefab"] = assetPath;
+                data["dryRun"] = dryRun;
+                if (snapshotRel != null) data["snapshot"] = snapshotRel;
+                data["assetHash"] = dryRun ? hashBefore : ComputeAssetHash(assetPath);
+                if (summary.Count > 0) data["summary"] = summary;
+                string message = !string.IsNullOrEmpty(outcome.Message) ? outcome.Message : "Prefab updated.";
+                return BridgeResult.Ok(message, null, JsonWrite(data));
+            }
+            finally
+            {
+                PrefabUtility.UnloadPrefabContents(contents);
+                SessionState.SetString(ActiveEditKey, "");
+            }
+        }
+
+        // Startup: a domain reload mid-edit leaves the
+        // active-edit flag set and the loaded contents orphaned
+        // in an isolated scene. Find that scene's root by the
+        // prefab-contents marker and unload it, so the leak does
+        // not pile up across reloads. Best-effort — a failure
+        // here must never break bridge startup.
+        public static void ClearStaleEdit()
+        {
+            try
+            {
+                string asset = SessionState.GetString(ActiveEditKey, "");
+                if (string.IsNullOrEmpty(asset)) return;
+                SessionState.SetString(ActiveEditKey, "");
+                GameObject leakedRoot = null;
+                foreach (GameObject go in Resources.FindObjectsOfTypeAll<GameObject>())
+                {
+                    if (go.transform.parent != null) continue;
+                    if (!PrefabUtility.IsPartOfPrefabContents(go)) continue;
+                    leakedRoot = go;
+                    break;
+                }
+                if (leakedRoot != null)
+                {
+                    PrefabUtility.UnloadPrefabContents(leakedRoot);
+                    Debug.LogWarning("[CodeFox] Unloaded a prefab edit left behind by a domain reload (" + asset + ").");
+                }
+                else
+                {
+                    Debug.LogWarning("[CodeFox] A prefab edit of " + asset + " was interrupted by a domain reload; nothing was saved.");
+                }
+            }
+            catch (Exception e) { Debug.LogWarning("[CodeFox] Could not check for an interrupted prefab edit: " + e.Message); }
         }
     }
 
@@ -4077,6 +4456,13 @@ public static class CodeFoxBridge
             bool dryRun = JBool(args, "dryRun", false);
             string playError = MutationScope.PlayModeError(args, dryRun);
             if (playError != null) return BridgeResult.Error(playError);
+            // Prefab scope (v0.20.0): "prefab" names the asset and
+            // "path" is relative to its root. The edit runs as a
+            // snapshot-backed transaction — never through the
+            // scene's undo group, which cannot cover prefab
+            // contents.
+            string prefab = JStr(args, "prefab", "");
+            if (!string.IsNullOrEmpty(prefab)) return HandlePrefab(args, prefab, path, dryRun);
             List<GameObject> matches = ComponentLocator.FindGameObjects(path);
             if (matches.Count != 1)
                 return BridgeResult.Error(matches.Count == 0
@@ -4084,7 +4470,7 @@ public static class CodeFoxBridge
                     : matches.Count + " objects match '" + path + "'. Use a more specific path.");
             GameObject target = matches[0];
             if (EditorUtility.IsPersistent(target))
-                return BridgeResult.Error("'" + path + "' is an asset, not a scene object — set_property only works on scene objects. Use modifyPrefab for prefab assets.");
+                return BridgeResult.Error("'" + path + "' is an asset, not a scene object — set_property only works on scene objects. Use modifyPrefab for prefab assets, or set_property with \"prefab\": \"Assets/…prefab\" for one object inside a prefab.");
             string componentName = JStr(args, "component", "");
             if (string.IsNullOrEmpty(componentName)) return BridgeResult.Error("'component' is required.");
             UnityEngine.Object serializedTarget;
@@ -4106,43 +4492,11 @@ public static class CodeFoxBridge
                 return BridgeResult.Error("'changes' is required — a list of {\"property\": ..., \"value\": ...}.");
             if (rawChanges.Count > MaxChanges)
                 return BridgeResult.Error("At most " + MaxChanges + " changes per call — split the batch.");
-            // Stage everything in memory first. Nothing is applied
-            // until every change validates.
             var so = new SerializedObject(serializedTarget);
             so.Update();
-            var staged = new List<StagedChange>();
-            var problems = new List<string>();
-            foreach (object raw in rawChanges)
-            {
-                var change = raw as Dictionary<string, object>;
-                if (change == null) { problems.Add("Each change must be an object {\"property\": ..., \"value\": ...}."); continue; }
-                string property = JStr(change, "property", "");
-                if (string.IsNullOrEmpty(property)) { problems.Add("Each change needs a \"property\" name."); continue; }
-                SerializedProperty p = so.FindProperty(property);
-                if (p == null)
-                {
-                    problems.Add("Unknown property '" + property + "' on " + resolvedComponent + "." + SimilarPropertiesText(so, property));
-                    continue;
-                }
-                if (p.name == "m_Script") { problems.Add("'m_Script' cannot be set — it is the script reference itself."); continue; }
-                if (IsInternalProperty(p.name)) { problems.Add("'" + property + "' is an internal property and cannot be set."); continue; }
-                object before = ReadComponentValuesHandler.ReadProperty(p, 0);
-                object expected = null;
-                bool hasExpected = change.TryGetValue("expectedBefore", out expected) && expected != null;
-                if (hasExpected && !ExpectedMatches(p, before, expected))
-                {
-                    problems.Add("'" + property + "' changed since the preview (expected " + SceneHelpers.DescribeValue(expected) + ", now " + SceneHelpers.DescribeValue(before) + ") — run the preview again.");
-                    continue;
-                }
-                object value = change.ContainsKey("value") ? change["value"] : null;
-                string assignError;
-                if (!TryAssignProperty(p, value, out assignError))
-                {
-                    problems.Add(assignError);
-                    continue;
-                }
-                staged.Add(new StagedChange { property = property, before = before, value = value });
-            }
+            List<StagedChange> staged;
+            List<string> problems;
+            StageChanges(so, rawChanges, resolvedComponent, false, out staged, out problems);
             if (problems.Count > 0)
                 return BridgeResult.Error("Nothing was changed — " + problems.Count + " problem(s): " + string.Join(" ", problems.ToArray()));
             string oldPath = ComponentLocator.GetPath(target.transform);
@@ -4162,17 +4516,7 @@ public static class CodeFoxBridge
             // Read-back: confirm what actually landed, and catch a
             // silently rejected reference.
             var afterOut = DescribeStaged(so, staged);
-            var readbackProblems = new List<string>();
-            foreach (StagedChange s in staged)
-            {
-                SerializedProperty p = so.FindProperty(s.property);
-                if (p != null && p.propertyType == SerializedPropertyType.ObjectReference && s.value != null)
-                {
-                    object after = ReadComponentValuesHandler.ReadProperty(p, 0);
-                    if (after == null)
-                        readbackProblems.Add("'" + s.property + "': Unity rejected the reference — the assigned object is not compatible with this property.");
-                }
-            }
+            var readbackProblems = ReadbackProblems(so, staged);
             MutationScope.Commit(undoGroup, scene);
             var resultData = new Dictionary<string, object>();
             resultData["path"] = ComponentLocator.GetPath(target.transform);
@@ -4193,6 +4537,153 @@ public static class CodeFoxBridge
             if (readbackProblems.Count > 0)
                 message += " — " + string.Join(" ", readbackProblems.ToArray());
             return BridgeResult.Ok(message, null, JsonWrite(resultData));
+        }
+
+        // Prefab scope (v0.20.0): the same stage/validate/apply
+        // as the scene flow, but the target lives inside loaded
+        // prefab contents, the apply records nothing in Undo
+        // (Undo cannot cover prefab contents — the transaction's
+        // snapshot is the undo), and a rename emits a path change
+        // relative to the prefab root, so the app can rewrite
+        // later calls. A prefab cannot hold a scene reference,
+        // so one is refused instead of resolving to nothing.
+        private static BridgeResult HandlePrefab(Dictionary<string, object> args, string prefab, string path, bool dryRun)
+        {
+            return PrefabTransactions.Transact(prefab, args, (contents, summary) =>
+            {
+                GameObject target = FindChild(contents, path);
+                if (target == null) return new PrefabTransactions.EditOutcome { Error = "No object '" + path + "' in the prefab." };
+                string componentName = JStr(args, "component", "");
+                if (string.IsNullOrEmpty(componentName)) return new PrefabTransactions.EditOutcome { Error = "'component' is required." };
+                UnityEngine.Object serializedTarget;
+                string resolvedComponent;
+                if (string.Equals(componentName, "GameObject", StringComparison.OrdinalIgnoreCase))
+                {
+                    serializedTarget = target;
+                    resolvedComponent = "GameObject";
+                }
+                else
+                {
+                    if (!ComponentLocator.TryResolveOn(target, componentName, (int)JNum(args, "componentIndex", 0), out Component component, out string locateError))
+                        return new PrefabTransactions.EditOutcome { Error = locateError };
+                    serializedTarget = component;
+                    resolvedComponent = component.GetType().Name;
+                }
+                List<object> rawChanges = JArr(args, "changes");
+                if (rawChanges == null || rawChanges.Count == 0)
+                    return new PrefabTransactions.EditOutcome { Error = "'changes' is required — a list of {\"property\": ..., \"value\": ...}." };
+                if (rawChanges.Count > MaxChanges)
+                    return new PrefabTransactions.EditOutcome { Error = "At most " + MaxChanges + " changes per call — split the batch." };
+                var so = new SerializedObject(serializedTarget);
+                so.Update();
+                List<StagedChange> staged;
+                List<string> problems;
+                StageChanges(so, rawChanges, resolvedComponent, true, out staged, out problems);
+                if (problems.Count > 0)
+                    return new PrefabTransactions.EditOutcome { Error = "Nothing was changed — " + problems.Count + " problem(s): " + string.Join(" ", problems.ToArray()) };
+                string oldPath = ComponentLocator.GetPath(target.transform);
+                var data = new Dictionary<string, object>();
+                data["prefab"] = prefab;
+                data["path"] = oldPath;
+                data["component"] = resolvedComponent;
+                data["changes"] = DescribeStaged(so, staged);
+                if (dryRun)
+                {
+                    data["dryRun"] = true;
+                    return new PrefabTransactions.EditOutcome
+                    {
+                        Message = "Preview: " + DescribeChanges(oldPath, resolvedComponent, (List<object>)data["changes"]) + " (nothing changed yet).",
+                        Data = data,
+                    };
+                }
+                // ApplyModifiedPropertiesWithoutUndo: Undo cannot
+                // cover objects inside prefab contents, and the
+                // transaction's snapshot is the undo — recording
+                // Undo here would leave dead entries behind.
+                so.ApplyModifiedPropertiesWithoutUndo();
+                so.Update();
+                var afterOut = DescribeStaged(so, staged);
+                var readbackProblems = ReadbackProblems(so, staged);
+                data["changes"] = afterOut;
+                string newPath = ComponentLocator.GetPath(target.transform);
+                data["path"] = newPath;
+                if (EditorApplication.isPlaying) data["playModeWarning"] = MutationScope.PlayModeWarning;
+                var pathChanges = new List<object>();
+                if (newPath != oldPath)
+                {
+                    var pc = new Dictionary<string, object>();
+                    pc["from"] = oldPath;
+                    pc["to"] = newPath;
+                    pathChanges.Add(pc);
+                }
+                data["pathChanges"] = pathChanges;
+                string message = DescribeChanges(newPath, resolvedComponent, afterOut);
+                if (readbackProblems.Count > 0)
+                    message += " — " + string.Join(" ", readbackProblems.ToArray());
+                summary.Add(message);
+                return new PrefabTransactions.EditOutcome { Message = message, Data = data };
+            });
+        }
+
+        // Stage everything in memory first. Nothing is applied
+        // until every change validates — one typo fails the whole
+        // call. Shared by the scene flow and the prefab flow;
+        // prefabScope refuses scene-object references (a prefab
+        // cannot hold one) instead of resolving them.
+        private static void StageChanges(SerializedObject so, List<object> rawChanges, string resolvedComponent, bool prefabScope, out List<StagedChange> staged, out List<string> problems)
+        {
+            staged = new List<StagedChange>();
+            problems = new List<string>();
+            foreach (object raw in rawChanges)
+            {
+                var change = raw as Dictionary<string, object>;
+                if (change == null) { problems.Add("Each change must be an object {\"property\": ..., \"value\": ...}."); continue; }
+                string property = JStr(change, "property", "");
+                if (string.IsNullOrEmpty(property)) { problems.Add("Each change needs a \"property\" name."); continue; }
+                SerializedProperty p = so.FindProperty(property);
+                if (p == null)
+                {
+                    problems.Add("Unknown property '" + property + "' on " + resolvedComponent + "." + SimilarPropertiesText(so, property));
+                    continue;
+                }
+                if (p.name == "m_Script") { problems.Add("'m_Script' cannot be set — it is the script reference itself."); continue; }
+                if (IsInternalProperty(p.name)) { problems.Add("'" + property + "' is an internal property and cannot be set."); continue; }
+                object before = ReadComponentValuesHandler.ReadProperty(p, 0);
+                object expected = null;
+                bool hasExpected = change.TryGetValue("expectedBefore", out expected) && expected != null;
+                if (hasExpected && !ExpectedMatches(p, before, expected, prefabScope))
+                {
+                    problems.Add("'" + property + "' changed since the preview (expected " + SceneHelpers.DescribeValue(expected) + ", now " + SceneHelpers.DescribeValue(before) + ") — run the preview again.");
+                    continue;
+                }
+                object value = change.ContainsKey("value") ? change["value"] : null;
+                string assignError;
+                if (!TryAssignProperty(p, value, out assignError, prefabScope))
+                {
+                    problems.Add(assignError);
+                    continue;
+                }
+                staged.Add(new StagedChange { property = property, before = before, value = value });
+            }
+        }
+
+        // Read-back after the apply: confirm what actually
+        // landed, and catch a silently rejected reference.
+        private static List<string> ReadbackProblems(SerializedObject so, List<StagedChange> staged)
+        {
+            var readbackProblems = new List<string>();
+            foreach (StagedChange s in staged)
+            {
+                SerializedProperty p = so.FindProperty(s.property);
+                if (p != null && p.propertyType == SerializedPropertyType.ObjectReference && s.value != null)
+                {
+                    object after = ReadComponentValuesHandler.ReadProperty(p, 0);
+                    if (after == null)
+                        readbackProblems.Add("'" + s.property + "': Unity rejected the reference — the assigned object is not compatible with this property.");
+                }
+            }
+            return readbackProblems;
+        }
         }
 
         private static List<object> DescribeStaged(SerializedObject so, List<StagedChange> staged)
@@ -4339,8 +4830,16 @@ public static class CodeFoxBridge
 
         // Resolve an object reference value: an asset path
         // ("Assets/…", sub-assets included) or a scene object path.
-        // Null when nothing is found there.
+        // Null when nothing is found there. A prefab cannot hold
+        // a scene reference, so allowScene:false resolves asset
+        // paths only — a scene path in prefab scope is null, and
+        // the caller refuses it plainly instead of guessing.
         internal static UnityEngine.Object ResolveObjectReference(object value)
+        {
+            return ResolveObjectReference(value, true);
+        }
+
+        internal static UnityEngine.Object ResolveObjectReference(object value, bool allowScene)
         {
             if (!(value is string)) return null;
             string s = (string)value;
@@ -4357,6 +4856,7 @@ public static class CodeFoxBridge
                 }
                 return null;
             }
+            if (!allowScene) return null;
             List<GameObject> matches = ComponentLocator.FindGameObjects(s);
             if (matches.Count == 1) return matches[0];
             return null;
@@ -4368,8 +4868,10 @@ public static class CodeFoxBridge
         // references by resolving the expected path and comparing
         // objects. An expected value that cannot be resolved (an
         // object reference whose path no longer exists) cannot be
-        // checked — it does not block the apply.
-        private static bool ExpectedMatches(SerializedProperty p, object before, object expected)
+        // checked — it does not block the apply. In prefab scope
+        // a scene path never resolves (a prefab cannot hold one),
+        // so it cannot be checked either.
+        private static bool ExpectedMatches(SerializedProperty p, object before, object expected, bool prefabScope)
         {
             if (before == null || expected == null) return before == null && expected == null;
             if (before is double || before is long || before is int)
@@ -4389,7 +4891,7 @@ public static class CodeFoxBridge
                 }
                 if (p.propertyType == SerializedPropertyType.ObjectReference || p.propertyType == SerializedPropertyType.ExposedReference)
                 {
-                    UnityEngine.Object wanted = ResolveObjectReference(expected);
+                    UnityEngine.Object wanted = ResolveObjectReference(expected, !prefabScope);
                     if (wanted == null) return true;
                     return p.objectReferenceValue == wanted;
                 }
@@ -4456,7 +4958,7 @@ public static class CodeFoxBridge
             return false;
         }
 
-        private static bool TryAssignProperty(SerializedProperty p, object value, out string error)
+        private static bool TryAssignProperty(SerializedProperty p, object value, out string error, bool prefabScope)
         {
             error = null;
             switch (p.propertyType)
@@ -4562,6 +5064,11 @@ public static class CodeFoxBridge
                         if (value == null) { p.objectReferenceValue = null; return true; }
                         if (!(value is string)) { error = "'" + p.propertyPath + "' needs an asset path (\"Assets/…\") or a scene object path — got " + SceneHelpers.DescribeValue(value) + "."; return false; }
                         string s = (string)value;
+                        if (prefabScope && !s.StartsWith("Assets/", StringComparison.Ordinal))
+                        {
+                            error = "'" + p.propertyPath + "': a prefab cannot reference a scene object — use an asset path (\"Assets/…\").";
+                            return false;
+                        }
                         UnityEngine.Object obj = ResolveObjectReference(s);
                         if (obj == null) { error = "'" + p.propertyPath + "': nothing found at '" + s + "' — asset paths start with Assets/, scene paths start with the scene root name."; return false; }
                         p.objectReferenceValue = obj;

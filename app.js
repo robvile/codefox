@@ -51,6 +51,12 @@ let state = {
   // compaction only ever changes the working set sent to the model.
   // Created in init(); reset per thread in loadThread().
   contextBudget: null,
+  // v0.20.0 — the last agent turn's ledger (prefab snapshots,
+  // created assets, delete snapshots, scene writes), for the
+  // sidebar's "Undo agent turn" button. Cleared when a new
+  // agent turn starts — only the last turn can be reverted as
+  // a unit, because the undo stack has moved on by then.
+  lastTurnLedger: null,
   autoAccept: false,
   // Settings (v0.4.0) — loaded from the settings table in init().
   settingsSection: 'model',
@@ -634,6 +640,8 @@ async function refreshSidebar() {
   } catch (e) {
     renderGitBackupSection(null);
   }
+  // Undo agent turn (v0.20.0) — the last turn's ledger.
+  renderAgentTurnSection();
 }
 
 function renderSnapshotList(snapshots) {
@@ -1451,7 +1459,7 @@ const UNITY_CREATE_PREFAB_EXAMPLE = '```unity-command\n{"action": "createPrefab"
 // Scene path actions: their path-ish args are resolved against
 // the session's path changes (moved paths rewritten, deleted
 // paths answered locally) before anything runs.
-const SCENE_WRITE_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'set_parent', 'delete_gameobject'];
+const SCENE_WRITE_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'set_parent', 'delete_gameobject', 'modifyPrefab'];
 const SCENE_PATH_ACTIONS = ['set_property', 'create_gameobject', 'add_component', 'delete_gameobject', 'set_parent', 'read_component_values', 'click_ui', 'list_hierarchy'];
 const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block — or, for a small change to an existing file, a ```file str_replace block with the exact old text and the new text (view the file first if you are not sure of the exact text). Do not describe the fix instead of making it.';
 
@@ -2309,6 +2317,49 @@ function noteTurnSnapshot(snapshotId) {
   if (!loopState.turnSnapshotIds.includes(snapshotId)) loopState.turnSnapshotIds.push(snapshotId);
 }
 
+// v0.20.0 — record one successful Unity command in the turn's
+// ledger. The ledger lives on loopState for the turn and is
+// copied to state.lastTurnLedger, so the sidebar's "Undo agent
+// turn" button can revert it. Prefab snapshots are recorded
+// exactly as the bridge returned them (path validated against
+// .bridge/snapshots/ — a snapshot path that does not match is
+// ignored, never trusted). Created assets come from the result
+// path (createPrefab, create_material); file deletes from the
+// delete snapshot the app took before the command.
+function recordTurnLedgerEntry(label, command, res, deleteSnapshot) {
+  const TL = window.TurnLedger;
+  if (!TL || !loopState) return;
+  if (!loopState.turnLedger) loopState.turnLedger = TL.createTurnLedger(loopState.turnId);
+  const ledger = loopState.turnLedger;
+  const data = (res && res.data) || {};
+  if (data.snapshot && TL.isSnapshotRelPath(data.snapshot)) {
+    TL.addSnapshotToLedger(ledger, {
+      asset: data.prefab || command.prefab || command.path || '?',
+      snapshot: data.snapshot,
+      hash: data.assetHash || null,
+      kind: label,
+    });
+  }
+  if (data.prefab || (label === 'modifyPrefab' && command.path)) {
+    const asset = data.prefab || command.path;
+    const summary = (data.summary && data.summary.join) ? data.summary.join('; ') : (res.message || '');
+    TL.addPrefabEditToLedger(ledger, asset, summary);
+  }
+  if (label === 'createPrefab' && res.path) TL.addCreatedAssetToLedger(ledger, res.path);
+  if (label === 'create_material' && res.path) TL.addCreatedAssetToLedger(ledger, res.path);
+  if (deleteSnapshot && deleteSnapshot.snapshotId) TL.addDeleteSnapshotToLedger(ledger, deleteSnapshot.snapshotId);
+  // Scene writes (not prefab-scoped) share one undo group in
+  // Unity — the revert asks the bridge whether that group is
+  // still the current one. modifyPrefab is in
+  // SCENE_WRITE_ACTIONS for the dry-run flow, but it is a prefab
+  // write, not a scene write.
+  if (SCENE_WRITE_ACTIONS.indexOf(label) !== -1 && label !== 'modifyPrefab' && !command.prefab) {
+    TL.noteSceneWrites(ledger);
+  }
+  state.lastTurnLedger = ledger;
+  renderAgentTurnSection();
+}
+
 // Take the turn's one git backup (see git-backup.js). Stores the
 // restore point on loopState: { kind:'git', sha } plus the
 // untracked list at backup time, so the auto-restore can tell
@@ -2520,6 +2571,11 @@ async function runAgentTurn(systemPrompt, threadId) {
     // identical-first-error rule compares against it.
     lastCompileFirstError: null,
   };
+  // v0.20.0: a new agent turn clears the last turn's ledger —
+  // only the last turn can be undone as a unit, because the
+  // undo stack has moved on once a new turn writes.
+  state.lastTurnLedger = null;
+  renderAgentTurnSection();
   showLoopUI();
   try {
     while (loopState.round < loopState.maxRounds) {
@@ -2927,9 +2983,11 @@ async function processAgentActions(actions) {
       // a moved path is rewritten to its current location, a
       // deleted path is answered locally without hitting Unity.
       // Asset paths (createPrefab / modifyPrefab / deleteAsset)
-      // are not scene paths — they are never resolved.
+      // are not scene paths — they are never resolved. A
+      // set_property with a "prefab" is a prefab path too: its
+      // "path" is relative to the prefab root, not the scene.
       let rewrittenNote = '';
-      if (SCENE_PATH_ACTIONS.indexOf(label) !== -1) {
+      if (SCENE_PATH_ACTIONS.indexOf(label) !== -1 && !action.command.prefab) {
         const pathResolution = resolveSceneCommandPaths(action.command);
         if (pathResolution.dead) {
           await appendToolResult('Tool result — Unity command "' + label + '" not run: \'' + pathResolution.deadPath + '\' was deleted earlier in this session — it no longer exists.');
@@ -2971,8 +3029,10 @@ async function processAgentActions(actions) {
         // The real call: the identical command with dryRun:false,
         // plus the staleness guards from the preview — the
         // before-values for set_property, the lost-object list
-        // for delete_gameobject. If anything changed since the
-        // preview, the bridge refuses and the model re-previews.
+        // for delete_gameobject, the file hash for prefab edits
+        // (modifyPrefab, or set_property with a "prefab"). If
+        // anything changed since the preview, the bridge refuses
+        // and the model re-previews.
         const realCmd = Object.assign({}, action.command, { dryRun: false, turnId: loopState ? loopState.turnId : '', label: label });
         if (label === 'set_property' && preview.data && preview.data.changes) {
           realCmd.changes = (action.command.changes || []).map((ch, i) => {
@@ -2984,6 +3044,9 @@ async function processAgentActions(actions) {
         }
         if (label === 'delete_gameobject' && preview.data && preview.data.lostObjects) {
           realCmd.expectedLostObjects = preview.data.lostObjects.map(o => o.path);
+        }
+        if ((label === 'modifyPrefab' || (label === 'set_property' && action.command.prefab)) && preview.data && preview.data.assetHash) {
+          realCmd.expectedHash = preview.data.assetHash;
         }
         commandToRun = realCmd;
       }
@@ -3000,8 +3063,18 @@ async function processAgentActions(actions) {
             noteTurnChange([p]);
           } else if ((label === 'modifyPrefab' || label === 'deleteAsset') && action.command.path) {
             noteTurnChange([action.command.path]);
+          } else if (label === 'set_property' && action.command.prefab) {
+            noteTurnChange([action.command.prefab]);
           }
         }
+        // v0.20.0: the per-turn ledger — prefab snapshots,
+        // created assets, delete snapshots, and whether the turn
+        // wrote the scene — is what the sidebar's "Undo agent
+        // turn" button reverts. The bridge returns the snapshot
+        // path and the post-edit hash; the app records what the
+        // bridge returned, never invents a snapshot path of its
+        // own.
+        if (loopState) recordTurnLedgerEntry(label, action.command, res, deleteSnapshot);
         // v0.16.0: a move, rename or delete changes the paths
         // later calls use. Record them and rewrite the earlier
         // tool results in the context before appending this one.
@@ -3349,6 +3422,132 @@ function showGitRestoreBar(plan, cb) {
   document.body.appendChild(bar);
 }
 
+// ── Undo agent turn (v0.20.0) ────────────────────────────────
+// The last agent turn's ledger — prefab snapshots, created
+// assets, delete snapshots, scene writes — with one button that
+// reverts the whole turn as a unit. Prefab files go back to
+// their snapshots, created assets are deleted, file deletes are
+// restored from their snapshots, and the scene part asks the
+// bridge whether the turn's undo group is still the current one
+// (it refuses when the user has edited since — use Ctrl+Z then).
+function renderAgentTurnSection() {
+  const el = document.getElementById('agent-turn-list');
+  if (!el) return;
+  const TL = window.TurnLedger;
+  const ledger = state.lastTurnLedger;
+  if (!TL || !ledger || !TL.ledgerHasWork(ledger)) {
+    el.innerHTML = '<div style="padding:4px 14px;color:var(--text3);font-size:11px;">No agent turn to undo yet</div>';
+    return;
+  }
+  const lines = TL.ledgerSummaryLines(ledger);
+  el.innerHTML = '<div style="padding:4px 14px;font-size:11px;color:var(--text2);">'
+    + lines.map(l => '<div>' + escHtml(l) + '</div>').join('')
+    + '</div>'
+    + '<div style="display:flex;gap:6px;padding:2px 14px 6px;">'
+    + '<button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;" onclick="undoAgentTurn()">Undo agent turn</button>'
+    + '</div>';
+}
+
+async function undoAgentTurn() {
+  const TL = window.TurnLedger;
+  const ledger = state.lastTurnLedger;
+  if (!TL || !ledger || !TL.ledgerHasWork(ledger)) { showToast('Nothing to undo from the last agent turn'); return; }
+  // The scene part needs the bridge: ask whether the turn's undo
+  // group is still the current one. Unity closed (or the bridge
+  // missing) means no revert at all — the prefab restores need
+  // Unity too, so say so plainly instead of half-reverting.
+  let scenePlan = null;
+  if (ledger.sceneWrites) {
+    let r;
+    try { r = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'revert_turn', turnId: ledger.turnId, dryRun: true } }); }
+    catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    if (!r || !r.ok) {
+      showToast('Unity is not responding — open the project in Unity first, then undo the turn.');
+      return;
+    }
+    scenePlan = r.data || { canRevert: false, reason: 'Unity did not answer' };
+  }
+  showTurnRevertBar({ label: TL.describeLedgerForRevert(ledger, scenePlan) }, {
+    approved: async () => { await revertTurnLedger(ledger, scenePlan); },
+    declined: () => { addSystemMessage('Kept the last agent turn — nothing was reverted.'); },
+  });
+}
+
+async function revertTurnLedger(ledger, scenePlan) {
+  let restored = 0;
+  const failures = [];
+  // Prefab snapshots, newest first — a later edit to the same
+  // prefab restores first, then the earlier one.
+  for (const snap of (ledger.snapshots || []).slice().reverse()) {
+    let r;
+    try {
+      r = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'restore_prefab', snapshot: snap.snapshot, asset: snap.asset, expectedHash: snap.hash || '' } });
+    } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    if (r && r.ok) restored++;
+    else failures.push(snap.asset + ': ' + ((r && (r.error || r.message)) || 'restore failed'));
+  }
+  for (const asset of (ledger.createdAssets || [])) {
+    const r = await rb.fs.deleteFile(resolvePath(asset));
+    if (r && r.ok) { restored++; await rb.fs.deleteFile(resolvePath(asset) + '.meta'); }
+    else failures.push(asset + ': could not delete (' + ((r && r.error) || 'unknown error') + ')');
+  }
+  for (const id of (ledger.deleteSnapshots || [])) {
+    try { await confirmRevert(id, null); restored++; }
+    catch (e) { failures.push('snapshot ' + id + ': ' + String(e && e.message || e)); }
+  }
+  if (scenePlan && scenePlan.canRevert) {
+    let r;
+    try { r = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'revert_turn', turnId: ledger.turnId, dryRun: false } }); }
+    catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    if (r && r.ok) restored++;
+    else failures.push('scene undo: ' + ((r && (r.error || r.message)) || 'failed'));
+  }
+  await rb.unity.refresh(state.projectPath);
+  state.lastTurnLedger = null;
+  renderAgentTurnSection();
+  refreshSidebar().catch(() => {});
+  addSystemMessage('Undid the last agent turn: ' + restored + ' item(s) restored'
+    + (failures.length ? ' — ' + failures.length + ' failed: ' + failures.join('; ') : '') + '.');
+}
+
+// The turn-revert approval bar: same shape as the scene approval
+// bar, with Revert / Keep buttons and a distinct id so the two
+// bars never collide.
+function showTurnRevertBar(plan, cb) {
+  const existing = document.getElementById('turn-revert-bar');
+  if (existing) existing.remove();
+  const callbacks = cb || {};
+  const bar = document.createElement('div');
+  bar.id = 'turn-revert-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:260px;right:280px;background:var(--bg2);border-top:1px solid var(--border2);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:50;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
+  const label = document.createElement('span');
+  label.style.cssText = 'color:var(--amber);font-size:13px;flex:1;';
+  label.textContent = plan.label || 'Undo the last agent turn?';
+  bar.appendChild(label);
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-danger';
+  confirmBtn.textContent = 'Revert turn';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'btn btn-secondary';
+  dismissBtn.textContent = 'Keep';
+  let decided = false;
+  confirmBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.approved) callbacks.approved();
+  };
+  dismissBtn.onclick = () => {
+    if (decided) return;
+    decided = true;
+    bar.remove();
+    if (callbacks.declined) callbacks.declined();
+  };
+  bar.appendChild(confirmBtn);
+  bar.appendChild(dismissBtn);
+  document.body.appendChild(bar);
+}
+
 // ── Scene path changes (v0.16.0) ────────────────────────────
 // After a move, rename or delete, paths change. Every structural
 // action returns pathChanges [{from, to}] (to null = deleted),
@@ -3454,7 +3653,15 @@ function scenePreviewLabel(label, command, data) {
   const d = data || {};
   if (label === 'set_property') {
     const changes = (d.changes || []).map(c => (c.property || '?') + ' ' + shortValue(c.before) + ' → ' + shortValue(c.after));
-    return 'Apply to ' + (command.path || '?') + ' / ' + (d.component || command.component || '?') + ': ' + (changes.join(', ') || 'no changes') + '?';
+    const where = command.prefab ? ((command.prefab || '?') + ' / ' + (command.path || '?')) : (command.path || '?');
+    return 'Apply to ' + where + ' / ' + (d.component || command.component || '?') + ': ' + (changes.join(', ') || 'no changes') + '?';
+  }
+  if (label === 'modifyPrefab') {
+    // The diff is the summary lines from the staged edit — real
+    // before/after facts, never invented. Cap at three lines so
+    // the bar stays readable.
+    const summary = (d.summary || []).slice(0, 3);
+    return 'Modify \'' + (command.path || '?') + '\'' + (summary.length ? ': ' + summary.join('; ') + ((d.summary || []).length > 3 ? '; …' : '') : '') + '?';
   }
   if (label === 'create_gameobject') {
     return 'Create \'' + (d.path || command.name || '?') + '\'' + (d.renamed ? ' (renamed)' : '') + ' with ' + ((d.components || []).length) + ' component(s)?';
@@ -3474,7 +3681,11 @@ function scenePreviewLabel(label, command, data) {
 
 // The tool-result line when the user declines a scene preview.
 function sceneDeclineText(label, command, data) {
-  if (label === 'set_property') return 'set_property on ' + (command.path || '?') + ' / ' + (command.component || '?') + ' (no changes made).';
+  if (label === 'set_property') {
+    const where = command.prefab ? ((command.prefab || '?') + ' / ' + (command.path || '?')) : (command.path || '?');
+    return 'set_property on ' + where + ' / ' + (command.component || '?') + ' (no changes made).';
+  }
+  if (label === 'modifyPrefab') return 'modifyPrefab ' + (command.path || '?') + ' (nothing changed).';
   if (label === 'create_gameobject') return 'create_gameobject \'' + (command.name || '?') + '\' (nothing created).';
   if (label === 'add_component') return 'add_component \'' + (command.type || '?') + '\' to ' + (command.path || '?') + ' (nothing added).';
   if (label === 'set_parent') return 'set_parent ' + (command.path || '?') + ' → ' + (command.newParent || '?') + ' (nothing moved).';
@@ -3629,7 +3840,7 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += 'Actions:\n';
       prompt += '- createPrefab — build a prefab from a GameObject tree. Example (an Image prefab): ' + UNITY_CREATE_PREFAB_EXAMPLE + '\n';
       prompt += '- TextMeshPro text works the same way, with type "TextMeshProUGUI": ```unity-command\n{"action": "createPrefab", "name": "TitleText", "root": {"name": "TitleText", "components": [{"type": "RectTransform", "props": {"sizeDelta": [400, 60]}}, {"type": "TextMeshProUGUI", "props": {"text": "Hello"}}]}}\n```\nThe TextMeshPro package must be in the project — if it is not, the bridge fails plainly and you say so instead of inventing another way.\n';
-      prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). One call can grow a prefab in place: edits run in order — addChildren, then add, then remove, then set — so an added component can reference children the same call created. Example — turn an Image prefab into a ScrollRect in one call: remove the Image, add a Viewport child (RectMask2D + Image) with a Content child under it, then add the ScrollRect pointing at them: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ImageContainer.prefab", "remove": [{"object": "", "components": ["Image"]}], "addChildren": [{"object": "", "children": [{"name": "Viewport", "components": [{"type": "RectTransform"}, {"type": "RectMask2D"}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}], "children": [{"name": "Content", "components": [{"type": "RectTransform"}]}]}]}], "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name. "remove" takes "component": "Image" (one name) or "components": ["Image", "TextMeshProUGUI"] (a list) — both work. Never recreate a whole prefab to change one: modify it in place.\n';
+      prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). One call can grow a prefab in place: edits run in order — addChildren, then add, then remove, then set — so an added component can reference children the same call created. Example — turn an Image prefab into a ScrollRect in one call: remove the Image, add a Viewport child (RectMask2D + Image) with a Content child under it, then add the ScrollRect pointing at them: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ImageContainer.prefab", "remove": [{"object": "", "components": ["Image"]}], "addChildren": [{"object": "", "children": [{"name": "Viewport", "components": [{"type": "RectTransform"}, {"type": "RectMask2D"}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}], "children": [{"name": "Content", "components": [{"type": "RectTransform"}]}]}]}], "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name. "remove" takes "component": "Image" (one name) or "components": ["Image", "TextMeshProUGUI"] (a list) — both work. Never recreate a whole prefab to change one: modify it in place. Several edits to one prefab go in one call as \"ops\": [{\"addChildren\": [...]}, {\"set\": [...]}] — one snapshot, one reimport, instead of one per step. Prefab edits are previewed and approved like scene writes, and the user can undo the whole turn afterwards from the sidebar — never try to undo a prefab edit yourself with Ctrl+Z, it does not work on saved prefab files.\n';
       prompt += '- createPrefab with a ScrollRect works the same way — the root references children declared in the same command, because the bridge builds the whole tree before setting any props: ```unity-command\n{"action": "createPrefab", "name": "ScrollPanel", "root": {"name": "ScrollPanel", "components": [{"type": "RectTransform", "props": {"sizeDelta": [200, 200]}}, {"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}], "children": [{"name": "Viewport", "components": [{"type": "RectTransform"}, {"type": "RectMask2D"}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}], "children": [{"name": "Content", "components": [{"type": "RectTransform"}]}]}]}}\n```\n';
       prompt += '- deleteAsset — delete one asset: ```unity-command\n{"action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab"}\n```\nThe path must start with Assets/ and must exist. CodeFox snapshots the file (and its .meta) before Unity deletes it, so the user can revert the delete.\n';
       prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
@@ -3640,7 +3851,7 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += '- read_component_values — read live state from a scene object: {"action": "read_component_values", "path": "Player", "component": "Rigidbody"} returns the Inspector-visible values; {"action": "read_component_values", "path": "Player"} lists the components and children instead. Add "members": ["linearVelocity", "position"] to read runtime values that are not serialized (a Rigidbody\'s velocity, a Transform\'s world position) — name them explicitly. The result is bounded (40 properties by default; ask for specific ones with "properties": ["m_Mass"] when you need more). A timed set_play_mode run destroys the scene objects when it exits, so you CANNOT read values after a timed run — either read the run\'s console report, or enter Play Mode without a duration, wait, read, then stop. The model can read state but cannot provide input — probing covers spawning, falling, AI and timers only (inject_input below closes that gap for keyboard and gamepad). On Unity 6 the Rigidbody member is "linearVelocity"; on older versions it is "velocity" — if a member is unknown the error lists similar names.\n';
       prompt += '- inject_input — play the game with scripted input: {"action": "inject_input", "steps": [{"key": "D", "action": "hold", "seconds": 1.5}, {"key": "Space", "action": "tap"}, {"wait": 0.5}]}. Keys are the new Input System Key names (Space, W, A, S, D, LeftShift, Enter); a tap holds for 3 frames, a hold for the seconds given. Gamepad steps use "gamepadButton": "South" (or North, East, West, Start, Select, shoulders) and "leftStick": [x, y]. At most 50 steps, 30 seconds total. The game must already be in Play Mode (enter it without a duration first) — input cannot be injected while the editor is in Edit Mode, and a project on the legacy input system only (UnityEngine.Input) cannot receive injected input at all: the action fails plainly and suggests opt-in hooks instead. The run checks first that input is actually landing (a key press that never registers means Unity is not focused or the device is disabled) and releases every key when it finishes, is cancelled, or Play Mode ends.\n';
       prompt += '- click_ui — click a UI Button while the game runs: {"action": "click_ui", "path": "Canvas/MainMenu/PlayButton"}.\n';
-      prompt += '- set_property — set Inspector values on a scene object: {"action": "set_property", "path": "Player", "component": "PlayerController", "changes": [{"property": "moveSpeed", "value": 8}]}. Property names are Unity\'s serialized names (Transform m_LocalPosition, Rigidbody m_Mass, your own scripts use the field name) — read them with read_component_values first, never guess. Values: numbers, strings, booleans, [x, y] / [x, y, z] vectors, euler degrees for rotations, "#RRGGBB" or [r, g, b, a] for colors, enum names ("Walk") or indexes, asset paths ("Assets/Sprites/hero.png") or scene paths for object references. One call can set up to 20 properties, all or nothing — one typo fails the whole call and nothing changes. Set a property on the GameObject itself with component "GameObject" (m_Name, m_IsActive, m_TagString, m_Layer) — renaming emits a path change, so later calls must use the new path. Scene objects only, never prefab assets — use modifyPrefab for those. Changes in Play Mode vanish when it stops: pass allowPlayMode: true to experiment anyway.\n';
+      prompt += '- set_property — set Inspector values on a scene object: {"action": "set_property", "path": "Player", "component": "PlayerController", "changes": [{"property": "moveSpeed", "value": 8}]}. Property names are Unity\'s serialized names (Transform m_LocalPosition, Rigidbody m_Mass, your own scripts use the field name) — read them with read_component_values first, never guess. Values: numbers, strings, booleans, [x, y] / [x, y, z] vectors, euler degrees for rotations, "#RRGGBB" or [r, g, b, a] for colors, enum names ("Walk") or indexes, asset paths ("Assets/Sprites/hero.png") or scene paths for object references. One call can set up to 20 properties, all or nothing — one typo fails the whole call and nothing changes. Set a property on the GameObject itself with component "GameObject" (m_Name, m_IsActive, m_TagString, m_Layer) — renaming emits a path change, so later calls must use the new path. Scene objects by default; pass \"prefab\": \"Assets/Prefabs/….prefab\" to set a property on an object inside a prefab asset instead (\"path\" is then relative to the prefab root, and a prefab cannot reference a scene object — use an asset path). Prefab edits are snapshotted, so the user can undo the whole turn afterwards. Changes in Play Mode vanish when it stops: pass allowPlayMode: true to experiment anyway.\n';
       prompt += '- create_gameobject — create a scene object: {"action": "create_gameobject", "name": "Boss", "parent": "Level/Enemies", "primitive": "Cube", "position": [0, 1, 0], "components": ["Rigidbody"]}. Names are made unique among siblings and the result tells you the final path — use that path, never guess it. Takes no property values: configure with set_property afterwards, in the same turn, so one Ctrl+Z reverts the whole thing.\n';
       prompt += '- add_component — add a component: {"action": "add_component", "path": "Player", "type": "Rigidbody"}. Types resolve through Unity\'s type list — a script you just wrote is not there until the project compiles, so run recompile_and_report_errors first. [RequireComponent] dependencies are added automatically and reported as alsoAdded.\n';
       prompt += '- delete_gameobject — delete a scene object and its subtree: {"action": "delete_gameobject", "path": "Level/Enemies/Boss"}. The preview lists everything lost (objects, components) and every other scene object that points at it (a Button\'s OnClick, a serialized field) — those show as "Missing" after the delete. Prefab-instance children cannot be deleted (delete the whole instance, edit the prefab, or disable it instead).\n';
@@ -3654,7 +3865,7 @@ function buildSystemPrompt(rulesets, skills) {
       prompt += 'Two patterns: (1) console-based test — a timed run, then read the report; (2) state probing — enter Play Mode WITHOUT a duration, wait, read values with read_component_values, then stop with {"action": "set_play_mode", "enabled": false}. To wait inside a turn, output a ```wait block with JSON {"seconds": 5} (at most 30 seconds — a bare number works too). It is just a sleep in the loop; no bridge call is involved.\n';
       prompt += 'Rule: stop Play Mode before finishing, unless the user asked to leave it running. Never edit code while the game is running — edits in Play Mode trigger recompiles that disrupt the run, so stop the game first, then touch code. Play Mode changes are lost when it stops.\n';
       prompt += '## Scene tools\n';
-      prompt += 'Scene writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject) are previewed by the app and approved by the user — output the command and carry on; the preview and approval happen without you, and a decline means the change did not happen. Every scene write of one turn shares one Ctrl+Z in Unity: create an object and configure it in the same turn and the whole thing reverts at once.\n';
+      prompt += 'Scene and prefab writes (set_property, create_gameobject, add_component, set_parent, delete_gameobject, modifyPrefab) are previewed by the app and approved by the user — output the command and carry on; the preview and approval happen without you, and a decline means the change did not happen. Every scene write of one turn shares one Ctrl+Z in Unity: create an object and configure it in the same turn and the whole thing reverts at once. Prefab edits are file transactions: the app snapshots the prefab before the edit, and the user can undo the whole agent turn afterwards from the sidebar (prefab files go back to their snapshots, scene changes undo as one Ctrl+Z).\n';
       prompt += 'Read before you write: read_component_values returns the exact serialized names set_property needs — view them first, never guess a property name. After a move, rename, or delete, paths change: every structural action returns pathChanges, and the app rewrites your queued calls and earlier tool results to the new paths. Always use the paths from the latest tool results — a path from an earlier result may be stale. A path that was deleted is answered directly ("was deleted earlier in this session") — do not re-try it.\n';
       prompt += '## Reading and editing files\n';
       prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
