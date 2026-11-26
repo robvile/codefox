@@ -1082,6 +1082,26 @@ function asksForChange(text) {
   const t = String(text || '').toLowerCase();
   return CHANGE_INTENT_WORDS.some(k => t.includes(k));
 }
+
+// Loop-done decision (v0.9.3) — pure function so the smoke test
+// can exercise it. The no-actions branch has three cases:
+//   'done'    — the previous round ran actions and they ALL
+//               succeeded: this text-only reply is the summary,
+//               not a refusal. End the loop without an enforcement
+//               followup (before this, the model re-ran the command
+//               and the prefab was created twice).
+//   'enforce' — one correction turn, as before: the user asked for
+//               a change and no action has run yet (or the last
+//               round failed).
+//   'stop'    — already enforced once, or the user never asked for
+//               a change: end, with the plain message when the
+//               change was asked for and already enforced once.
+function loopNoActionsDecision(userRequest, enforcementRetried, lastRoundHadActions, lastRoundFailed) {
+  if (lastRoundHadActions && !lastRoundFailed) return 'done';
+  if (!asksForChange(userRequest)) return 'stop';
+  if (!enforcementRetried) return 'enforce';
+  return 'stop';
+}
 // Intent-based mode routing (v0.8.2). Ask mode is instructed to
 // refuse file work ("Answer and explain only"), so a build request
 // sent in Ask mode gets an INSTRUCTED refusal — the model doing
@@ -1449,6 +1469,10 @@ async function runAgentTurn(systemPrompt, threadId) {
     active: true, stopRequested: false, stopNoted: false,
     round: 0, maxRounds, threadId, systemPrompt,
     waitingApproval: false, pendingResolve: null, refusalRetries: 0, enforcementRetried: false,
+    // v0.9.3: whether the previous round ran actions, and whether
+    // any of them failed — the no-actions branch uses these to tell
+    // a summary ("done, stop") from a description ("enforce once").
+    lastRoundHadActions: false, lastRoundFailed: false,
   };
   showLoopUI();
   try {
@@ -1481,11 +1505,15 @@ async function runAgentTurn(systemPrompt, threadId) {
       }
       const actions = parseAgentActions(content);
       if (!actions.length) {
-        // No-actions enforcement (v0.5.2): the user asked for a
-        // change and the model only described it. One automatic
-        // enforcement retry, counted as a loop round; a second
-        // reply with no actions stops with a clear message.
-        if (asksForChange(userRequest) && !loopState.enforcementRetried) {
+        // No-actions branch (v0.5.2 enforcement, v0.9.3 done-check):
+        // a text-only reply after a round whose actions ALL
+        // succeeded is the summary — end the loop. Only when the
+        // user asked for a change and no successful action has run
+        // (or the last round failed) is this a description instead
+        // of doing, which gets one enforcement retry.
+        const noActionsDecision = loopNoActionsDecision(userRequest, loopState.enforcementRetried, loopState.lastRoundHadActions, loopState.lastRoundFailed);
+        if (noActionsDecision === 'done') break;
+        if (noActionsDecision === 'enforce') {
           loopState.enforcementRetried = true;
           loopState.round++;
           setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — asking for the file, not the description…');
@@ -1528,6 +1556,12 @@ async function runAgentTurn(systemPrompt, threadId) {
 // so the model can try a different approach).
 async function processAgentActions(actions) {
   let outcomes = 0;
+  // v0.9.3: whether any action in this round failed — the loop's
+  // no-actions branch uses it to tell a summary ("done, stop")
+  // from a description ("enforce once"). A user decline is NOT a
+  // failure: the user said no, so the model's next text-only reply
+  // ends the loop instead of retrying the declined change.
+  let failed = 0;
   for (const action of actions) {
     if (!loopState || loopState.stopRequested) break;
     const roundLabel = () => 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ';
@@ -1538,14 +1572,19 @@ async function processAgentActions(actions) {
       // keeps going. The tool result tells the model it was written.
       if (await isAutoApplyAssetSet(action.changes)) {
         const summary = await applyFileChanges(action.changes);
+        if (summary.failed > 0) failed++;
         await appendToolResult('Tool result — Unity asset files applied automatically: ' + paths
           + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
           + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : '')
-          + ' Snapshot taken — the user can still revert.');
+          // v0.9.3: a set that was refused in full has no snapshot
+          // (nothing was written) — only claim one when something
+          // was actually written.
+          + (summary.written > 0 ? ' Snapshot taken — the user can still revert.' : ''));
         if (loopState) setLoopStatus(roundLabel() + 'auto-applied ' + summary.written + ' Unity asset file(s)');
         outcomes++;
       } else if (state.autoAcceptChanges) {
         const summary = await applyFileChanges(action.changes);
+        if (summary.failed > 0) failed++;
         await appendToolResult('Tool result — files applied: ' + paths
           + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
           + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : ''));
@@ -1556,6 +1595,7 @@ async function processAgentActions(actions) {
         if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
         if (outcome.decision === 'applied') {
           const s = outcome.summary || { written: 0, failed: 0, errors: [] };
+          if (s.failed > 0) failed++;
           await appendToolResult('Tool result — files applied: ' + paths
             + ' (' + s.written + ' written, ' + s.failed + ' failed)'
             + (s.failed ? ' Errors: ' + s.errors.join('; ') : ''));
@@ -1569,12 +1609,14 @@ async function processAgentActions(actions) {
       const cmd = action.command;
       if (!state.shellEnabled) {
         await appendToolResult('Tool result — ' + cmd + ':\nShell is disabled in Settings — command not run');
+        failed++;
         outcomes++;
         continue;
       }
       const autoOk = state.shellAutoMode && matchesAutoApprove(cmd) && !isDangerousCommand(cmd);
       if (autoOk) {
         const res = await rb.shell.run({ command: cmd, cwd: state.projectPath });
+        if (res && res.ok === false) failed++;
         await appendToolResult(formatShellResult(cmd, res));
         if (loopState) setLoopStatus(roundLabel() + 'ran `' + firstCommandLine(cmd) + '`');
         outcomes++;
@@ -1583,6 +1625,7 @@ async function processAgentActions(actions) {
         if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
         if (outcome.decision === 'run') {
           await appendToolResult(formatShellResult(cmd, outcome.result));
+          if (outcome.result && outcome.result.ok === false) failed++;
           if (loopState) setLoopStatus(roundLabel() + 'ran `' + firstCommandLine(cmd) + '`');
         } else {
           const short = cmd.length > 200 ? cmd.slice(0, 200) + '…' : cmd;
@@ -1596,12 +1639,14 @@ async function processAgentActions(actions) {
       if (!action.valid) {
         await appendToolResult('Tool result — ' + label + ': "' + action.raw + '" is not a valid package '
           + (isInstall ? 'spec' : 'name') + ' — skipped. Use `name@version`, a bare package name, or a git URL.');
+        failed++;
         outcomes++;
         continue;
       }
       if (!state.projectPath) {
         await appendToolResult('Tool result — ' + label + ': ' + (action.name || action.raw)
           + ' — No project folder set, package not ' + (isInstall ? 'installed' : 'removed') + '. Pick a project folder in Settings first.');
+        failed++;
         outcomes++;
         continue;
       }
@@ -1616,6 +1661,7 @@ async function processAgentActions(actions) {
         await appendToolResult(packageResultText(
           { ...action, name: outcome.name || action.name, version: outcome.version || action.version },
           outcome.result));
+        if (outcome.result && outcome.result.ok === false) failed++;
         if (loopState) setLoopStatus(roundLabel() + (isInstall ? 'installed ' : 'removed ')
           + (outcome.name || action.name) + (isInstall && (outcome.version || action.version) ? '@' + (outcome.version || action.version) : ''));
       } else {
@@ -1630,18 +1676,21 @@ async function processAgentActions(actions) {
         await appendToolResult('Tool result — ComfyUI: could not parse the ```comfyui block'
           + (action.error ? ' (' + action.error + ')' : '')
           + ' — expected JSON {"workflow": "<name>", "inputs": {...}}.');
+        failed++;
         outcomes++;
         continue;
       }
       const wf = findComfyuiWorkflow(action.workflow);
       if (!wf) {
         await appendToolResult('Tool result — ComfyUI: workflow "' + action.workflow + '" is not in the Workflow Library. Import it in the ComfyUI panel first.');
+        failed++;
         outcomes++;
         continue;
       }
       if (!wf.available) {
         await appendToolResult('Tool result — ComfyUI: workflow "' + wf.name + '" is unavailable: '
           + (wf.availableReason || (wf.missing || []).join('; ') || 'missing dependencies') + '.');
+        failed++;
         outcomes++;
         continue;
       }
@@ -1670,6 +1719,7 @@ async function processAgentActions(actions) {
         if (loopState) setLoopStatus(roundLabel() + 'generated ' + res.outputs.length + ' image(s) with ' + wf.name);
       } else {
         await appendToolResult('Tool result — ComfyUI: generation with "' + wf.name + '" failed: ' + res.error);
+        failed++;
       }
       outcomes++;
     } else if (action.type === 'unity-command') {
@@ -1682,13 +1732,31 @@ async function processAgentActions(actions) {
         await appendToolResult('Tool result — Unity command: could not parse the ```unity-command block'
           + (action.error ? ' (' + action.error + ')' : '')
           + ' — expected JSON {"action": "createPrefab", ...}. Example of a working block: ' + UNITY_CREATE_PREFAB_EXAMPLE);
+        failed++;
         outcomes++;
         continue;
       }
       if (!state.projectPath) {
         await appendToolResult('Tool result — Unity command "' + label + '": no project folder set — pick a project folder in Settings first.');
+        failed++;
         outcomes++;
         continue;
+      }
+      // deleteAsset (v0.9.3): snapshot the asset (and its .meta)
+      // BEFORE Unity deletes it, so Revert can bring it back. A
+      // delete whose backup fails is not attempted at all — the
+      // bridge never sees the command. A delete the bridge itself
+      // refuses leaves the file untouched, so the snapshot is
+      // discarded instead of lingering in the sidebar.
+      let deleteSnapshot = null;
+      if (label === 'deleteAsset') {
+        deleteSnapshot = await snapshotForDelete(action.command.path || '');
+        if (!deleteSnapshot.ok) {
+          await appendToolResult('Tool result — Unity command "deleteAsset" failed: ' + deleteSnapshot.error);
+          failed++;
+          outcomes++;
+          continue;
+        }
       }
       if (loopState) setLoopStatus(roundLabel() + 'running Unity command (' + label + ')…');
       const res = await rb.unity.runCommand({ projectPath: state.projectPath, command: action.command });
@@ -1696,13 +1764,26 @@ async function processAgentActions(actions) {
         let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
           + (res.path ? ' (' + res.path + ')' : '');
         if (res.data != null) text += '\n' + JSON.stringify(res.data);
+        if (deleteSnapshot) {
+          text += ' Snapshot taken — the user can revert the delete from the bar below.';
+          showRevertBar(deleteSnapshot.snapshotId, deleteSnapshot.label, deleteSnapshot.backedUp, 0);
+          refreshSidebar().catch(() => {});
+        }
         await appendToolResult(text);
         if (loopState) setLoopStatus(roundLabel() + 'ran Unity command (' + label + ')');
       } else {
+        if (deleteSnapshot) { try { await discardSnapshot(deleteSnapshot.snapshotId); } catch (e) {} }
         await appendToolResult('Tool result — Unity command "' + label + '" failed: ' + ((res && (res.error || res.message)) || 'unknown error'));
+        failed++;
       }
       outcomes++;
     }
+  }
+  // v0.9.3: record this round for the loop's no-actions branch —
+  // a text-only reply after an all-success round is the summary.
+  if (loopState) {
+    loopState.lastRoundHadActions = true;
+    loopState.lastRoundFailed = failed > 0;
   }
   return outcomes;
 }
@@ -1899,7 +1980,10 @@ function buildSystemPrompt(rulesets) {
       prompt += 'Actions:\n';
       prompt += '- createPrefab — build a prefab from a GameObject tree. Example (an Image prefab): ' + UNITY_CREATE_PREFAB_EXAMPLE + '\n';
       prompt += '- TextMeshPro text works the same way, with type "TextMeshProUGUI": ```unity-command\n{"action": "createPrefab", "name": "TitleText", "root": {"name": "TitleText", "components": [{"type": "RectTransform", "props": {"sizeDelta": [400, 60]}}, {"type": "TextMeshProUGUI", "props": {"text": "Hello"}}]}}\n```\nThe TextMeshPro package must be in the project — if it is not, the bridge fails plainly and you say so instead of inventing another way.\n';
-      prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). Example — add a ScrollRect to a prefab that already has a Viewport child (with RectMask2D and an Image) and a Content child under it: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ScrollPanel.prefab", "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name.\n';
+      prompt += '- modifyPrefab — add, remove, or set properties on a prefab that already exists. "object" is a child path inside the prefab ("" is the root). One call can grow a prefab in place: edits run in order — addChildren, then add, then remove, then set — so an added component can reference children the same call created. Example — turn an Image prefab into a ScrollRect in one call: remove the Image, add a Viewport child (RectMask2D + Image) with a Content child under it, then add the ScrollRect pointing at them: ```unity-command\n{"action": "modifyPrefab", "path": "Assets/Prefabs/ImageContainer.prefab", "remove": [{"object": "", "components": ["Image"]}], "addChildren": [{"object": "", "children": [{"name": "Viewport", "components": [{"type": "RectTransform"}, {"type": "RectMask2D"}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}], "children": [{"name": "Content", "components": [{"type": "RectTransform"}]}]}]}], "add": [{"object": "", "components": [{"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}]}]}\n```\nA ScrollRect only works with that structure: the ScrollRect on the object, a Viewport child carrying RectMask2D and an Image, a Content child under the Viewport, and the ScrollRect\'s viewport and content set to those children by name. "remove" takes "component": "Image" (one name) or "components": ["Image", "TextMeshProUGUI"] (a list) — both work. Never recreate a whole prefab to change one: modify it in place.\n';
+      prompt += '- createPrefab with a ScrollRect works the same way — the root references children declared in the same command, because the bridge builds the whole tree before setting any props: ```unity-command\n{"action": "createPrefab", "name": "ScrollPanel", "root": {"name": "ScrollPanel", "components": [{"type": "RectTransform", "props": {"sizeDelta": [200, 200]}}, {"type": "ScrollRect", "props": {"viewport": "Viewport", "content": "Viewport/Content"}}], "children": [{"name": "Viewport", "components": [{"type": "RectTransform"}, {"type": "RectMask2D"}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}], "children": [{"name": "Content", "components": [{"type": "RectTransform"}]}]}]}}\n```\n';
+      prompt += '- deleteAsset — delete one asset: ```unity-command\n{"action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab"}\n```\nThe path must start with Assets/ and must exist. CodeFox snapshots the file (and its .meta) before Unity deletes it, so the user can revert the delete.\n';
+      prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
     }
@@ -4864,8 +4948,12 @@ function extractFileChanges(responseText) {
       if (m) { pendingPath = m[1].trim(); break; }
     }
     // Any fenced code block (```csharp, ```json, ```, …) — except
-    // action blocks (powershell / upm-install / upm-remove), which
-    // are not files and are handled by the agent loop instead.
+    // action blocks (powershell / upm-install / upm-remove /
+    // unity-command / comfyui), which are not files and are handled
+    // by the agent loop instead. A ```unity-command block after a
+    // **File Path:** line is a command, not a file: skipping it
+    // here is what stops every successful prefab command from also
+    // producing a spurious "0 written, 1 failed" refusal (v0.9.3).
     const fenceMatch = line.match(/^```\s*(\S*)\s*$/);
     if (fenceMatch) {
       const fenceLang = (fenceMatch[1] || '').toLowerCase();
@@ -4877,7 +4965,7 @@ function extractFileChanges(responseText) {
         const fp = (fenceMatch[1] || '').slice(5).trim().replace(/^`|`$/g, '');
         if (fp) pendingPath = fp;
       }
-      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove') {
+      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui') {
         let j = i + 1;
         while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;
         i = j;
@@ -5107,9 +5195,9 @@ async function applyFileChanges(changes) {
   const allowed = [];
   for (const c of (changes || [])) {
     if (/\.(prefab|unity)$/i.test(c.path || '')) {
-      refused.push({ change: c, error: c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) instead. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
+      refused.push({ change: c, error: c.path + ': CodeFox does not write .prefab or .unity files by hand — Unity writes those files itself. Use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one, deleteAsset to delete one) instead. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
     } else if (isEditorApiScriptChange(c)) {
-      refused.push({ change: c, error: c.path + ': Editor-only Unity APIs (PrefabUtility, AssetDatabase, …) only work in scripts under Assets/Editor/ — and you do not need a generator script at all: use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one) and Unity does it. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
+      refused.push({ change: c, error: c.path + ': Editor-only Unity APIs (PrefabUtility, AssetDatabase, …) only work in scripts under Assets/Editor/ — and you do not need a generator script at all: use a ```unity-command block (createPrefab to create a prefab, modifyPrefab to change one, deleteAsset to delete one) and Unity does it. Example — copy this shape: ' + UNITY_CREATE_PREFAB_EXAMPLE });
     } else allowed.push(c);
   }
   const refusalErrors = refused.map(r => r.error);
@@ -5204,6 +5292,32 @@ async function applyFileChanges(changes) {
   // so it can be reverted from there even after this bar is gone.
   refreshSidebar().catch(() => {});
   return { written, failed, errors, snapshotId, label };
+}
+
+// Snapshot an asset before the bridge deletes it (v0.9.3) — the
+// delete is then revertible exactly like a file write: revert
+// writes the backed-up content back (and the .meta, so the GUID
+// survives). The asset file MUST read back; the .meta is best
+// effort (a file Unity has never imported has none). A delete
+// whose backup fails is not attempted at all — the caller checks
+// `ok` before sending the command. Returns { ok, snapshotId,
+// label, backedUp } or { ok: false, error }.
+async function snapshotForDelete(assetPath) {
+  const fullPath = resolvePath(assetPath);
+  const snapshotId = 'snap_' + Date.now();
+  const label = assetPath.split(/[\/\\]/).pop();
+  const existing = await rb.fs.readFile(fullPath);
+  if (!existing.ok) {
+    return { ok: false, error: 'Could not back up ' + assetPath + ' before deleting it (' + (existing.error || 'could not read the file') + ') — delete not attempted, so the file is still there.' };
+  }
+  const rows = [{ path: fullPath, content: existing.content }];
+  const meta = await rb.fs.readFile(fullPath + '.meta');
+  if (meta.ok) rows.push({ path: fullPath + '.meta', content: meta.content });
+  for (const row of rows) {
+    await rb.db.insert('file_backups', { snapshot_id: snapshotId, file_path: row.path, content: row.content });
+  }
+  await rb.db.insert('snapshots', { id: snapshotId, label: ('Delete ' + label).substring(0, 200), file_count: rows.length });
+  return { ok: true, snapshotId, label, backedUp: rows.length };
 }
 
 function resolvePath(filePath) {

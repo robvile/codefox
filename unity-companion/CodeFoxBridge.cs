@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.9.1
+// CodeFoxBridge version: 0.9.3
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 // Watches for file changes from the CodeFox app and auto-refreshes Unity's AssetDatabase.
 // Also watches Assets/.codefox-command.json: when CodeFox writes a command there,
@@ -18,21 +18,31 @@
 //
 // Prefabs (v0.9.0) — Unity writes prefab files itself; CodeFox never
 // hand-writes .prefab YAML (that is how invented script guids and
-// "Unknown type 'Image'" happened). The four actions below build and
-// change prefabs through Unity's own API, and can ask Unity what
-// actually exists in this install before touching anything:
+// "Unknown type 'Image'" happened). The five actions below build,
+// change, and delete prefabs through Unity's own API, and can ask
+// Unity what actually exists in this install before touching
+// anything:
 //   { "action": "createPrefab", "name": "ImageContainer", "path": "Assets/Prefabs/ImageContainer.prefab",
 //     "root": { "name": "ImageContainer",
 //       "components": [{ "type": "RectTransform", "props": { "sizeDelta": [100, 100] } },
 //                      { "type": "Image", "props": { "color": [1, 1, 1, 1] } }],
 //       "children": [{ "name": "Title", "components": [{ "type": "TextMeshProUGUI", "props": { "text": "Hello" } }] }] } }
 //   { "action": "modifyPrefab", "path": "Assets/Prefabs/ImageContainer.prefab",
+//     "remove": [{ "object": "", "components": ["Image"] }],
+//     "addChildren": [{ "object": "", "children": [{ "name": "Viewport", "components": [{ "type": "RectTransform" }, { "type": "RectMask2D" }, { "type": "Image" }], "children": [{ "name": "Content", "components": [{ "type": "RectTransform" }] }] }] }],
 //     "add": [{ "object": "", "components": [{ "type": "ScrollRect", "props": { "viewport": "Viewport", "content": "Viewport/Content" } }] }],
-//     "remove": [{ "object": "Title", "component": "TextMeshProUGUI" }],
 //     "set": [{ "object": "", "component": "Image", "props": { "color": [1, 0, 0, 1] } }] }
 //     ("object" is a '/'-separated child path inside the prefab;
 //     "" or "." means the root. Component references such as a
-//     ScrollRect's viewport/content are child names, not guids.)
+//     ScrollRect's viewport/content are child names, not guids.
+//     Edits run in order — addChildren, then add, then remove,
+//     then set — so an added ScrollRect can reference children the
+//     same command created. "remove" takes "component" (one name)
+//     or "components" (a list of names).)
+//   { "action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab" }
+//     (deletes the asset and its .meta; the app snapshots it first,
+//     so the delete can be reverted. The path must start with
+//     Assets/ and must exist; Assets itself is never deletable.)
 //   { "action": "listComponentTypes", "filter": "Scroll" }
 //   { "action": "describeComponent", "type": "Image" }
 // Props take strings, numbers, bools, [x,y(,z)] vectors, [r,g,b(,a)]
@@ -57,7 +67,7 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
-    public const string BridgeVersion = "0.9.1";
+    public const string BridgeVersion = "0.9.3";
     private const string TriggerFileName = ".codefox-refresh-trigger";
     private const string CommandFileName = ".codefox-command.json";
     private const string ResultFileName = ".codefox-result.json";
@@ -185,6 +195,8 @@ public static class CodeFoxBridge
                 return CreatePrefab(json);
             case "modifyPrefab":
                 return ModifyPrefab(json);
+            case "deleteAsset":
+                return DeleteAsset(json);
             case "listComponentTypes":
                 return ListComponentTypes(json);
             case "describeComponent":
@@ -805,9 +817,29 @@ public static class CodeFoxBridge
         return false;
     }
 
-    // Add the components in `specs` (list of {type, props}) to `go`.
-    // Returns null on success, or a plain error message.
-    private static string AddComponents(GameObject go, List<object> specs, GameObject root)
+    // One component added by the two-pass build below: the
+    // GameObject it is on, the spec it came from, and the instance.
+    // Keeping the triple together is what makes the second pass
+    // set props on the right instance when a spec lists two
+    // components of the same type.
+    private class CreatedComponent
+    {
+        public GameObject go;
+        public Dictionary<string, object> spec;
+        public Component comp;
+    }
+
+    // Add the components in `specs` (list of {type, props}) to `go`
+    // WITHOUT setting props. The created (go, spec, comp) triples
+    // are appended to `created`, so the caller can set props in a
+    // second pass — after the whole tree exists. That is what makes
+    // a ScrollRect's viewport/content resolve to children declared
+    // in the same command: props are only set once every GameObject
+    // the command creates is in the tree (v0.9.3 — before this,
+    // props were set while the tree was still being built, so a
+    // root ScrollRect failed with "No GameObject named 'Viewport'"
+    // even though the child was in the same command).
+    private static string AddComponentsNoProps(GameObject go, List<object> specs, GameObject root, List<CreatedComponent> created)
     {
         if (specs == null) return null;
         foreach (var specObj in specs)
@@ -820,15 +852,7 @@ public static class CodeFoxBridge
             Component comp;
             try { comp = go.AddComponent(type); }
             catch (Exception e) { return "Could not add " + type.Name + " to " + go.name + ": " + e.Message; }
-            var props = JObj(spec, "props");
-            if (props != null)
-            {
-                foreach (var kv in props)
-                {
-                    string err;
-                    if (!SetMember(comp, kv.Key, kv.Value, root, out err)) return err;
-                }
-            }
+            created.Add(new CreatedComponent { go = go, spec = spec, comp = comp });
             // An Image (or any Graphic) draws through a
             // CanvasRenderer — the editor adds one automatically, but
             // AddComponent does not. Its absence was one of the
@@ -839,14 +863,62 @@ public static class CodeFoxBridge
         return null;
     }
 
+    // Set the props recorded by AddComponentsNoProps, in order.
+    // Runs after the whole tree exists, so a prop that references
+    // another object in the tree resolves against the complete
+    // tree, not the half-built one.
+    private static string SetComponentProps(List<CreatedComponent> created, GameObject root)
+    {
+        foreach (var c in created)
+        {
+            var props = JObj(c.spec, "props");
+            if (props == null) continue;
+            foreach (var kv in props)
+            {
+                string err;
+                if (!SetMember(c.comp, kv.Key, kv.Value, root, out err)) return err;
+            }
+        }
+        return null;
+    }
+
+    // Add the components in `specs` (list of {type, props}) to `go`.
+    // Two passes, not one: components are added first, props are
+    // set after — a prop that references another object in the tree
+    // (ScrollRect.viewport → a child Viewport) only resolves once
+    // that object exists. Returns null on success, or a plain
+    // error message.
+    private static string AddComponents(GameObject go, List<object> specs, GameObject root)
+    {
+        var created = new List<CreatedComponent>();
+        string err = AddComponentsNoProps(go, specs, root, created);
+        if (err != null) return err;
+        return SetComponentProps(created, root);
+    }
+
     // Build a GameObject subtree from a spec:
     // { name, components: [{type, props}], children: [spec, ...] }.
     // `treeRoot` is the prefab root — component references resolve
     // against it, not against the GameObject being built.
-    // Returns null on success, or a plain error message.
+    // Two passes (v0.9.3): the whole structure is created first
+    // (pass 1), props are set second (pass 2), so a component's
+    // props can reference any child in the tree, including ones
+    // declared after it in the same command. Returns null on
+    // success, or a plain error message.
     private static string BuildTree(GameObject go, Dictionary<string, object> spec, GameObject treeRoot)
     {
-        string err = AddComponents(go, JArr(spec, "components"), treeRoot);
+        var created = new List<CreatedComponent>();
+        string err = BuildTreeStructure(go, spec, treeRoot, created);
+        if (err != null) return err;
+        return SetComponentProps(created, treeRoot);
+    }
+
+    // Pass 1 of BuildTree: create every GameObject in the subtree
+    // and add every component (no props yet), recording each
+    // created component so pass 2 can set its props.
+    private static string BuildTreeStructure(GameObject go, Dictionary<string, object> spec, GameObject treeRoot, List<CreatedComponent> created)
+    {
+        string err = AddComponentsNoProps(go, JArr(spec, "components"), treeRoot, created);
         if (err != null) return err;
         var children = JArr(spec, "children");
         if (children == null) return null;
@@ -858,7 +930,7 @@ public static class CodeFoxBridge
             if (string.IsNullOrEmpty(childName)) return "Every child needs a \"name\".";
             var childGO = new GameObject(childName);
             childGO.transform.SetParent(go.transform, false);
-            err = BuildTree(childGO, childSpec, treeRoot);
+            err = BuildTreeStructure(childGO, childSpec, treeRoot, created);
             if (err != null) return err;
         }
         return null;
@@ -949,11 +1021,74 @@ public static class CodeFoxBridge
         }
     }
 
-    // add / remove / set, in that order: components are added before
-    // anything is set on them. Returns null on success, or a plain
-    // error naming the missing prefab object, type, or property.
+    // Delete one asset (v0.9.3) — the answer to "delete the prefab".
+    // AssetDatabase.DeleteAsset removes the file, its .meta, and
+    // updates references; SaveAssets + Refresh make it stick. The
+    // path must start with Assets/, must exist, and must not be the
+    // Assets folder itself. The app snapshots the file (and .meta)
+    // before sending this, so the delete can be reverted — the
+    // bridge itself never restores anything.
+    private static CFResult DeleteAsset(string json)
+    {
+        object parsed;
+        try { parsed = JsonMini.Parse(json); }
+        catch (Exception e) { return new CFResult { ok = false, message = "Could not parse command JSON: " + e.Message }; }
+        var cmd = parsed as Dictionary<string, object>;
+        if (cmd == null) return new CFResult { ok = false, message = "Command JSON must be an object." };
+        string assetPath = JStr(cmd, "path", "");
+        if (string.IsNullOrEmpty(assetPath)) return new CFResult { ok = false, message = "deleteAsset needs a \"path\" to the asset." };
+        if (!assetPath.StartsWith("Assets/")) return new CFResult { ok = false, message = "deleteAsset path must start with Assets/ — got '" + assetPath + "'." };
+        if (assetPath == "Assets/") return new CFResult { ok = false, message = "deleteAsset refuses to delete the Assets folder itself." };
+        bool isFolder = AssetDatabase.IsValidFolder(assetPath);
+        bool exists = isFolder || AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetPath) != null;
+        if (!exists) return new CFResult { ok = false, message = "Asset not found: '" + assetPath + "' — the file is not in this project." };
+        if (!AssetDatabase.DeleteAsset(assetPath)) return new CFResult { ok = false, message = "Unity could not delete " + assetPath + "." };
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        return new CFResult { ok = true, message = "Asset deleted.", path = assetPath };
+    }
+
+    // addChildren / add / remove / set, in that order: children are
+    // created before components are added to them, and components
+    // are added before anything is set on them — so one call can
+    // grow a prefab in place (add the Viewport/Content children,
+    // then add a ScrollRect that references them). Returns null on
+    // success, or a plain error naming the missing prefab object,
+    // type, or property.
     private static string ApplyPrefabEdits(GameObject root, Dictionary<string, object> cmd)
     {
+        // addChildren (v0.9.3): create new child GameObjects under
+        // an existing object, from the same tree specs createPrefab
+        // uses — {name, components, children}. A child whose name
+        // already exists under the parent is refused, so a later
+        // reference to that name can never be ambiguous.
+        var addChildren = JArr(cmd, "addChildren");
+        if (addChildren != null)
+        {
+            foreach (var item in addChildren)
+            {
+                var entry = item as Dictionary<string, object>;
+                if (entry == null) return "Each \"addChildren\" entry must be an object like {\"object\": \"\", \"children\": [...]}.";
+                string objectPath = JStr(entry, "object", "");
+                GameObject parent = FindChild(root, objectPath);
+                if (parent == null) return "No object '" + objectPath + "' in the prefab.";
+                var children = JArr(entry, "children");
+                if (children == null) continue;
+                foreach (var childObj in children)
+                {
+                    var childSpec = childObj as Dictionary<string, object>;
+                    if (childSpec == null) return "Each child must be an object like {\"name\": \"Title\", \"components\": [...]}.";
+                    string childName = JStr(childSpec, "name", "");
+                    if (string.IsNullOrEmpty(childName)) return "Every child needs a \"name\".";
+                    if (parent.transform.Find(childName) != null)
+                        return "Object '" + (string.IsNullOrEmpty(objectPath) ? parent.name : objectPath) + "' already has a child named '" + childName + "'.";
+                    var childGO = new GameObject(childName);
+                    childGO.transform.SetParent(parent.transform, false);
+                    string err = BuildTree(childGO, childSpec, root);
+                    if (err != null) return err;
+                }
+            }
+        }
         var adds = JArr(cmd, "add");
         if (adds != null)
         {
@@ -974,17 +1109,38 @@ public static class CodeFoxBridge
             foreach (var item in removes)
             {
                 var entry = item as Dictionary<string, object>;
-                if (entry == null) return "Each \"remove\" entry must be an object like {\"object\": \"\", \"component\": \"Image\"}.";
+                if (entry == null) return "Each \"remove\" entry must be an object like {\"object\": \"\", \"components\": [\"Image\"]}.";
                 string objectPath = JStr(entry, "object", "");
                 GameObject target = FindChild(root, objectPath);
                 if (target == null) return "No object '" + objectPath + "' in the prefab.";
-                string typeName = JStr(entry, "component", "");
-                Type type = ResolveComponentType(typeName);
-                if (type == null) return UnknownTypeMessage(typeName);
-                Component comp = target.GetComponent(type);
-                if (comp == null) return "Object '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "' has no " + type.Name + " component.";
-                if (comp is Transform) return "The Transform cannot be removed.";
-                UnityEngine.Object.DestroyImmediate(comp);
+                // "remove" takes either shape (v0.9.3): the
+                // documented singular "component": "Image", or the
+                // plural "components": ["Image", ...] the model
+                // naturally emits, mirroring "add". Both at once is
+                // allowed — every name listed is removed.
+                var typeNames = new List<string>();
+                string single = JStr(entry, "component", "");
+                if (!string.IsNullOrEmpty(single)) typeNames.Add(single);
+                var plural = JArr(entry, "components");
+                if (plural != null)
+                {
+                    foreach (var t in plural)
+                    {
+                        string n = t as string;
+                        if (n == null) return "Each \"components\" entry in \"remove\" must be a component type name, e.g. \"Image\".";
+                        typeNames.Add(n);
+                    }
+                }
+                if (typeNames.Count == 0) return "Each \"remove\" entry needs a \"component\" (\"Image\") or \"components\" ([\"Image\", ...]).";
+                foreach (var typeName in typeNames)
+                {
+                    Type type = ResolveComponentType(typeName);
+                    if (type == null) return UnknownTypeMessage(typeName);
+                    Component comp = target.GetComponent(type);
+                    if (comp == null) return "Object '" + (string.IsNullOrEmpty(objectPath) ? target.name : objectPath) + "' has no " + type.Name + " component.";
+                    if (comp is Transform) return "The Transform cannot be removed.";
+                    UnityEngine.Object.DestroyImmediate(comp);
+                }
             }
         }
         var sets = JArr(cmd, "set");

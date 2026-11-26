@@ -21,7 +21,7 @@ const path = require('path');
 // (see getInstalledBridgeVersion) to decide whether an installed
 // bridge is out of date. The .cs file carries the same version in
 // its "// CodeFoxBridge version: X.Y.Z" marker and BridgeVersion const.
-const BUNDLED_BRIDGE_VERSION = '0.9.1';
+const BUNDLED_BRIDGE_VERSION = '0.9.3';
 
 // Compare "a.b.c" versions numerically. Returns <0, 0, or >0.
 function compareVersions(a, b) {

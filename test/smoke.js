@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.9.2.
+// 2. package.json version is 0.9.3.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.9.2', pkg.version === '0.9.2', 'got ' + pkg.version);
-check('sidebar footer shows 0.9.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.2 — Local'));
+check('package.json version is 0.9.3', pkg.version === '0.9.3', 'got ' + pkg.version);
+check('sidebar footer shows 0.9.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.9.3 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.9.1 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.9.1') && bridgeCs.includes('BridgeVersion = "0.9.1"'));
-check('embedded bridge has the 0.9.1 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.1'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.1',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.9.1');
+check('bridge .cs has the 0.9.3 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.9.3') && bridgeCs.includes('BridgeVersion = "0.9.3"'));
+check('embedded bridge has the 0.9.3 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.3'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.3',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.9.3');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.1' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.9.1 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.9.1');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.3' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.9.3 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.9.3');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2075,6 +2075,126 @@ check('CHANGELOG has the 0.9.2 entry',
 check('README notes the always-on bridge instructions and the generator-script refusal',
   readme.includes('no project scan needed') && readme.includes('generator script is never the way to make a prefab'));
 
+// v0.9.3 — delete assets, grow prefabs in place, ScrollRect works
+// first try. Rob's 0.9.2 live test created the Image prefab first
+// try, then hit three walls: a root ScrollRect could not reference
+// children from the same command (props were set while the tree
+// was still being built), modifyPrefab could not add child
+// GameObjects at all (so the model recreated the whole prefab
+// under a new name), and there was no delete — the model guessed
+// deleteAsset and the bridge answered "Unknown action". On top of
+// that, every successful command came with a spurious "0 written,
+// 1 failed" refusal (the file extractor ate the unity-command
+// fence), and the loop re-ran the command after a success because
+// a text-only summary tripped the no-actions enforcement.
+
+// Bridge (read from the .cs — it cannot run in Node, so these
+// checks are structural: the dispatcher, the validation, and the
+// ordering that makes the behaviours possible. The first compile
+// and the live round-trips are Rob's Unity test).
+check('bridge dispatches deleteAsset',
+  bridgeCs.includes('case "deleteAsset":') && bridgeCs.includes('return DeleteAsset(json);'));
+check('deleteAsset validates path, existence, and the Assets folder itself',
+  bridgeCs.includes('private static CFResult DeleteAsset(string json)')
+  && bridgeCs.includes('deleteAsset path must start with Assets/')
+  && bridgeCs.includes('refuses to delete the Assets folder itself')
+  && bridgeCs.includes('AssetDatabase.IsValidFolder(assetPath)')
+  && bridgeCs.includes("Asset not found: '\" + assetPath + \"'")
+  && bridgeCs.includes('AssetDatabase.DeleteAsset(assetPath)')
+  && bridgeCs.includes('AssetDatabase.SaveAssets();'));
+check('bridge builds prefabs in two passes (structure first, props second)',
+  bridgeCs.includes('private static string AddComponentsNoProps(')
+  && bridgeCs.includes('private static string SetComponentProps(')
+  && bridgeCs.includes('private static string BuildTreeStructure(')
+  && /private static string BuildTree\(GameObject go, Dictionary<string, object> spec, GameObject treeRoot\)\s*\{[^}]*BuildTreeStructure\(go, spec, treeRoot, created\)[^}]*SetComponentProps\(created, treeRoot\)[^}]*\}/s.test(bridgeCs)
+  && (() => {
+    // Props are never set inside the structure pass — that is the
+    // whole point: a reference can only resolve against the
+    // complete tree.
+    const start = bridgeCs.indexOf('private static string BuildTreeStructure(');
+    const end = bridgeCs.indexOf('private static CFResult CreatePrefab(', start);
+    const body = bridgeCs.slice(start, end);
+    return body.includes('AddComponentsNoProps') && !body.includes('SetComponentProps') && !body.includes('SetMember');
+  })());
+check('modifyPrefab grows prefabs in place: addChildren runs before add, then remove, then set',
+  bridgeCs.includes('var addChildren = JArr(cmd, "addChildren");')
+  && bridgeCs.includes('addChildren / add / remove / set, in that order')
+  && bridgeCs.indexOf('var addChildren = JArr(cmd, "addChildren");') < bridgeCs.indexOf('var adds = JArr(cmd, "add");')
+  && bridgeCs.includes('already has a child named'));
+check('modifyPrefab remove accepts "component" (string) and "components" (array)',
+  bridgeCs.includes('JStr(entry, "component", "")')
+  && bridgeCs.includes('JArr(entry, "components")')
+  && bridgeCs.includes('Each \\"remove\\" entry needs a \\"component\\"'));
+// Dual-output noise: a ```unity-command block after a **File Path:**
+// line must never also be a file change.
+const extractorSrc93 = extractFunction(appJs, 'extractFileChanges');
+check('extractFileChanges can be extracted for the v0.9.3 checks', !!extractorSrc93);
+if (extractorSrc93) {
+  const codeExtsMatch93 = /const CODE_EXTS = '([^']+)';/.exec(appJs);
+  const extract93 = new Function('CODE_EXTS', extractorSrc93 + '\nreturn extractFileChanges;')(codeExtsMatch93[1]);
+  check('unity-command / comfyui / powershell / upm fences after a File Path line are not file changes',
+    extract93('**File Path:** `Assets/Prefabs/ImageContainer.prefab`\n```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform"}]}}\n```\n').length === 0
+    && extract93('**File Path:** `Assets/Workflows/Gen.json`\n```comfyui\n{"workflow": "NovaXL"}\n```\n').length === 0
+    && extract93('**File Path:** `Assets/Scripts/X.cs`\n```powershell\ngit status\n```\n').length === 0
+    && extract93('**File Path:** `Packages/manifest.json`\n```upm-install\ncom.unity.textmeshpro@3.0.6\n```\n').length === 0
+    && extract93('**File Path:** `Assets/Scripts/Player.cs`\n```csharp\nusing UnityEngine;\npublic class Player : MonoBehaviour {}\n```\n').length === 1);
+}
+// Loop-done decision: pure function, extracted with the helpers it
+// closes over.
+const loopDecisionSrc = extractFunction(appJs, 'loopNoActionsDecision');
+const asksSrc93 = extractFunction(appJs, 'asksForChange');
+const intentDecl93 = /const CHANGE_INTENT_WORDS = \[[^\]]*\];/.exec(appJs);
+check('loopNoActionsDecision can be extracted for testing',
+  !!loopDecisionSrc && !!asksSrc93 && !!intentDecl93);
+if (loopDecisionSrc && asksSrc93 && intentDecl93) {
+  const decide = new Function(intentDecl93[0] + '\n' + asksSrc93 + '\n' + loopDecisionSrc + '\nreturn loopNoActionsDecision;')();
+  check('loop-done: all-success round + text-only reply ends, anything else enforces or stops',
+    decide('build me a prefab with an image', false, true, false) === 'done'
+    && decide('build me a prefab with an image', false, true, true) === 'enforce'
+    && decide('build me a prefab with an image', false, false, false) === 'enforce'
+    && decide('build me a prefab with an image', true, false, false) === 'stop'
+    && decide('build me a prefab with an image', true, true, true) === 'stop'
+    && decide('what is a prefab?', false, false, false) === 'stop'
+    && decide('what is a prefab?', false, true, false) === 'done');
+}
+check('agent loop records per-round success for the no-actions branch',
+  appJs.includes('lastRoundHadActions: false, lastRoundFailed: false')
+  && appJs.includes('loopNoActionsDecision(userRequest, loopState.enforcementRetried, loopState.lastRoundHadActions, loopState.lastRoundFailed)')
+  && appJs.includes('loopState.lastRoundFailed = failed > 0')
+  && appJs.includes("if (summary.failed > 0) failed++"));
+check('auto-apply tool result only claims a snapshot when something was written',
+  appJs.includes("(summary.written > 0 ? ' Snapshot taken"));
+// deleteAsset snapshot: the helper is async, so it is exercised
+// in the async block at the end of this file (top-level await
+// would break this CommonJS file). Here, only that it extracts.
+const snapSrc93 = extractFunction(appJs, 'snapshotForDelete');
+const resolveSrc93 = extractFunction(appJs, 'resolvePath');
+check('snapshotForDelete can be extracted for testing', !!snapSrc93 && !!resolveSrc93);
+// Prompt: deleteAsset, the ScrollRect recipes, the remove shapes,
+// and no File Path line before a unity-command block.
+if (promptSrc) {
+  const buildPrompt93 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt93 = buildPrompt93(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt documents deleteAsset, addChildren, and the ScrollRect recipes',
+    agentPrompt93.includes('"action": "deleteAsset"')
+    && agentPrompt93.includes('"addChildren"')
+    && agentPrompt93.includes('"components": ["Image"]')
+    && agentPrompt93.includes('"name": "ScrollPanel"')
+    && agentPrompt93.includes('"type": "ScrollRect"')
+    && agentPrompt93.includes('"viewport": "Viewport"')
+    && agentPrompt93.includes('Do not put a **File Path:** line before a ```unity-command block'));
+}
+check('prefab refusal message names deleteAsset',
+  appJs.includes('deleteAsset to delete one'));
+check('CHANGELOG has the 0.9.3 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.9.3 — 2026-11-26'));
+check('README documents deleteAsset, addChildren, and the ScrollRect recipe',
+  readme.includes('deleteAsset') && readme.includes('addChildren') && readme.includes('canonical ScrollRect change is one call'));
+
 // v0.8.3 — tuned LM Studio model loading. The defaults are global:
 // one object, no per-model table, and the load body is built only
 // from it, so no model can silently drop a setting.
@@ -2453,6 +2573,45 @@ const mockServer = http.createServer((req, res) => {
       persisted === 2 && rendered === 2);
   } catch (e) {
     check('Approve all runs against a mock library', false, String(e && e.message));
+  }
+  // v0.9.3 — deleteAsset snapshot (async helper; extractFunction
+  // drops the `async` keyword, so re-add it). Stubbed rb/state.
+  try {
+    const snapSrcA = extractFunction(appJs, 'snapshotForDelete');
+    const resolveSrcA = extractFunction(appJs, 'resolvePath');
+    if (!snapSrcA || !resolveSrcA) throw new Error('snapshotForDelete or resolvePath not extractable');
+    const inserts = [];
+    const snapshotForDelete = new Function('rb', 'state', 'async ' + snapSrcA + '\n' + resolveSrcA + '\nreturn snapshotForDelete;')(
+      {
+        fs: {
+          readFile: async (p) => {
+            if (p.endsWith('.meta')) return p.includes('NoMeta') ? { ok: false, error: 'ENOENT' } : { ok: true, content: 'META-CONTENT' };
+            return p.includes('Missing') ? { ok: false, error: 'ENOENT' } : { ok: true, content: 'PREFAB-CONTENT' };
+          },
+        },
+        db: { insert: async (table, row) => { inserts.push({ table, row }); } },
+      },
+      { projectPath: 'C:\\TD Pizza Racer' });
+    inserts.length = 0;
+    const snapOk = await snapshotForDelete('Assets/Prefabs/ImageContainer.prefab');
+    check('snapshotForDelete backs up the asset and its .meta before a delete',
+      snapOk.ok === true && snapOk.snapshotId.startsWith('snap_') && snapOk.backedUp === 2
+      && inserts.filter(i => i.table === 'file_backups').length === 2
+      && inserts.some(i => i.table === 'file_backups' && i.row.file_path === 'C:\\TD Pizza Racer\\Assets\\Prefabs\\ImageContainer.prefab' && i.row.content === 'PREFAB-CONTENT')
+      && inserts.some(i => i.table === 'file_backups' && i.row.file_path === 'C:\\TD Pizza Racer\\Assets\\Prefabs\\ImageContainer.prefab.meta' && i.row.content === 'META-CONTENT')
+      && inserts.some(i => i.table === 'snapshots' && i.row.id === snapOk.snapshotId && i.row.label === 'Delete ImageContainer.prefab' && i.row.file_count === 2));
+    inserts.length = 0;
+    const snapNoMeta = await snapshotForDelete('Assets/Prefabs/NoMeta.prefab');
+    check('snapshotForDelete tolerates a missing .meta',
+      snapNoMeta.ok === true && snapNoMeta.backedUp === 1
+      && inserts.filter(i => i.table === 'file_backups').length === 1);
+    inserts.length = 0;
+    const snapMissing = await snapshotForDelete('Assets/Prefabs/Missing.prefab');
+    check('snapshotForDelete refuses a delete it cannot back up',
+      snapMissing.ok === false && snapMissing.error.includes('delete not attempted')
+      && inserts.length === 0);
+  } catch (e) {
+    check('snapshotForDelete runs against stubbed rb/state', false, String(e && e.message));
   }
   finish();
 })().catch((e) => {
