@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.16.2
+// CodeFoxBridge version: 0.16.3
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -232,7 +232,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.16.2";
+    public const string BridgeVersion = "0.16.3";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -704,6 +704,7 @@ public static class CodeFoxBridge
                 { "read_component_values", (json, args) => ReadComponentValuesHandler.Handle(json, args) },
                 { "set_property", (json, args) => SetPropertyHandler.Handle(json, args) },
                 { "create_gameobject", (json, args) => CreateGameObjectHandler.Handle(json, args) },
+                { "instantiatePrefab", (json, args) => InstantiatePrefabHandler.Handle(json, args) },
                 { "add_component", (json, args) => AddComponentHandler.Handle(json, args) },
                 { "delete_gameobject", (json, args) => DeleteGameObjectHandler.Handle(json, args) },
                 { "set_parent", (json, args) => SetParentHandler.Handle(json, args) },
@@ -5291,6 +5292,88 @@ public static class CodeFoxBridge
             resultData["alsoAdded"] = alsoAdded;
             if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
             return BridgeResult.Ok("Created '" + ComponentLocator.GetPath(go.transform) + "'" + (renamed ? " (renamed — '" + name + "' was taken)" : "") + " with " + addedNames.Count + " component(s)" + (alsoAdded.Count > 0 ? " (also added: " + string.Join(", ", alsoAdded.ToArray()) + ")" : "") + ".", null, JsonWrite(resultData));
+        }
+    }
+
+    // ── instantiate_prefab ───────────────────────────────────
+    // Put a prefab asset into the open scene as an instance. This
+    // is the action the MainMenu test was missing: createPrefab
+    // builds the asset on disk, instantiatePrefab is what puts it
+    // in the scene so it is there when Play starts. Everything is
+    // validated first — the prefab asset must exist, the parent
+    // must be a scene object, the vectors must parse — and creation
+    // starts only once all of it is valid. The instance keeps its
+    // prefab link (it is a real prefab instance, not a copy), so
+    // edits to the asset flow through as usual. Names are unique
+    // among siblings and the result reports the final path, so the
+    // model never guesses where the instance ended up.
+    private static class InstantiatePrefabHandler
+    {
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string prefabPath = JStr(args, "prefab", "");
+            if (string.IsNullOrEmpty(prefabPath)) return BridgeResult.Error("'prefab' is required — the asset path, e.g. 'Assets/Prefabs/MainMenuCanvas.prefab'.");
+            bool dryRun = JBool(args, "dryRun", false);
+            string playError = MutationScope.PlayModeError(args, dryRun);
+            if (playError != null) return BridgeResult.Error(playError);
+            GameObject prefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+            if (prefabAsset == null) return BridgeResult.Error("No prefab at '" + prefabPath + "' — check the path with list_assets (type 'prefab').");
+            string parentPath = JStr(args, "parent", "");
+            GameObject parentGO = null;
+            Transform parentT = null;
+            if (!string.IsNullOrEmpty(parentPath))
+            {
+                List<GameObject> pm = ComponentLocator.FindGameObjects(parentPath);
+                if (pm.Count != 1)
+                    return BridgeResult.Error(pm.Count == 0
+                        ? "No GameObject at '" + parentPath + "' — the parent must exist."
+                        : pm.Count + " objects match '" + parentPath + "'. Use a more specific path.");
+                parentGO = pm[0];
+                if (EditorUtility.IsPersistent(parentGO))
+                    return BridgeResult.Error("'" + parentPath + "' is an asset, not a scene object — a new object needs a scene parent.");
+                parentT = parentGO.transform;
+            }
+            float[] position = null, rotation = null, scale = null;
+            object posRaw;
+            if (args.TryGetValue("position", out posRaw) && posRaw != null && !SetPropertyHandler.TryReadNumbers(posRaw, 3, out position))
+                return BridgeResult.Error("'position' must be [x, y, z] — got " + SceneHelpers.DescribeValue(posRaw) + ".");
+            object rotRaw;
+            if (args.TryGetValue("rotation", out rotRaw) && rotRaw != null && !SetPropertyHandler.TryReadNumbers(rotRaw, 3, out rotation))
+                return BridgeResult.Error("'rotation' must be [x, y, z] euler degrees — got " + SceneHelpers.DescribeValue(rotRaw) + ".");
+            object scaleRaw;
+            if (args.TryGetValue("scale", out scaleRaw) && scaleRaw != null && !SetPropertyHandler.TryReadNumbers(scaleRaw, 3, out scale))
+                return BridgeResult.Error("'scale' must be [x, y, z] — got " + SceneHelpers.DescribeValue(scaleRaw) + ".");
+            string name = JStr(args, "name", "");
+            string baseName = string.IsNullOrEmpty(name) ? prefabAsset.name : name;
+            string finalName = SceneHelpers.UniqueSiblingName(parentT, baseName);
+            bool renamed = finalName != baseName;
+            string finalPath = parentT == null ? finalName : ComponentLocator.GetPath(parentT) + "/" + finalName;
+            if (dryRun)
+            {
+                var data = new Dictionary<string, object>();
+                data["path"] = finalPath;
+                data["renamed"] = renamed;
+                data["sourcePrefab"] = prefabPath;
+                data["dryRun"] = true;
+                return BridgeResult.Ok("Preview: instantiate '" + prefabPath + "' as '" + finalPath + "'" + (renamed ? " (renamed — '" + baseName + "' was taken)" : "") + " (nothing created yet).", null, JsonWrite(data));
+            }
+            Scene scene = parentT != null ? parentT.gameObject.scene : SceneManager.GetActiveScene();
+            int undoGroup = MutationScope.BeginUndoGroup(args, "instantiate " + finalName);
+            GameObject go = PrefabUtility.InstantiatePrefab(prefabAsset) as GameObject;
+            if (go == null) return BridgeResult.Error("Could not instantiate '" + prefabPath + "' — the asset is not a GameObject prefab.");
+            go.name = finalName;
+            Undo.RegisterCreatedObjectUndo(go, "Agent: instantiate " + finalName);
+            go.transform.SetParent(parentT, false);
+            if (position != null) go.transform.localPosition = new Vector3(position[0], position[1], position[2]);
+            if (rotation != null) go.transform.localEulerAngles = new Vector3(rotation[0], rotation[1], rotation[2]);
+            if (scale != null) go.transform.localScale = new Vector3(scale[0], scale[1], scale[2]);
+            MutationScope.Commit(undoGroup, scene);
+            var resultData = new Dictionary<string, object>();
+            resultData["path"] = ComponentLocator.GetPath(go.transform);
+            resultData["renamed"] = renamed;
+            resultData["sourcePrefab"] = prefabPath;
+            if (EditorApplication.isPlaying) resultData["playModeWarning"] = MutationScope.PlayModeWarning;
+            return BridgeResult.Ok("Instantiated '" + prefabPath + "' as '" + ComponentLocator.GetPath(go.transform) + "'" + (renamed ? " (renamed — '" + baseName + "' was taken)" : "") + ".", null, JsonWrite(resultData));
         }
     }
 

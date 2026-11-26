@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -421,6 +421,18 @@ function createWindow() {
   });
   const evalQuery = parseEvalArgv();
   mainWindow.loadFile('index.html', evalQuery ? { query: evalQuery } : undefined);
+  // v0.21.5: right-click menu — the renderer has no native
+  // context menu, so copy/paste was unreachable except by
+  // keyboard. Roles do the clipboard work natively (including
+  // paste, which a renderer custom menu cannot do reliably):
+  // editable fields get cut/copy/paste/select-all, everywhere
+  // else copy (when there is a selection) and select-all.
+  mainWindow.webContents.on('context-menu', (event, params) => {
+    const items = params.isEditable
+      ? [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'selectAll' }]
+      : [{ role: 'copy', enabled: !!params.selectionText }, { role: 'selectAll' }];
+    Menu.buildFromTemplate(items).popup({ window: mainWindow });
+  });
 }
 
 // Eval mode (v0.18.0): --eval-* flags hand the renderer its
