@@ -11,6 +11,7 @@ const comfyui = require('./comfyui');
 // the preload cannot (real Electron refuses local requires there).
 const { UNITY_ASSET_EXTS } = require('./unity-assets');
 const { MCP_PRESETS } = require('./mcp-presets');
+const lmLoad = require('./lmstudio-load');
 
 // ── Ollama process management ─────────────────────────────────────
 let ollamaProcess = null;
@@ -692,6 +693,65 @@ ipcMain.handle('llm:listModels', async (_, payload) => {
     return { ok: true, provider: cfg.provider, models };
   } catch (e) {
     return { ok: false, provider: cfg.provider, error: e.message, models: [] };
+  }
+});
+
+// Downloaded models (LM Studio only): GET /api/v1/models lists ALL
+// models on the system, downloaded or not, with loaded_instances
+// (empty when not loaded) — unlike the OpenAI-compatible /v1/models,
+// which only lists loaded ones. Each entry carries its load state, so
+// Settings can offer a Load action per model. On an older server that
+// has no such endpoint, fall back to the loaded-only list and say so.
+ipcMain.handle('llm:listDownloaded', async (_, payload) => {
+  const cfg = resolveLlmConfig(payload || {});
+  if (cfg.provider !== 'lmstudio') return { ok: false, provider: cfg.provider, error: 'Downloaded-model listing is only supported for LM Studio.', models: [], downloadedList: false };
+  const root = normalizeLmStudioRoot(cfg.url);
+  try {
+    const res = await fetchJson(root + '/api/v1/models', { headers: lmStudioHeaders(cfg.apiKey) }, 5000);
+    if (res.status === 404 || res.status === 405) {
+      const loaded = await listLmStudioModels(cfg.url, cfg.apiKey);
+      return { ok: true, provider: cfg.provider, downloadedList: false, models: loaded.map(m => ({ id: m.id, displayName: m.id, type: 'llm', loaded: true })) };
+    }
+    if (!res.ok) throw new Error('LM Studio returned HTTP ' + res.status + ': ' + (await res.text()).slice(0, 300));
+    const data = await res.json();
+    if (!Array.isArray(data.models)) throw new Error('LM Studio answered, but not with a model list.');
+    const models = data.models
+      .filter(m => !m.type || String(m.type).toLowerCase() === 'llm')
+      .map(m => ({
+        id: m.key,
+        displayName: m.display_name || m.key,
+        type: m.type || 'llm',
+        quantization: (m.quantization && m.quantization.name) || null,
+        params: m.params_string || null,
+        sizeBytes: m.size_bytes || null,
+        format: m.format || null,
+        variant: m.selected_variant || null,
+        loaded: Array.isArray(m.loaded_instances) && m.loaded_instances.length > 0,
+        recommended: lmLoad.isRecommendedCodingModel(m),
+      }));
+    return { ok: true, provider: cfg.provider, downloadedList: true, models };
+  } catch (e) {
+    return { ok: false, provider: cfg.provider, error: e.message, models: [], downloadedList: false };
+  }
+});
+
+// Load a model into the running LM Studio server with the tuned
+// settings (lmstudio-load.js). Explicit only — never on startup, and
+// it never unloads other models. The renderer sets it as the active
+// model after a successful load.
+ipcMain.handle('llm:loadModel', async (_, payload) => {
+  const cfg = resolveLlmConfig(payload || {});
+  if (cfg.provider !== 'lmstudio') return { ok: false, error: 'Model loading is only supported for LM Studio.' };
+  const modelId = String((payload && payload.model) || '').trim();
+  if (!modelId) return { ok: false, error: 'No model selected.' };
+  try {
+    return await lmLoad.loadLmStudioModel({
+      modelId,
+      baseUrl: normalizeLmStudioRoot(cfg.url),
+      apiKey: cfg.apiKey,
+    });
+  } catch (e) {
+    return { ok: false, model: modelId, error: e.message };
   }
 });
 

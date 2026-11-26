@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.8.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.8.3-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -89,6 +89,12 @@ If buttons stop responding or a connection check does nothing, open **Settings �
 4. Pick a model from the **Model** dropdown (populated from the live server list, not typed by hand) and click **Save**.
 
 No API key is needed for a default LM Studio server; there is an optional API key field in Settings if your server requires one.
+
+### Loading a model from CodeFox
+
+Settings → Model also lists every model LM Studio has downloaded, each with a **Load** button. CodeFox loads models into a running LM Studio server with tuned settings — full GPU offload, KV cache Q8, 1 concurrent prediction, 16K context, flash attention — and it does not start the server, and speed depends on the model and the machine. Loading a model sets it as the active model.
+
+Why the tuned settings exist: a model loaded with LM Studio's own defaults (4 parallel predictions, FP16 KV cache, partial GPU offload) splits work between VRAM and system RAM and crawls — on this machine that was 2.55 t/s for a 30B model, where the same machine gets ~30 t/s with the tuned load. The settings are global: the same six values for any model, no per-model overrides. Two channels, because LM Studio splits them: the REST load carries context length, eval batch size, flash attention and KV-cache offload, while KV cache quantization, concurrent predictions and the GPU offload ratio are written into LM Studio's per-model saved settings (`%USERPROFILE%\.lmstudio\.internal\user-concrete-model-default-config\<model>.json`) before the load — LM Studio applies those on every load of the model. Loading never unloads other models and never runs on startup; it is an explicit Load click only. If the server is not running, Load fails plainly instead of pretending it worked, and after every load CodeFox checks the model is actually in the loaded list before reporting success.
 
 ### Using Ollama instead
 

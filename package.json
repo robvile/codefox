@@ -1,6 +1,6 @@
 {
   "name": "codefox",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
@@ -45,7 +45,8 @@
       "unity-companion/**/*",
       "node_modules/**/*",
       "build/icon.png",
-      "comfyui.js"
+      "comfyui.js",
+      "lmstudio-load.js"
     ],
     "win": {
       "target": [

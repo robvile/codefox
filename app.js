@@ -31,6 +31,12 @@ let state = {
   lmstudioModel: '',
   lmstudioModels: [],
   lmstudioApiKey: '',
+  // Downloaded models (v0.8.3) — from GET /api/v1/models, which lists
+  // every model on the system, not just loaded ones. null = not fetched yet.
+  lmDownloaded: null,
+  lmDownloadedList: true, // false when the server only reports loaded models
+  lmDownloadedError: null,
+  lmLoadingModel: null, // id of the model currently being loaded, if any
   temperature: 0.2,
   maxTokens: 4096,
   unityExePath: '',
@@ -187,10 +193,106 @@ async function refreshModels() {
   if (res.ok) {
     state.lmstudioModels = res.models;
     updateModelDropdown();
+    if (state.provider === 'lmstudio') refreshDownloadedModels();
     return res;
   }
+  // Even when the loaded-model list fails, try the downloaded list —
+  // it reports its own error instead of leaving "Loading…" forever.
+  if (state.provider === 'lmstudio') refreshDownloadedModels();
   showToast('⚠ Could not list models: ' + res.error);
   return res;
+}
+
+// ── Downloaded models (v0.8.3) ─────────────────────────────────────
+// Lists every model LM Studio has downloaded (GET /api/v1/models),
+// each with a Load action that loads it with the tuned settings.
+// The list container is re-rendered on its own so typing in the URL
+// or key fields is never interrupted by a refresh.
+async function refreshDownloadedModels() {
+  const res = await rb.llm.listDownloaded({
+    provider: 'lmstudio',
+    lmstudioUrl: state.lmstudioUrl,
+    lmstudioApiKey: state.lmstudioApiKey,
+  }).catch(() => ({ ok: false, error: 'Could not reach the LM Studio server.', models: [], downloadedList: false }));
+  if (res.ok) {
+    state.lmDownloaded = res.models || [];
+    state.lmDownloadedList = res.downloadedList !== false;
+    state.lmDownloadedError = null;
+  } else {
+    state.lmDownloaded = [];
+    state.lmDownloadedList = false;
+    state.lmDownloadedError = res.error || 'Could not list downloaded models.';
+  }
+  renderDownloadedModels();
+}
+
+function renderDownloadedModels() {
+  const el = document.getElementById('s-lm-downloaded');
+  if (!el) return;
+  if (state.lmDownloaded === null) { el.innerHTML = 'Loading downloaded models…'; return; }
+  if (state.lmDownloadedError) {
+    el.innerHTML = `<div style="font-size:12px;color:var(--coral);">⚠ ${escHtml(state.lmDownloadedError)}</div>`;
+    return;
+  }
+  const list = state.lmDownloaded;
+  let html = '';
+  if (!state.lmDownloadedList) {
+    html += '<div style="font-size:12px;color:var(--text3);">This server only reports loaded models, so the list below is loaded models only — the full download list needs a newer LM Studio.</div>';
+  }
+  if (!list.length) {
+    html += '<div style="font-size:12px;color:var(--text3);">No models downloaded in LM Studio yet — download one in LM Studio first.</div>';
+  } else {
+    const recommendedMissing = !list.some(m => m.recommended);
+    if (recommendedMissing) {
+      html += '<div style="font-size:12px;color:var(--text3);">Qwen3 Coder 30B A3B (Q4_K_M) is not downloaded in LM Studio — download it in LM Studio first.</div>';
+    }
+    for (const m of list) {
+      const meta = [m.quantization, m.params, m.format].filter(Boolean).join(' · ');
+      const isCurrent = m.id === state.lmstudioModel;
+      const loading = state.lmLoadingModel === m.id;
+      const tag = m.loaded
+        ? `<span style="color:var(--green);font-size:12px;">● Loaded${isCurrent ? ' — active' : ''}</span>`
+        : loading
+          ? '<span style="font-size:12px;color:var(--text3);">Loading…</span>'
+          : `<button class="btn btn-secondary" style="flex-shrink:0;" onclick="loadLmStudioModel('${escHtml(m.id).replace(/'/g, "\\'")}')">Load</button>`;
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border2);border-radius:8px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(m.displayName || m.id)}${m.recommended ? ' <span style="color:var(--green);font-size:12px;">★ Recommended coding model</span>' : ''}</div>
+          <div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(m.id)}${meta ? ' · ' + escHtml(meta) : ''}</div>
+        </div>${tag}</div>`;
+    }
+  }
+  el.innerHTML = html;
+}
+
+async function loadLmStudioModel(id) {
+  if (!id || state.lmLoadingModel) return;
+  state.lmLoadingModel = id;
+  renderDownloadedModels();
+  const statusEl = document.getElementById('s-lm-load-status');
+  if (statusEl) { statusEl.style.color = 'var(--text3)'; statusEl.textContent = 'Loading ' + id + ' with tuned settings — this can take a few minutes for a 30B model…'; }
+  try {
+    const res = await rb.llm.loadModel(id);
+    if (res.ok) {
+      state.lmstudioModel = id;
+      await rb.db.setSetting('lmstudio_model', id);
+      updateModelDropdown();
+      setLlmStatus('green', providerLabel() + ' · ' + id);
+      if (statusEl) {
+        statusEl.style.color = 'var(--green)';
+        statusEl.textContent = '✓ ' + id + ' is loaded with tuned settings (full GPU offload, KV cache Q8, 1 concurrent prediction, 16K context, flash attention).'
+          + (res.warning ? ' ' + res.warning : '');
+      }
+      showToast('✓ Model loaded: ' + id);
+    } else {
+      if (statusEl) { statusEl.style.color = 'var(--coral)'; statusEl.textContent = '✕ ' + (res.error || 'Load failed.'); }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--coral)'; statusEl.textContent = '✕ ' + (e && e.message ? e.message : 'Load failed.'); }
+  } finally {
+    state.lmLoadingModel = null;
+    renderDownloadedModels();
+  }
 }
 
 function updateModelDropdown() {
@@ -2241,6 +2343,12 @@ function renderModelPane(body) {
             <option value="">— Select a model —</option>
           </select>
         </label>
+        <div>
+          <div class="field-label">Downloaded models — load one with tuned settings</div>
+          <div style="font-size:12px;color:var(--text3);margin:4px 0 8px;">Loads with full GPU offload, KV cache Q8, 1 concurrent prediction, 16K context, flash attention. CodeFox loads a model into the running LM Studio server — it does not start the server, and speed depends on the model and the machine.</div>
+          <div id="s-lm-downloaded" style="display:flex;flex-direction:column;gap:6px;">Loading downloaded models…</div>
+          <div id="s-lm-load-status" style="font-size:12px;color:var(--text3);margin-top:6px;"></div>
+        </div>
         <label class="field-label">API key (optional — LM Studio needs none by default)
           <input id="s-lm-key" type="password" value="${escHtml(state.lmstudioApiKey || '')}" placeholder="Leave blank unless your server requires one" />
         </label>

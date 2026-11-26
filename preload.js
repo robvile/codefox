@@ -149,6 +149,8 @@ contextBridge.exposeInMainWorld('rb', {
   llm: {
     status: () => ipcRenderer.invoke('llm:status'),
     listModels: (payload) => ipcRenderer.invoke('llm:listModels', payload || {}),
+    listDownloaded: (payload) => ipcRenderer.invoke('llm:listDownloaded', payload || {}),
+    loadModel: (modelId) => ipcRenderer.invoke('llm:loadModel', { model: modelId }),
     verify: (payload) => ipcRenderer.invoke('llm:verify', payload || {}),
     chat: (payload) => ipcRenderer.invoke('llm:chat', payload),
     onChunk: (cb) => ipcRenderer.on('llm:stream-chunk', (_, chunk) => cb(chunk)),

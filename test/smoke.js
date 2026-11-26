@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'comfyui.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.8.2.
+// 2. package.json version is 0.8.3.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.8.2', pkg.version === '0.8.2', 'got ' + pkg.version);
-check('sidebar footer shows 0.8.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.2 — Local'));
+check('package.json version is 0.8.3', pkg.version === '0.8.3', 'got ' + pkg.version);
+check('sidebar footer shows 0.8.3', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.3 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -1866,8 +1866,108 @@ check('Available only defaults ON, is persisted, and Clear resets to it',
   && appJs.includes('function toggleComfyuiAvailableOnly')
   && appJs.includes("toggleComfyuiAvailableOnly(!state.comfyuiLib.availableOnly)")
   && appJs.includes('state.comfyuiLib.availableOnly = true;'));
-check('CHANGELOG has the 0.8.2 entry',
-  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.2 — 2026-11-25'));
+check('CHANGELOG has the 0.8.3 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.3 — 2026-11-25'));
+
+// v0.8.3 — tuned LM Studio model loading. The defaults are global:
+// one object, no per-model table, and the load body is built only
+// from it, so no model can silently drop a setting.
+const lmLoad = require(path.join(root, 'lmstudio-load.js'));
+check('tuned defaults are exactly the six global settings with the right values',
+  JSON.stringify(Object.keys(lmLoad.TUNED_LOAD_DEFAULTS).sort()) === JSON.stringify(['contextLength', 'evalBatchSize', 'flashAttention', 'gpuOffloadRatio', 'kvCacheQuantization', 'maxParallelPredictions'].sort())
+  && lmLoad.TUNED_LOAD_DEFAULTS.kvCacheQuantization === 'q8_0'
+  && lmLoad.TUNED_LOAD_DEFAULTS.maxParallelPredictions === 1
+  && lmLoad.TUNED_LOAD_DEFAULTS.gpuOffloadRatio === 1
+  && lmLoad.TUNED_LOAD_DEFAULTS.contextLength === 16384
+  && lmLoad.TUNED_LOAD_DEFAULTS.evalBatchSize === 512
+  && lmLoad.TUNED_LOAD_DEFAULTS.flashAttention === true);
+check('load body uses the global defaults for any model id (no per-model lookup)',
+  (() => {
+    const a = lmLoad.buildLoadBody('qwen/qwen3-coder-30b-a3b-instruct');
+    const b = lmLoad.buildLoadBody('google/gemma-4-31b');
+    return a.model === 'qwen/qwen3-coder-30b-a3b-instruct' && b.model === 'google/gemma-4-31b'
+      && a.context_length === 16384 && b.context_length === 16384
+      && a.eval_batch_size === 512 && b.eval_batch_size === 512
+      && a.flash_attention === true && b.flash_attention === true
+      && a.offload_kv_cache_to_gpu === true && b.offload_kv_cache_to_gpu === true
+      && a.echo_load_config === true && b.echo_load_config === true;
+  })());
+check('recommended-model matcher picks Qwen3 Coder 30B A3B Q4_K_M out of a mixed list',
+  (() => {
+    const list = [
+      { key: 'qwen/qwen3-coder-8b-a3b-instruct', selected_variant: 'qwen/qwen3-coder-8b-a3b-instruct@q4_k_m' },
+      { key: 'qwen/qwen3-30b-a3b-instruct', selected_variant: 'qwen/qwen3-30b-a3b-instruct@q4_k_m' },
+      { key: 'deepseek/deepseek-coder-33b-instruct', selected_variant: 'deepseek/deepseek-coder-33b-instruct@q4_k_m' },
+      { key: 'qwen/qwen3-coder-30b-a3b-instruct', selected_variant: 'qwen/qwen3-coder-30b-a3b-instruct@q4_k_m' },
+      { key: 'qwen/qwen3-coder-30b-a3b-instruct', selected_variant: null },
+    ];
+    const picked = list.filter(m => lmLoad.isRecommendedCodingModel(m));
+    return picked.length === 1 && picked[0].key === 'qwen/qwen3-coder-30b-a3b-instruct'
+      && lmLoad.isRecommendedCodingModel('Qwen/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M')
+      && !lmLoad.isRecommendedCodingModel('qwen/qwen3-coder-30b-a3b-instruct');
+  })());
+check('preset merge preserves unrelated fields and keeps each value shape',
+  (() => {
+    const parsed = { load: { fields: [
+      { key: 'llm.load.contextLength', value: 8192 },
+      { key: 'llm.load.llama.kCacheQuantizationType', value: 'f16' },
+      { key: 'llm.load.llama.vCacheQuantizationType', value: { checked: false, value: 'f16' } },
+      { key: 'llm.load.seed', value: 42 },
+    ] } };
+    const merged = lmLoad.mergeProfileFields(parsed, lmLoad.tunedLoadProfile());
+    if (!merged) return false;
+    const byKey = (k) => merged.load.fields.find(f => f.key === k);
+    return byKey('llm.load.contextLength').value === 8192
+      && byKey('llm.load.seed').value === 42
+      && byKey('llm.load.llama.kCacheQuantizationType').value === 'q8_0'
+      && byKey('llm.load.llama.vCacheQuantizationType').value.checked === true
+      && byKey('llm.load.llama.vCacheQuantizationType').value.value === 'q8_0'
+      && byKey('llm.load.numParallelSessions').value === 1
+      && byKey('llm.load.llama.acceleration.offloadRatio').value === 1
+      && byKey('llm.load.offloadKVCacheToGpu').value === true
+      && lmLoad.mergeProfileFields({ nope: true }, lmLoad.tunedLoadProfile()) === null
+      && lmLoad.mergeProfileFields(null, lmLoad.tunedLoadProfile()) === null;
+  })());
+check('preset write creates the file, then preserves unrelated fields on re-apply',
+  (() => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-lm-home-'));
+    try {
+      const first = lmLoad.applyTunedLoadProfile('qwen/qwen3-coder-30b-a3b-instruct', { home: tmpHome });
+      if (!first.applied || !first.created) return false;
+      const file = first.files[0];
+      const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (written.load.fields.find(f => f.key === 'llm.load.numParallelSessions').value !== 1) return false;
+      // Add an unrelated field by hand, then re-apply: it must survive.
+      written.load.fields.push({ key: 'llm.load.seed', value: 7 });
+      fs.writeFileSync(file, JSON.stringify(written));
+      const second = lmLoad.applyTunedLoadProfile('qwen/qwen3-coder-30b-a3b-instruct', { home: tmpHome });
+      if (!second.applied) return false;
+      const again = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const seed = again.load.fields.find(f => f.key === 'llm.load.seed');
+      const bak = fs.existsSync(file + '.codefox-bak');
+      const unsafe = lmLoad.applyTunedLoadProfile('../../etc/passwd', { home: tmpHome });
+      return seed && seed.value === 7 && bak && unsafe.applied === false;
+    } finally { fs.rmSync(tmpHome, { recursive: true, force: true }); }
+  })());
+check('main.js wires the load IPCs and preload exposes them',
+  mainJs.includes("require('./lmstudio-load')")
+  && mainJs.includes("ipcMain.handle('llm:listDownloaded'")
+  && mainJs.includes("ipcMain.handle('llm:loadModel'")
+  && fs.readFileSync(path.join(root, 'lmstudio-load.js'), 'utf8').includes('/api/v1/models/load')
+  && preloadJs.includes('listDownloaded')
+  && preloadJs.includes('loadModel'));
+check('Settings shows the downloaded list with a Load action and the tuned settings in plain words',
+  appJs.includes('s-lm-downloaded')
+  && appJs.includes('async function loadLmStudioModel(id)')
+  && appJs.includes('async function refreshDownloadedModels()')
+  && appJs.includes('Recommended coding model')
+  && appJs.includes('is not downloaded in LM Studio — download it in LM Studio first')
+  && appJs.includes('Loads with full GPU offload, KV cache Q8, 1 concurrent prediction, 16K context, flash attention')
+  && appJs.includes('it does not start the server'));
+check('README documents model loading honestly (loads into a running server, no speed promise)',
+  readme.includes('loads models into a running LM Studio server')
+  && readme.includes('does not start the server')
+  && readme.includes('speed depends on the model and the machine'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');
@@ -1920,6 +2020,43 @@ const mockServer = http.createServer((req, res) => {
   const down = await comfy.getComfyuiStatus('http://127.0.0.1:1');
   check('status reports not-ok (never fake ok) when nothing is listening',
     down.ok === false && !!down.error);
+
+  // v0.8.3 — the load flow against a stub fetch (no real LM Studio):
+  // preset write + REST load with the tuned body + verify-after-load.
+  // No fake "loaded" state: a load the verify step cannot see is a failure.
+  {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-lm-load-'));
+    const makeStub = (verifyLoaded) => {
+      const calls = [];
+      const stub = async (url, opts) => {
+        calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body ? JSON.parse(opts.body) : null });
+        if (url.endsWith('/api/v1/models') && (!opts || !opts.method || opts.method === 'GET')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ models: [{ key: 'qwen/qwen3-coder-30b-a3b-instruct', loaded_instances: verifyLoaded ? [{ id: 'qwen/qwen3-coder-30b-a3b-instruct', config: { context_length: 16384, eval_batch_size: 512, flash_attention: true, offload_kv_cache_to_gpu: true, parallel: 1 } }] : [] }] }) };
+        }
+        if (url.endsWith('/api/v1/models/load')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ type: 'llm', instance_id: 'qwen/qwen3-coder-30b-a3b-instruct', load_config: { context_length: 16384 } }) };
+        }
+        return { ok: false, status: 404, text: async () => '' };
+      };
+      return { stub, calls };
+    };
+    const happy = makeStub(true);
+    const res = await lmLoad.loadLmStudioModel({ modelId: 'qwen/qwen3-coder-30b-a3b-instruct', baseUrl: 'http://localhost:1234', home: tmpHome, fetchImpl: happy.stub });
+    const loadCall = happy.calls.find(c => c.url.endsWith('/api/v1/models/load'));
+    check('load flow: preset written, tuned REST body sent, verified loaded',
+      res.ok === true && res.loaded === true
+      && loadCall && loadCall.body.context_length === 16384 && loadCall.body.eval_batch_size === 512
+      && loadCall.body.flash_attention === true && loadCall.body.offload_kv_cache_to_gpu === true
+      && fs.existsSync(path.join(tmpHome, '.internal', 'user-concrete-model-default-config', 'qwen', 'qwen3-coder-30b-a3b-instruct.json')));
+    const noVerify = makeStub(false);
+    const res2 = await lmLoad.loadLmStudioModel({ modelId: 'qwen/qwen3-coder-30b-a3b-instruct', baseUrl: 'http://localhost:1234', home: tmpHome, fetchImpl: noVerify.stub });
+    check('load flow: a load the verify step cannot see is a failure, not a success',
+      res2.ok === false && /not in the loaded list/.test(res2.error || ''));
+    const res3 = await lmLoad.loadLmStudioModel({ modelId: 'qwen/qwen3-coder-30b-a3b-instruct', baseUrl: 'http://localhost:1234', home: tmpHome, fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
+    check('load flow: an unreachable server fails plainly, never a fake success',
+      res3.ok === false && /not running/.test(res3.error || ''));
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
   // Bulk approve: run the REAL approveAllComfyuiWorkflows from
   // app.js (extracted by brace matching, not a copy) against a
   // mock library with several workflows per section.
