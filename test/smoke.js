@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.8.1.
+// 2. package.json version is 0.8.2.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.8.1', pkg.version === '0.8.1', 'got ' + pkg.version);
-check('sidebar footer shows 0.8.1', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.1 — Local'));
+check('package.json version is 0.8.2', pkg.version === '0.8.2', 'got ' + pkg.version);
+check('sidebar footer shows 0.8.2', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.8.2 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -521,6 +521,46 @@ check('no-actions enforcement trigger exists',
   appJs.includes('enforcementRetried') && appJs.includes('ENFORCEMENT_FOLLOWUP')
   && appJs.includes('You did not output any file changes')
   && appJs.includes('asksForChange(userRequest)'));
+// v0.8.2 — the prefab refusal: Ask mode instructed the model to
+// refuse, and the refusal list missed tutorial-style refusals.
+// Extract the pure helpers and run them in Node.
+const refusalListSrc = /const REFUSAL_PHRASES = \[[\s\S]*?\];/.exec(appJs);
+check('REFUSAL_PHRASES list can be extracted for testing', !!refusalListSrc);
+const isRefusalSrc = extractFunction(appJs, 'isRefusal');
+check('isRefusal can be extracted for testing', !!isRefusalSrc);
+if (refusalListSrc && isRefusalSrc) {
+  const isRefusal = new Function(refusalListSrc[0] + '\n' + isRefusalSrc + '\nreturn isRefusal;')();
+  check('isRefusal catches the exact tutorial refusal Rob got',
+    isRefusal('I cannot do that, but I can walk you through the steps'));
+  check('isRefusal catches other tutorial-style refusals',
+    isRefusal("I can't create a prefab, but let me guide you through it")
+    && isRefusal("I don't have access to your project files")
+    && isRefusal('I can show you how to set it up yourself'));
+  check('isRefusal does NOT flag a legit Agent reply',
+    !isRefusal('**File Path:** `Assets/Test.prefab`\n```\nhello\n```\nDone — I worked step by step through the setup.')
+    && !isRefusal('Here is the file:\n**File Path:** `Assets/Editor/X.cs`\n```csharp\npublic class X {}\n```'));
+}
+const changeWordsSrc = /const CHANGE_INTENT_WORDS = \[[^\]]*\];/.exec(appJs);
+const asksSrc = extractFunction(appJs, 'asksForChange');
+const resolveSrc = extractFunction(appJs, 'resolveModeForRequest');
+check('resolveModeForRequest can be extracted for testing', !!changeWordsSrc && !!asksSrc && !!resolveSrc);
+if (changeWordsSrc && asksSrc && resolveSrc) {
+  const resolveModeForRequest = new Function(changeWordsSrc[0] + '\n' + asksSrc + '\n' + resolveSrc + '\nreturn resolveModeForRequest;')();
+  check('build request in Ask mode routes to Agent mode',
+    resolveModeForRequest('ask', 'build me a prefab') === 'agent'
+    && resolveModeForRequest('ask', 'fix the null reference in Player.cs') === 'agent');
+  check('plain question in Ask mode stays in Ask mode',
+    resolveModeForRequest('ask', 'why does this script fail?') === 'ask');
+  check('Plan mode is never switched by routing',
+    resolveModeForRequest('plan', 'build me a prefab') === 'plan');
+  check('Agent mode is unchanged by routing',
+    resolveModeForRequest('agent', 'build me a prefab') === 'agent');
+}
+check('Ask-mode prompt still explains only for non-change requests',
+  appJs.includes('Answer and explain only. Do not propose file writes'));
+check('sendChat routes by intent before building the prompt',
+  appJs.includes('resolveModeForRequest(state.chatMode, text)')
+  && appJs.includes('Switched to Agent mode to do the work'));
 check('diagnose-error flow attaches the named file',
   appJs.includes('diagnoseErrorContext') && appJs.includes('surrounding lines'));
 check('Agent-mode UI hint exists',
@@ -1826,8 +1866,8 @@ check('Available only defaults ON, is persisted, and Clear resets to it',
   && appJs.includes('function toggleComfyuiAvailableOnly')
   && appJs.includes("toggleComfyuiAvailableOnly(!state.comfyuiLib.availableOnly)")
   && appJs.includes('state.comfyuiLib.availableOnly = true;'));
-check('CHANGELOG has the 0.8.1 entry',
-  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.1 — 2026-11-24'));
+check('CHANGELOG has the 0.8.2 entry',
+  fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.2 — 2026-11-25'));
 
 // ComfyUI HTTP client against a mock server (no real ComfyUI).
 const http = require('http');

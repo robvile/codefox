@@ -4,7 +4,7 @@ A free, local AI coding assistant that runs entirely on your machine. No cloud. 
 
 Built on Electron + SQLite, with [LM Studio](https://lmstudio.ai) as the default local model backend and [Ollama](https://ollama.com) as an alternative backend.
 
-![CodeFox](https://img.shields.io/badge/version-0.8.1-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![CodeFox](https://img.shields.io/badge/version-0.8.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -130,6 +130,8 @@ Use the **Ask / Plan / Agent** buttons above the chat input:
 - **Ask** — the model answers and explains only. It will not propose file writes.
 - **Plan** — the model outputs a plan: `FILE:` lines for every file to touch, then numbered steps. No code yet.
 - **Agent** — the model works step by step and outputs complete code, one file per fenced block, each preceded by `**File Path:** \`path\``. In Agent mode CodeFox also runs the loop: after each reply it runs the model's safe commands, applies its file changes, and installs the packages it asked for, then sends the results back to the model so it can fix errors and retry — without you prompting again. See "Agent mode (the loop)" below.
+
+A build, fix, or create request always runs in Agent mode, even if Ask is selected: Ask only explains, so sending it a build request would get a refusal ("I cannot do that, but I can walk you through the steps") — the model doing exactly what Ask told it to. CodeFox notices the change intent, switches to Agent mode for that turn, and says so in the chat. Genuine questions stay in Ask mode, and Plan mode is never switched — a plan is not a build.
 
 ### Tools
 

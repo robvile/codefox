@@ -828,6 +828,17 @@ async function sendChat() {
   state.messages.push({ role: 'user', content: text });
   renderMessages();
 
+  // Intent routing (v0.8.2) — BEFORE the system prompt is built,
+  // because the prompt is written for the mode in effect. Ask mode
+  // only explains, so a build/fix/create request sent in Ask mode
+  // would get an instructed refusal. Switch to Agent mode for this
+  // turn, persist it (the toggle must reflect reality), and say so
+  // plainly. Plan mode is untouched: a plan is not a build.
+  if (resolveModeForRequest(state.chatMode, text) !== state.chatMode) {
+    setChatMode('agent');
+    addSystemMessage('Switched to Agent mode to do the work — Ask mode only explains, it does not change files.');
+  }
+
   // The thinking indicator is created per turn by streamOneTurn,
   // which also owns the assistant message element.
 
@@ -902,6 +913,15 @@ const REFUSAL_PHRASES = [
   'cannot actually edit the file', 'restricted from making actual changes',
   'cannot modify the file', 'unable to modify files', 'unable to edit files',
   'cannot make changes to your files', 'i cannot edit files',
+  // Tutorial-style refusals (v0.8.2): "I cannot do that, but I can
+  // walk you through the steps" — the model declines the work and
+  // offers a guide instead of doing it. Never bare 'step by step':
+  // the Agent prompt itself says "work step by step", so that
+  // would false-positive on legitimate replies.
+  'cannot do that', "can't do that", 'cannot create', "can't create",
+  'unable to create', 'not able to', "i don't have the ability",
+  "i don't have access", 'walk you through', 'let me walk you through',
+  'i can guide you', 'i can show you how',
 ];
 function isRefusal(text) {
   const t = String(text || '').toLowerCase();
@@ -914,10 +934,24 @@ const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies th
 // worse: the model politely DESCRIBES the fix and stops, with no
 // refusal phrase at all. When the user asked for a change and the
 // reply produced no actions, that turn is INCOMPLETE, not an answer.
-const CHANGE_INTENT_WORDS = ['fix', 'change', 'edit', 'update', 'create', 'add', 'remove', 'refactor', 'correct', 'repair', 'make it', 'do it'];
+// 'build' is here because a request like "build me a prefab"
+// contains no other change word — and it is exactly the request
+// that was refused in Ask mode (v0.8.2).
+const CHANGE_INTENT_WORDS = ['fix', 'change', 'edit', 'update', 'create', 'add', 'remove', 'refactor', 'correct', 'repair', 'make it', 'do it', 'build'];
 function asksForChange(text) {
   const t = String(text || '').toLowerCase();
   return CHANGE_INTENT_WORDS.some(k => t.includes(k));
+}
+// Intent-based mode routing (v0.8.2). Ask mode is instructed to
+// refuse file work ("Answer and explain only"), so a build request
+// sent in Ask mode gets an INSTRUCTED refusal — the model doing
+// exactly what the app told it to. A request that asks for a change
+// is not a question: run it in Agent mode instead. Plan mode is
+// untouched — a plan request is not a build request. Pure function
+// so the smoke test can exercise it directly.
+function resolveModeForRequest(mode, text) {
+  if (mode === 'ask' && asksForChange(text)) return 'agent';
+  return mode;
 }
 function lastUserMessageText() {
   for (let i = state.messages.length - 1; i >= 0; i--) {
