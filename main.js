@@ -312,6 +312,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_enabled', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows_dir', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows', '[]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_gpu_mode', 'shared')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('git_auto_backup', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('git_exe_path', '')");
   } else {
@@ -340,6 +341,7 @@ async function initDB() {
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_enabled', '1')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows_dir', '')");
     db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_workflows', '[]')");
+    db.run("INSERT OR IGNORE INTO settings VALUES ('comfyui_gpu_mode', 'shared')");
   }
 
   // v0.5.0: max agent-loop rounds (default 5, range 1–10).
@@ -905,6 +907,27 @@ ipcMain.handle('llm:loadModel', async (_, payload) => {
   if (!modelId) return { ok: false, error: 'No model selected.' };
   try {
     return await lmLoad.loadLmStudioModel({
+      modelId,
+      baseUrl: normalizeLmStudioRoot(cfg.url),
+      apiKey: cfg.apiKey,
+    });
+  } catch (e) {
+    return { ok: false, model: modelId, error: e.message };
+  }
+});
+
+// Unload a model from the running LM Studio server (lmstudio-load.js,
+// POST /api/v1/models/unload — LM Studio 0.4.0+). Used by GPU swap
+// mode: the chat model is unloaded before a heavy ComfyUI run so the
+// generation has the whole GPU, then loaded back afterwards. An
+// already-unloaded model is a success, not an error.
+ipcMain.handle('llm:unloadModel', async (_, payload) => {
+  const cfg = resolveLlmConfig(payload || {});
+  if (cfg.provider !== 'lmstudio') return { ok: false, error: 'Model unloading is only supported for LM Studio.' };
+  const modelId = String((payload && payload.model) || '').trim();
+  if (!modelId) return { ok: false, error: 'No model selected.' };
+  try {
+    return await lmLoad.unloadLmStudioModel({
       modelId,
       baseUrl: normalizeLmStudioRoot(cfg.url),
       apiKey: cfg.apiKey,
@@ -1802,6 +1825,33 @@ ipcMain.handle('comfyui:uploadImage', async (_, payload) => {
   const url = p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
   if (!p.filePath) return { ok: false, error: 'comfyui:uploadImage needs a filePath.' };
   try { return await comfyui.uploadImage(url, p.filePath, { subfolder: p.subfolder || '', overwrite: !!p.overwrite }); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Cancel a generation that is still queued or running. The client
+// checks /queue first, so a cancel only ever touches our own
+// prompt_id — it never kills someone else's job.
+ipcMain.handle('comfyui:cancel', async (_, payload) => {
+  const p = payload || {};
+  const url = p.url || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  if (!p.promptId) return { ok: false, error: 'comfyui:cancel needs a promptId.' };
+  try { return await comfyui.cancelPrompt(url, p.promptId); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Free ComfyUI's GPU memory (unload its models, clear its cache).
+// Used after a generation in GPU swap mode, before the chat model
+// is loaded back.
+ipcMain.handle('comfyui:freeMemory', async (_, payload) => {
+  const url = (payload && payload.url) || readSetting('comfyui_url', comfyui.DEFAULT_COMFYUI_URL);
+  try { return await comfyui.freeComfyuiMemory(url); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Plan N variations of a workflow from its parsed inputs: a batch
+// node renders them in one run, a seed input gets N sequential
+// runs with seeds +0, +1, …, and a workflow with neither runs
+// once. Pure computation — no ComfyUI call.
+ipcMain.handle('comfyui:planVariations', async (_, payload) => {
+  const p = payload || {};
+  try { return { ok: true, plan: comfyui.planVariations(p.inputs || [], p.count) }; }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
 // Collect the full ComfyUI workflow catalogue: the user's own

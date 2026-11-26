@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.16.0.
+// 2. package.json version is 0.17.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.16.0', pkg.version === '0.16.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.16.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.16.0 — Local'));
+check('package.json version is 0.17.0', pkg.version === '0.17.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.17.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.17.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.14.0 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.14.0') && bridgeCs.includes('BridgeVersion = "0.14.0"'));
-check('embedded bridge has the 0.14.0 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.14.0'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.14.0',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.14.0');
+check('bridge .cs has the 0.15.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.15.0') && bridgeCs.includes('BridgeVersion = "0.15.0"'));
+check('embedded bridge has the 0.15.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.15.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.15.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.15.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.14.0' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.14.0 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.14.0');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.15.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.15.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.15.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -1737,9 +1737,10 @@ if (markerMatch && parseSrc && chatHtmlSrc && escSrc) {
     const html = renderChatResult(msg, 3);
     check('chat result renders thumbnails + Import / Discard row',
       typeof html === 'string' && html.includes('<img') && html.includes('file:///C:/tmp/x.png')
-      && html.includes('Import to Assets/Generated/slug/') && html.includes('Discard')
+      && html.includes('Import all to Assets/Generated/slug/') && html.includes('Discard')
       && html.includes('my_flux_t2i') && html.includes('a red car')
-      && html.includes('importComfyuiChatResult(3)') && html.includes('discardComfyuiChatResult(3)'));
+      && html.includes('importComfyuiChatResult(3)') && html.includes('discardComfyuiChatResult(3)')
+      && html.includes('importComfyuiChatImage(3, 0)') && html.includes('discardComfyuiChatImage(3, 0)'));
     const importedMsg = { role: 'assistant', content: marker + JSON.stringify({
       v: 1, workflowId: 'w1', workflowName: 'my_flux_t2i', prompt: '', inputs: {},
       outputs: [{ filename: 'x.png', subfolder: '', type: 'output', localPath: null }],
@@ -1773,7 +1774,8 @@ check('ComfyUI view has library search, sort, filter chips, pin/hide, and a sear
 check('Generate panel has two columns and a Generate in chat button',
   appJs.includes('cf-two-col') && appJs.includes('generateComfyuiInChat') && appJs.includes('Generate in chat'));
 check('Agent loop shows chat results and no longer auto-imports; system prompt says results appear in chat',
-  appJs.includes('await appendComfyuiChatResult(wf, res.outputs, action.inputs, null)')
+  appJs.includes('await appendComfyuiChatResult(wf, [], action.inputs, null, job)')
+  && appJs.includes('syncComfyuiChatResult(job)')
   && !appJs.includes('importComfyuiOutputs(wf, res.outputs, action.inputs)')
   && appJs.includes('The result appears in the chat with an offer to import it into the project'));
 check('ComfyUI view layout is Connection, Generate, Library, History, Scan results — no flat error wall',
@@ -1784,7 +1786,7 @@ check('index.html has the v0.8.0 ComfyUI CSS (two-column form, compact rows, pic
   && indexHtml.includes('cf-picker-results') && indexHtml.includes('cf-chat-result'));
 check('README documents library search/filter/pin/hide and chat generation',
   readme.includes('Hide API templates') && readme.includes('Recently used')
-  && readme.includes('Generate in chat') && readme.includes('Import to `Assets/Generated/<workflow>/`'));
+  && readme.includes('Generate in chat') && readme.includes('Import all') && readme.includes('per-image'));
 check('CHANGELOG has the 0.8.0 entry',
   fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.8.0 — 2026-11-24'));
 
@@ -2349,6 +2351,29 @@ const mockServer = http.createServer((req, res) => {
   } else if (req.url === '/view?filename=x.png&subfolder=&type=output') {
     res.writeHead(200, { 'Content-Type': 'image/png' });
     res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  } else if (req.url === '/queue' && req.method === 'GET') {
+    // One pending prompt, one running prompt, one someone else's.
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ queue_pending: [[1, 'mock-prompt-pending']], queue_running: [[2, 'mock-prompt-running']] }));
+  } else if (req.url === '/queue' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, deleted: parsed.delete || [] }));
+    });
+  } else if (req.url === '/interrupt' && req.method === 'POST') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } else if (req.url === '/free' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, freed: parsed }));
+    });
   } else {
     res.writeHead(404);
     res.end();
@@ -2892,15 +2917,15 @@ check('app.js has the file loop machinery',
   && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
   && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
   && appJs.includes('isSafeProjectPath'));
-check('bridge version pins are 0.14.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
-  bridgeCs.includes('// CodeFoxBridge version: 0.14.0')
-  && bridgeCs.includes('BridgeVersion = "0.14.0"')
-  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.14.0'")
-  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.14.0')
+check('bridge version pins are 0.15.0 everywhere (MIN_TRANSPORT_VERSION stays 0.12.0)',
+  bridgeCs.includes('// CodeFoxBridge version: 0.15.0')
+  && bridgeCs.includes('BridgeVersion = "0.15.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.15.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.15.0')
   && bridge.MIN_TRANSPORT_VERSION === '0.12.0');
 check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.14.0 entry',
   readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
-  && readme.includes('readConsole') && readme.includes('version-0.16.0')
+  && readme.includes('readConsole') && readme.includes('version-0.17.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.14.0 — 2026-11-26'));
 
 // 36. v0.12.0 — log triage: detection, mirror agreement, prompt,
@@ -3165,8 +3190,8 @@ check('Settings Skills section shows the token estimate and the >5 warning',
   appJs.includes('tokens added to every Agent-mode prompt') && appJs.includes('More than 5 skills enabled — routing gets less reliable'));
 check('package.json build.files ships skill-files.js and the skills folder',
   Array.isArray(pkg.build.files) && pkg.build.files.includes('skill-files.js') && pkg.build.files.includes('skills/**/*'));
-check('bridge is now 0.14.0 (scene tools in 0.16.0)',
-  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.14.0';"));
+check('bridge is now 0.15.0 (import profile in 0.17.0)',
+  fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("const BUNDLED_BRIDGE_VERSION = '0.15.0';"));
 
 // The built-in multiplayer skill: frontmatter, file set, and the
 // workflow points the skill must encode.
@@ -3230,7 +3255,7 @@ check('README has the Skills section + CHANGELOG has the 0.13.0 skills entry',
   readme.includes('### Skills') && readme.includes('Project Rules always win')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.13.0')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('Skills — progressive loading'));
-check('README badge reads 0.16.0', readme.includes('version-0.16.0'));
+check('README badge reads 0.17.0', readme.includes('version-0.17.0'));
 
 // 38. v0.14.0 — bridge protocol hardening: the .bridge/
 // transport (inbox/processing/outbox/heartbeat), Unity's own
@@ -3665,6 +3690,233 @@ if (promptSrc) {
     })());
 }
 
+// 41. v0.17.0 — ComfyUI improvements: shared job + real cancel,
+// import profiles, provenance sidecar, variations, GPU swap mode,
+// confinement, and the comfyui.js split.
+{
+  // The split: three modules behind the comfyui.js facade, with
+  // every original export still there (the facade is what main.js
+  // and this test require).
+  check('comfyui.js split: client/workflows/scan modules exist and the facade re-exports them',
+    fs.existsSync(path.join(root, 'comfyui-client.js'))
+    && fs.existsSync(path.join(root, 'comfyui-workflows.js'))
+    && fs.existsSync(path.join(root, 'comfyui-scan.js'))
+    && typeof comfy.cancelPrompt === 'function' && typeof comfy.freeComfyuiMemory === 'function'
+    && typeof comfy.planVariations === 'function' && typeof comfy.clampVariations === 'function'
+    && Array.isArray(comfy.IMPORT_PROFILES) && typeof comfy.fnv1aHash === 'function'
+    && typeof comfy.workflowFileHash === 'function'
+    && typeof comfy.parseWorkflowGraph === 'function' && typeof comfy.scanComfyui === 'function'
+    && typeof comfy.convertUiGraphToApi === 'function' && typeof comfy.submitPrompt === 'function');
+
+  // Variation planning, from the fake workflow's parsed inputs
+  // (batch_size on node 5, seed 42 on node 4).
+  check('planVariations: batch node renders N in one run',
+    (() => {
+      const p = comfy.planVariations(parsedWf.inputs, 3);
+      return p.count === 3 && p.mode === 'batch' && p.batchNodeId === '5' && p.seedNodeId === null;
+    })());
+  check('planVariations: seed input gives sequential runs with the base seed',
+    (() => {
+      const p = comfy.planVariations([{ nodeId: '4', inputName: 'seed', value: 42 }], 3);
+      return p.count === 3 && p.mode === 'sequential' && p.seedNodeId === '4' && p.baseSeed === 42;
+    })());
+  check('planVariations: no seed or batch runs once and says so',
+    (() => {
+      const p = comfy.planVariations([{ nodeId: '2', inputName: 'text', value: 'a knight' }], 3);
+      return p.count === 1 && p.mode === 'single' && !!p.note;
+    })());
+  check('planVariations clamps the count to 1–4',
+    comfy.clampVariations(0) === 1 && comfy.clampVariations(9) === 4
+    && comfy.clampVariations('x') === 1 && comfy.clampVariations(2.7) === 2
+    && comfy.planVariations(parsedWf.inputs, 99).count === 4);
+
+  // Import profiles: the five ids, and the three lists that must
+  // agree — comfyui-workflows.js, the bridge .cs, and the
+  // renderer's copy in app.js.
+  const profileIds = ['sprite', 'pixel-sprite', 'texture', 'normal-map', 'ui'];
+  check('import profiles are exactly the five known ids',
+    comfy.IMPORT_PROFILES.map(p => p.id).join(',') === profileIds.join(','));
+  check('import profile lists agree across comfyui-workflows.js, the bridge, and app.js',
+    profileIds.every(id => bridgeCs.includes('"' + id + '"'))
+    && profileIds.every(id => appJs.includes("'" + id + "'"))
+    && bridgeCs.includes('ApplyImportProfileHandler')
+    && bridgeCs.includes('TextureImporter')
+    && bridgeCs.includes('Assets/Generated/'));
+  check('normalizeImportProfile lowercases and rejects unknown ids',
+    comfy.normalizeImportProfile('Sprite') === 'sprite'
+    && comfy.normalizeImportProfile('bogus') === ''
+    && comfy.normalizeImportProfile('') === '');
+
+  // Content hash for the provenance sidecar.
+  check('fnv1aHash is deterministic, 8 hex chars, and distinguishes files',
+    comfy.fnv1aHash('abc') === comfy.fnv1aHash('abc')
+    && /^[0-9a-f]{8}$/.test(comfy.fnv1aHash('abc'))
+    && comfy.fnv1aHash('abc') !== comfy.fnv1aHash('abd'));
+
+  // The scan assigns a hash and preserves the import profile
+  // across rescans, like purpose and approval.
+  check('importWorkflowsFromFiles assigns a hash and preserves the import profile',
+    (() => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-comfyui-hash-'));
+      try {
+        const file = path.join(tmp, 'hero.json');
+        fs.writeFileSync(file, JSON.stringify(fakeWorkflow));
+        const stored = [{ id: 'hero', purpose: 'x', approved: true, importProfile: 'sprite' }];
+        const r = comfy.importWorkflowsFromFiles([file], fakeObjectInfo, stored, { source: 'user' });
+        if (!r.workflows.length) return false;
+        const w = r.workflows[0];
+        return /^[0-9a-f]{8}$/.test(w.hash || '')
+          && w.hash === comfy.fnv1aHash(JSON.stringify(fakeWorkflow))
+          && w.importProfile === 'sprite';
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    })());
+
+  // Confinement: only the last path segment of a ComfyUI
+  // filename ever joins the import folder.
+  const safeNameSrc = extractFunction(appJs, 'comfyuiSafeImportFilename');
+  check('comfyuiSafeImportFilename is extractable', !!safeNameSrc);
+  if (safeNameSrc) {
+    const safeName = new Function(safeNameSrc + '\nreturn comfyuiSafeImportFilename;')();
+    check('confinement: ../../x and absolute paths cannot escape Assets/Generated/',
+      safeName('../../x.png') === 'x.png'
+      && safeName('C:\\evil\\y.png') === 'y.png'
+      && safeName('/abs/z.png') === 'z.png'
+      && safeName('a/b/c.png') === 'c.png'
+      && safeName('ok.png') === 'ok.png'
+      && safeName('') === 'output.png');
+  }
+
+  // The provenance sidecar: workflow hash, the seed the run
+  // actually used, prompt, inputs, profile, app version.
+  const sidecarSrc = extractFunction(appJs, 'buildComfyuiSidecar');
+  const normProfileSrc = extractFunction(appJs, 'normalizeComfyuiImportProfile');
+  check('buildComfyuiSidecar + normalizeComfyuiImportProfile are extractable', !!sidecarSrc && !!normProfileSrc);
+  if (sidecarSrc && normProfileSrc) {
+    const build = new Function('APP_VERSION', 'normalizeComfyuiImportProfile', sidecarSrc + '\nreturn buildComfyuiSidecar;')('0.17.0', new Function(normProfileSrc + '\nreturn normalizeComfyuiImportProfile;')());
+    const sc = build(
+      { id: 'hero', name: 'Hero', source: 'user', hash: 'abcdef01', file: 'C:\\wf\\hero.json', inputs: [{ inputName: 'checkpoint_name', value: 'qwen.safetensors' }], importProfile: 'Sprite' },
+      { promptId: 'p1', variation: 2, seedUsed: 45 },
+      { positive: 'a hero', seed: 42 },
+      'Assets/Generated/hero/hero-1.png');
+    check('sidecar records workflow, prompt, seed used, checkpoint, profile, version',
+      sc.workflow.hash === 'abcdef01' && sc.prompt === 'a hero' && sc.seed === 45
+      && sc.checkpoints.includes('qwen.safetensors') && sc.importProfile === 'sprite'
+      && sc.codefoxVersion === '0.17.0' && sc.asset === 'Assets/Generated/hero/hero-1.png'
+      && sc.variation === 2 && sc.promptId === 'p1');
+  }
+
+  // The ```comfyui block carries a variations count.
+  const parseBlocksSrc = extractFunction(appJs, 'parseComfyuiBlocks');
+  check('parseComfyuiBlocks is extractable', !!parseBlocksSrc);
+  if (parseBlocksSrc) {
+    const parse = new Function(parseBlocksSrc + '\nreturn parseComfyuiBlocks;')();
+    const withCount = parse('```comfyui\n{"workflow": "hero", "count": 3, "inputs": {}}\n```');
+    const withVariations = parse('```comfyui\n{"workflow": "hero", "variations": 2, "inputs": {}}\n```');
+    const plain = parse('```comfyui\n{"workflow": "hero", "inputs": {}}\n```');
+    check('parseComfyuiBlocks reads count / variations, defaulting to 1',
+      withCount.length === 1 && withCount[0].count === 3
+      && withVariations.length === 1 && withVariations[0].count === 2
+      && plain.length === 1 && plain[0].count === 1);
+  }
+
+  // The chat result v2 envelope: running shows Cancel, failed
+  // shows the error, per-image state shows per-image.
+  if (markerMatch && parseSrc && chatHtmlSrc && escSrc) {
+    try {
+      const marker = markerMatch[1];
+      const escHtml = new Function(escSrc + '\nreturn escHtml;')();
+      const renderChatResult = new Function('escHtml', 'comfyuiFileUrl', 'comfyuiSlug',
+        'const COMFYUI_CHAT_MARKER = ' + JSON.stringify(marker) + ';\n'
+        + parseSrc + '\n' + chatHtmlSrc + '\nreturn comfyuiChatResultHtml;')(
+        escHtml, (p) => 'file:///' + String(p || '').replace(/\\/g, '/'), (n) => 'slug');
+      const runningMsg = { role: 'assistant', content: marker + JSON.stringify({
+        v: 2, workflowId: 'w1', workflowName: 'hero', prompt: 'a hero', inputs: {},
+        outputs: [], jobId: 'job-1', status: 'running', error: null, imported: false, dir: '', discarded: false,
+      }) };
+      const runningHtml = renderChatResult(runningMsg, 5);
+      check('chat result shows live status + Cancel while the job runs',
+        runningHtml.includes('Generating') && runningHtml.includes('cancelComfyuiChatJob(5)'));
+      const failedMsg = { role: 'assistant', content: marker + JSON.stringify({
+        v: 2, workflowId: 'w1', workflowName: 'hero', prompt: '', inputs: {},
+        outputs: [{ filename: 'x.png', subfolder: '', type: 'output', localPath: null }],
+        jobId: 'job-1', status: 'failed', error: 'ComfyUI reported an error', imported: false, dir: '', discarded: false,
+      }) };
+      check('chat result shows the failure plainly',
+        renderChatResult(failedMsg, 0).includes('ComfyUI reported an error'));
+      const perImageMsg = { role: 'assistant', content: marker + JSON.stringify({
+        v: 2, workflowId: 'w1', workflowName: 'hero', prompt: '', inputs: {},
+        outputs: [
+          { filename: 'a.png', subfolder: '', type: 'output', localPath: 'C:\\tmp\\a.png', imported: true, assetPath: 'Assets/Generated/hero/a.png' },
+          { filename: 'b.png', subfolder: '', type: 'output', localPath: 'C:\\tmp\\b.png', imported: false, discarded: false },
+        ],
+        jobId: null, status: 'done', imported: false, dir: '', discarded: false,
+      }) };
+      const perImageHtml = renderChatResult(perImageMsg, 2);
+      check('chat result shows per-image Imported and per-image Import',
+        perImageHtml.includes('✓ Imported to Assets/Generated/hero/a.png')
+        && perImageHtml.includes('importComfyuiChatImage(2, 1)'));
+    } catch (e) {
+      check('chat-result v2 renderer runs in Node', false, String(e && e.message));
+    }
+  }
+
+  // The job machinery: one shared job, cancel, and no global
+  // poll-stop flag left.
+  check('app.js has the shared job object and real cancel, no global poll-stop',
+    appJs.includes('function createComfyuiJob') && appJs.includes('function cancelComfyuiJob')
+    && appJs.includes('function runComfyuiJob') && appJs.includes('function pollComfyuiPrompt')
+    && appJs.includes('rb.comfyui.cancel({ promptId })')
+    && !appJs.includes('window._comfyuiPollStop'));
+  check('agent loop cancels the job on Stop and creates the chat message before the run',
+    appJs.includes('cancelComfyuiJob(state.comfyuiGenerating.jobId)')
+    && appJs.includes('createComfyuiJob(wf, { plan, swap: !!swappedModel, swappedModel })')
+    && appJs.includes('runComfyuiJobFromJob(job, action.inputs)'));
+  check('system prompt teaches variations, the sidecar, and chaining into the scene',
+    appJs.includes('Add "count": 2–4 when the user wants variations')
+    && appJs.includes('<asset>.gen.json sidecar')
+    && appJs.includes("assign it to a SpriteRenderer with the set_property tool (m_Sprite)"));
+
+  // GPU swap mode: the setting, the UI, and the unload/reload
+  // helpers. The unload endpoint is LM Studio's /api/v1/models/unload.
+  check('GPU swap mode: setting seeded, UI in Settings, unload + reload helpers in app.js',
+    mainJs.includes("INSERT OR IGNORE INTO settings VALUES ('comfyui_gpu_mode', 'shared')")
+    && appJs.includes('function setComfyuiGpuMode') && appJs.includes('GPU mode')
+    && appJs.includes('function unloadModelForComfyuiSwap') && appJs.includes('function reloadModelAfterComfyuiSwap')
+    && appJs.includes("rb.llm.unloadModel(model)") && appJs.includes("rb.comfyui.freeMemory({})"));
+  check('lmstudio-load.js has unloadLmStudioModel (POST /api/v1/models/unload)',
+    typeof lmLoad.unloadLmStudioModel === 'function'
+    && fs.readFileSync(path.join(root, 'lmstudio-load.js'), 'utf8').includes('/api/v1/models/unload'));
+
+  // New IPCs on both sides of the bridge.
+  check('main.js + preload expose cancel / freeMemory / planVariations / unloadModel',
+    mainJs.includes("ipcMain.handle('comfyui:cancel'") && mainJs.includes("ipcMain.handle('comfyui:freeMemory'")
+    && mainJs.includes("ipcMain.handle('comfyui:planVariations'") && mainJs.includes("ipcMain.handle('llm:unloadModel'")
+    && preloadJs.includes("cancel: (payload) => ipcRenderer.invoke('comfyui:cancel'")
+    && preloadJs.includes("freeMemory: (payload) => ipcRenderer.invoke('comfyui:freeMemory'")
+    && preloadJs.includes("planVariations: (payload) => ipcRenderer.invoke('comfyui:planVariations'")
+    && preloadJs.includes("unloadModel: (modelId) => ipcRenderer.invoke('llm:unloadModel'"));
+
+  // Bridge: the import-profile handler is registered, confined,
+  // and versioned.
+  check('bridge registers apply_import_profile, confined to Assets/Generated/, version 0.15.0',
+    bridgeCs.includes('{ "apply_import_profile", (json, args) => ApplyImportProfileHandler.Handle(json, args) }')
+    && bridgeCs.includes('TextureImporterType.Sprite') && bridgeCs.includes('SaveAndReimport')
+    && bridgeCs.includes("StartsWith(\"Assets/Generated/\"")
+    && bridgeCs.includes('// CodeFoxBridge version: 0.15.0'));
+
+  // Version pins and packaging for 0.17.0.
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  check('package.json is 0.17.0 and build.files includes the three split modules',
+    pkg.version === '0.17.0'
+    && pkg.build.files.includes('comfyui-client.js')
+    && pkg.build.files.includes('comfyui-workflows.js')
+    && pkg.build.files.includes('comfyui-scan.js'));
+  check('index.html footer, README badge, and CHANGELOG have the 0.17.0 entry',
+    indexHtml.includes('CodeFox 0.17.0 — Local · No account needed')
+    && fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes('badge/version-0.17.0-blue')
+    && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.17.0 — 2026-11-26'));
+}
+
 (async () => {
   // v0.14.0 runner: runUnityCommand against an injected fs and
   // clock — no Unity, no real waiting. The fake clock advances
@@ -3777,6 +4029,47 @@ if (promptSrc) {
       check('mock server: view downloads bytes to disk',
         dl.ok === true && fs.existsSync(path.join(tmpDl, 'x.png')) && fs.readFileSync(path.join(tmpDl, 'x.png'))[0] === 0x89);
     } finally { fs.rmSync(tmpDl, { recursive: true, force: true }); }
+    // v0.17.0 — real cancel: queued prompts are deleted from the
+    // queue, running ones are interrupted, and a prompt that is
+    // in neither list is already done (nothing to cancel).
+    const cancelPending = await comfy.cancelPrompt(base, 'mock-prompt-pending');
+    check('mock server: cancel deletes a queued prompt from /queue',
+      cancelPending.ok === true && cancelPending.action === 'deleted');
+    const cancelRunning = await comfy.cancelPrompt(base, 'mock-prompt-running');
+    check('mock server: cancel interrupts a running prompt',
+      cancelRunning.ok === true && cancelRunning.action === 'interrupted');
+    const cancelGone = await comfy.cancelPrompt(base, 'mock-prompt-gone');
+    check('mock server: cancel of a finished prompt is already-done, not an error',
+      cancelGone.ok === true && cancelGone.action === 'already-done');
+    const freed = await comfy.freeComfyuiMemory(base);
+    check('mock server: /free unloads models and frees memory',
+      freed.ok === true);
+    // v0.17.0 — LM Studio unload: the instance_id from the loaded
+    // list is what gets unloaded, and the verify step must see it
+    // gone afterwards.
+    {
+      const calls = [];
+      let loadedNow = true;
+      const stub = async (url, opts) => {
+        calls.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body ? JSON.parse(opts.body) : null });
+        if (url.endsWith('/api/v1/models') && (!opts || !opts.method || opts.method === 'GET')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ models: [{ key: 'qwen/qwen3-coder-30b-a3b-instruct', loaded_instances: loadedNow ? [{ id: 'qwen/qwen3-coder-30b-a3b-instruct' }] : [] }] }) };
+        }
+        if (url.endsWith('/api/v1/models/unload')) {
+          loadedNow = false;
+          return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+        }
+        return { ok: false, status: 404, text: async () => '' };
+      };
+      const un = await lmLoad.unloadLmStudioModel({ modelId: 'qwen/qwen3-coder-30b-a3b-instruct', baseUrl: 'http://localhost:1234', fetchImpl: stub });
+      const unloadCall = calls.find(c => c.url.endsWith('/api/v1/models/unload'));
+      check('unload flow: instance_id from the loaded list is unloaded, verified gone',
+        un.ok === true && un.unloaded === true
+        && unloadCall && unloadCall.body.instance_id === 'qwen/qwen3-coder-30b-a3b-instruct');
+      const already = await lmLoad.unloadLmStudioModel({ modelId: 'qwen/qwen3-coder-30b-a3b-instruct', baseUrl: 'http://localhost:1234', fetchImpl: stub });
+      check('unload flow: an already-unloaded model is a success, not an error',
+        already.ok === true && already.alreadyUnloaded === true);
+    }
   } finally { mockServer.close(); }
   const down = await comfy.getComfyuiStatus('http://127.0.0.1:1');
   check('status reports not-ok (never fake ok) when nothing is listening',

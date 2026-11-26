@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.14.0
+// CodeFoxBridge version: 0.15.0
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -217,7 +217,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.14.0";
+    public const string BridgeVersion = "0.15.0";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -689,6 +689,7 @@ public static class CodeFoxBridge
                 { "set_parent", (json, args) => SetParentHandler.Handle(json, args) },
                 { "list_hierarchy", (json, args) => ListHierarchyHandler.Handle(json, args) },
                 { "create_material", (json, args) => CreateMaterialHandler.Handle(json, args) },
+                { "apply_import_profile", (json, args) => ApplyImportProfileHandler.Handle(json, args) },
                 { "list_assets", (json, args) => ListAssetsHandler.Handle(json, args) },
                 { "click_ui", (json, args) => ClickUI(json, args) },
 #if ENABLE_INPUT_SYSTEM
@@ -5423,6 +5424,105 @@ public static class CodeFoxBridge
             data["path"] = assetPath;
             data["shader"] = shaderName;
             return BridgeResult.Ok("Created material '" + assetPath + "' with shader '" + shaderName + "'" + (hasColor ? " and the given color" : "") + ".", assetPath, JsonWrite(data));
+        }
+    }
+
+    // ── apply_import_profile ─────────────────────────────────
+    // Apply one of CodeFox's import profiles to an image already
+    // inside the project (a generated image CodeFox just copied
+    // into Assets/Generated/). Profiles are data on the app side
+    // (IMPORT_PROFILES in comfyui-workflows.js); this handler is
+    // the Unity half — it sets the TextureImporter fields and
+    // reimports. The app passes the profile id; an unknown id
+    // fails plainly and lists the valid ones, so a renamed profile
+    // fails loudly instead of silently never applying.
+    //
+    // The file must already be in Assets/Generated/ (CodeFox's
+    // output folder — nothing outside it is ever touched here).
+    // AssetDatabase.ImportAsset runs first, so the importer exists
+    // even when Unity has not noticed the new file yet.
+    private static class ApplyImportProfileHandler
+    {
+        private static readonly string[] ValidProfiles = new[] { "sprite", "pixel-sprite", "texture", "normal-map", "ui" };
+
+        public static BridgeResult Handle(string json, Dictionary<string, object> args)
+        {
+            string assetPath = JStr(args, "path", "").Trim().Replace('\\', '/');
+            if (string.IsNullOrEmpty(assetPath)) return BridgeResult.Error("'path' is required — the project-relative path of the image, e.g. Assets/Generated/hero/hero-1.png.");
+            if (!assetPath.StartsWith("Assets/Generated/", StringComparison.Ordinal))
+                return BridgeResult.Error("'path' must be inside Assets/Generated/ — got '" + assetPath + "'.");
+            if (assetPath.IndexOf("..", StringComparison.Ordinal) >= 0)
+                return BridgeResult.Error("'path' must not contain '..' — got '" + assetPath + "'.");
+            string profile = JStr(args, "profile", "").Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(profile))
+                return BridgeResult.Error("'profile' is required. Valid profiles: " + string.Join(", ", ValidProfiles) + ".");
+            bool known = false;
+            foreach (var p in ValidProfiles) if (p == profile) { known = true; break; }
+            if (!known)
+                return BridgeResult.Error("Unknown import profile '" + profile + "'. Valid profiles: " + string.Join(", ", ValidProfiles) + ".");
+            string ext = Path.GetExtension(assetPath).ToLowerInvariant();
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg")
+                return BridgeResult.Error("'" + assetPath + "' is not an image CodeFox can set import settings on (only .png and .jpg).");
+            AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+            var importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            if (importer == null)
+                return BridgeResult.Error("No texture importer for '" + assetPath + "' — is the file really an image in the project?");
+            string applied;
+            switch (profile)
+            {
+                case "sprite":
+                    importer.textureType = TextureImporterType.Sprite;
+                    importer.spritePixelsPerUnit = 100;
+                    importer.mipmapEnabled = false;
+                    importer.filterMode = FilterMode.Bilinear;
+                    importer.wrapMode = TextureWrapMode.Repeat;
+                    importer.sRGBTexture = true;
+                    applied = "Sprite, 100 px/unit, bilinear, no mipmaps, repeat wrap";
+                    break;
+                case "pixel-sprite":
+                    importer.textureType = TextureImporterType.Sprite;
+                    importer.spritePixelsPerUnit = 16;
+                    importer.mipmapEnabled = false;
+                    importer.filterMode = FilterMode.Point;
+                    importer.wrapMode = TextureWrapMode.Clamp;
+                    importer.textureCompression = TextureImporterCompression.Uncompressed;
+                    importer.sRGBTexture = true;
+                    applied = "Pixel sprite, 16 px/unit, point filtering, no mipmaps, no compression";
+                    break;
+                case "texture":
+                    importer.textureType = TextureImporterType.Default;
+                    importer.mipmapEnabled = true;
+                    importer.filterMode = FilterMode.Bilinear;
+                    importer.wrapMode = TextureWrapMode.Repeat;
+                    importer.sRGBTexture = true;
+                    applied = "Texture, mipmaps on, bilinear, repeat wrap";
+                    break;
+                case "normal-map":
+                    importer.textureType = TextureImporterType.NormalMap;
+                    importer.mipmapEnabled = true;
+                    importer.filterMode = FilterMode.Bilinear;
+                    importer.wrapMode = TextureWrapMode.Repeat;
+                    importer.sRGBTexture = false;
+                    applied = "Normal map, linear, mipmaps on";
+                    break;
+                case "ui":
+                    importer.textureType = TextureImporterType.Sprite;
+                    importer.spritePixelsPerUnit = 100;
+                    importer.mipmapEnabled = false;
+                    importer.filterMode = FilterMode.Bilinear;
+                    importer.wrapMode = TextureWrapMode.Clamp;
+                    importer.sRGBTexture = true;
+                    applied = "UI sprite, 100 px/unit, bilinear, no mipmaps, clamp wrap";
+                    break;
+                default:
+                    return BridgeResult.Error("Unknown import profile '" + profile + "'. Valid profiles: " + string.Join(", ", ValidProfiles) + ".");
+            }
+            importer.SaveAndReimport();
+            var data = new Dictionary<string, object>();
+            data["path"] = assetPath;
+            data["profile"] = profile;
+            data["applied"] = applied;
+            return BridgeResult.Ok("Applied the '" + profile + "' import profile to '" + assetPath + "' (" + applied + ").", assetPath, JsonWrite(data));
         }
     }
 

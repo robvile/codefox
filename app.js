@@ -64,6 +64,7 @@ let state = {
   // ComfyUI (v0.6.0) — native local provider, alongside LM Studio.
   // Inert until a connection succeeds; nothing here blocks the app.
   comfyuiUrl: 'http://127.0.0.1:8188',
+  comfyuiGpuMode: 'shared',
   comfyuiWorkflowsDir: '',
   comfyuiWorkflows: [],
   comfyuiStatus: null,
@@ -75,7 +76,14 @@ let state = {
   comfyuiGenInputs: {},
   comfyuiOutputs: [],
   comfyuiHistory: [],
+  // v0.17.0 — one shared ComfyUI job, used by the panel, the
+  // "Generate in chat" button, and the agent's ```comfyui blocks.
+  // A job is a parent with one prompt per variation; cancelling
+  // the job cancels the whole set. `promptIds` are the live ComfyUI
+  // prompt ids; `results` grow as each prompt finishes.
   comfyuiGenerating: null,
+  comfyuiJobs: {},
+  comfyuiJobSeq: 0,
   // v0.7.1: the ComfyUI Desktop exe the scan actually found on
   // disk (null when none was found — the Open button then opens
   // the web UI instead), and the latest workflow import errors,
@@ -466,6 +474,10 @@ async function init() {
   state.comfyuiUrl = await rb.db.getSetting('comfyui_url') || 'http://127.0.0.1:8188';
   state.comfyuiWorkflowsDir = await rb.db.getSetting('comfyui_workflows_dir') || '';
   state.comfyuiDesktopExe = await rb.db.getSetting('comfyui_desktop_exe') || '';
+  // v0.17.0 — GPU mode: 'shared' (default — the chat model stays
+  // loaded while ComfyUI generates) or 'swap' (unload the chat
+  // model for the generation, load it back after).
+  state.comfyuiGpuMode = (await rb.db.getSetting('comfyui_gpu_mode') || 'shared') === 'swap' ? 'swap' : 'shared';
   try { state.comfyuiWorkflows = JSON.parse(await rb.db.getSetting('comfyui_workflows') || '[]'); }
   catch { state.comfyuiWorkflows = []; }
   if (!Array.isArray(state.comfyuiWorkflows)) state.comfyuiWorkflows = [];
@@ -930,39 +942,86 @@ function renderMessages() {
 // Render one ComfyUI generation result as a rich chat message:
 // workflow name + prompt, the outputs as thumbnails (same
 // file:// local-path mechanism the Generate panel uses — no new
-// image pipeline), and an Import / Discard action row. Returns
-// null when the message is not a result envelope, so ordinary
+// image pipeline), and an Import / Discard action row. While the
+// job is still running the message shows its live status and a
+// Cancel button; when it is done each image gets its own
+// Import / Discard, plus the whole-set actions. Returns null
+// when the message is not a result envelope, so ordinary
 // messages render as before.
 function comfyuiChatResultHtml(m, index) {
   const p = parseComfyuiChatResult(m.content);
   if (!p) return null;
+  const status = p.status || 'done';
   const promptLine = p.prompt ? ' — &ldquo;' + escHtml(String(p.prompt).slice(0, 200)) + '&rdquo;' : '';
-  const media = p.outputs.map(o => {
+  const media = (p.outputs || []).map((o, oi) => {
     const name = escHtml(o.filename || 'output');
-    if (!o.localPath) return `<div style="color:var(--text3);font-size:11px;padding:8px 0;">Thumbnail unavailable — ${name} (import to download it again)</div>`;
-    const src = comfyuiFileUrl(o.localPath);
-    if (/\.(mp4|webm|mov)$/i.test(o.filename || '')) return `<video controls preload="metadata" src="${src}" style="max-width:100%;border-radius:8px;display:block;"></video>`;
-    if (/\.(mp3|wav|ogg|flac)$/i.test(o.filename || '')) return `<audio controls src="${src}" style="width:100%;"></audio>`;
-    return `<img src="${src}" alt="${name}" style="max-width:100%;border-radius:8px;display:block;" />`;
+    let thumb;
+    if (!o.localPath) thumb = `<div style="color:var(--text3);font-size:11px;padding:8px 0;">Thumbnail unavailable — ${name} (import to download it again)</div>`;
+    else {
+      const src = comfyuiFileUrl(o.localPath);
+      if (/\.(mp4|webm|mov)$/i.test(o.filename || '')) thumb = `<video controls preload="metadata" src="${src}" style="max-width:100%;border-radius:8px;display:block;"></video>`;
+      else if (/\.(mp3|wav|ogg|flac)$/i.test(o.filename || '')) thumb = `<audio controls src="${src}" style="width:100%;"></audio>`;
+      else thumb = `<img src="${src}" alt="${name}" style="max-width:100%;border-radius:8px;display:block;" />`;
+    }
+    let perImage = '';
+    if (status === 'done' && !o.imported && !o.discarded && !p.discarded) {
+      perImage = `<div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+        <button class="btn btn-teal" onclick="importComfyuiChatImage(${index}, ${oi})">Import</button>
+        <button class="btn btn-secondary" onclick="discardComfyuiChatImage(${index}, ${oi})">Discard</button>
+        ${o.seedUsed != null ? `<span style="font-size:11px;color:var(--text3);">seed ${escHtml(String(o.seedUsed))}</span>` : ''}
+      </div>`;
+    } else if (o.imported) {
+      perImage = `<div style="font-size:12px;color:var(--teal);">✓ Imported${o.assetPath ? ' to ' + escHtml(o.assetPath) : ''}</div>`;
+    } else if (o.discarded) {
+      perImage = `<div style="font-size:12px;color:var(--text3);">Discarded.</div>`;
+    }
+    return `<div>${thumb}${perImage}</div>`;
   }).join('');
+  let statusLine = '';
+  if (status === 'running') statusLine = `<div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Generating… <button class="btn btn-danger" onclick="cancelComfyuiChatJob(${index})">Cancel</button></div>`;
+  else if (status === 'cancelled') statusLine = `<div style="font-size:12px;color:var(--amber);margin-bottom:8px;">Cancelled${(p.outputs || []).length ? ' — ' + p.outputs.length + ' image(s) finished before the cancel.' : '.'}</div>`;
+  else if (status === 'failed') statusLine = `<div style="font-size:12px;color:var(--amber);margin-bottom:8px;">⚠ ${escHtml(p.error || 'Generation failed.')}</div>`;
   let actions = '';
   if (p.discarded) {
     actions = `<div style="font-size:12px;color:var(--text3);">Discarded — the outputs were not imported.</div>`;
   } else if (p.imported) {
     actions = `<div style="font-size:12px;color:var(--teal);">✓ Imported to ${escHtml(p.dir || '')}</div>`;
-  } else {
+  } else if (status === 'done') {
     const dir = 'Assets/Generated/' + comfyuiSlug(p.workflowName) + '/';
     actions = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button class="btn btn-teal" onclick="importComfyuiChatResult(${index})">Import to ${escHtml(dir)}</button>
-      <button class="btn btn-secondary" onclick="discardComfyuiChatResult(${index})">Discard</button>
+      <button class="btn btn-teal" onclick="importComfyuiChatResult(${index})">Import all to ${escHtml(dir)}</button>
+      <button class="btn btn-secondary" onclick="discardComfyuiChatResult(${index})">Discard all</button>
       <span style="font-size:11px;color:var(--text3);">Snapshotted first, so revert can delete them.</span>
     </div>`;
   }
   return `<div class="msg msg-assistant cf-chat-result">
     <div style="font-size:12px;margin-bottom:8px;"><strong>Generated with ${escHtml(p.workflowName || 'ComfyUI')}</strong>${promptLine}</div>
+    ${statusLine}
     <div style="display:flex;flex-direction:column;gap:8px;">${media}</div>
     <div style="margin-top:10px;">${actions}</div>
   </div>`;
+}
+
+// Sync a running job's live state into its chat envelope (in
+// memory only — the database copy is written once, when the job
+// finishes, by saveComfyuiChatResult). Per-image Import /
+// Discard flags are kept by filename, so a sync never
+// un-imports an image.
+function syncComfyuiChatResult(job) {
+  if (!job || job.chatMessageId == null) return;
+  const m = state.messages[job.chatMessageId];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p || p.jobId !== job.id) return;
+  const prevByFile = {};
+  for (const o of (p.outputs || [])) prevByFile[o.filename] = o;
+  p.outputs = job.results.map(o => {
+    const prev = prevByFile[o.filename] || {};
+    return { ...o, imported: !!prev.imported, discarded: !!prev.discarded, assetPath: prev.assetPath || null };
+  });
+  p.status = job.status;
+  if (job.error) p.error = job.error;
+  m.content = COMFYUI_CHAT_MARKER + JSON.stringify(p);
 }
 
 // Append a generation result to the chat transcript as a result
@@ -970,16 +1029,25 @@ function comfyuiChatResultHtml(m, index) {
 // importComfyuiOutputs result when the Agent loop already
 // imported the outputs itself — then the row shows "Imported"
 // instead of offering the import again.
-async function appendComfyuiChatResult(wf, outputs, inputs, alreadyImported) {
-  if (!wf || !outputs || !outputs.length) return -1;
+async function appendComfyuiChatResult(wf, outputs, inputs, alreadyImported, job) {
+  if (!wf) return -1;
+  if (!outputs || !outputs.length) {
+    // A running job with no outputs yet: the message is created
+    // now so the user sees it generating (with Cancel), and the
+    // outputs are synced into it as they arrive.
+    if (!job) return -1;
+  }
   const promptText = (inputs && typeof inputs.positive === 'string' && inputs.positive) ? inputs.positive : '';
   const p = {
-    v: 1,
+    v: 2,
     workflowId: wf.id,
     workflowName: wf.name,
     prompt: promptText,
     inputs: inputs || {},
-    outputs: outputs.map(o => ({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', localPath: o.localPath || null })),
+    outputs: (outputs || []).map(o => ({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', localPath: o.localPath || null, variation: typeof o.variation === 'number' ? o.variation : 0, seedUsed: o.seedUsed != null ? o.seedUsed : null, imported: false, discarded: false, assetPath: null })),
+    jobId: job ? job.id : null,
+    status: job ? job.status : 'done',
+    error: job && job.error ? job.error : null,
     imported: !!(alreadyImported && alreadyImported.imported && alreadyImported.imported.length),
     dir: (alreadyImported && alreadyImported.dir) || '',
     discarded: false,
@@ -992,8 +1060,10 @@ async function appendComfyuiChatResult(wf, outputs, inputs, alreadyImported) {
   const msg = { role: 'assistant', content: content };
   if (id != null) msg.id = Number(id);
   state.messages.push(msg);
+  const index = state.messages.length - 1;
+  if (job) job.chatMessageId = index;
   renderMessages();
-  return state.messages.length - 1;
+  return index;
 }
 
 // Write a changed result payload back to the message, in memory
@@ -1012,15 +1082,71 @@ async function importComfyuiChatResult(index) {
   if (!p || p.imported || p.discarded) return;
   const wf = findComfyuiWorkflow(p.workflowId) || findComfyuiWorkflow(p.workflowName);
   if (!wf) { showToast('⚠ That workflow is no longer in the library — rescan to find it again'); return; }
-  const res = await importComfyuiOutputs(wf, p.outputs, p.inputs || {});
+  const pending = (p.outputs || []).filter(o => !o.imported && !o.discarded);
+  if (!pending.length) return;
+  const res = await importComfyuiOutputs(wf, pending, p.inputs || {});
   if (res.imported.length) {
-    p.imported = true;
+    for (const imp of res.imported) {
+      const o = p.outputs.find(x => x.filename === imp.filename);
+      if (o) { o.imported = true; o.assetPath = imp.assetPath || null; }
+    }
+    p.imported = p.outputs.every(o => o.imported || o.discarded);
     p.dir = res.dir;
     await saveComfyuiChatResult(index, p);
-    showToast('✓ Imported ' + res.imported.length + ' file(s) to ' + res.dir);
+    const profileFails = res.imported.filter(i => i.profileError);
+    showToast('✓ Imported ' + res.imported.length + ' file(s) to ' + res.dir + (profileFails.length ? ' — the import profile did not apply to ' + profileFails.length + ' of them (Unity defaults used).' : ''));
   } else {
     showToast('⚠ ' + (res.errors[0] || 'Import failed'));
   }
+  renderMessages();
+}
+
+// Import one image from a chat result (v0.17.0 — variations are a
+// grid, and the user may want one of them, not the whole set).
+async function importComfyuiChatImage(index, outputIndex) {
+  const m = state.messages[index];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p || p.discarded) return;
+  const o = (p.outputs || [])[outputIndex];
+  if (!o || o.imported || o.discarded) return;
+  const wf = findComfyuiWorkflow(p.workflowId) || findComfyuiWorkflow(p.workflowName);
+  if (!wf) { showToast('⚠ That workflow is no longer in the library — rescan to find it again'); return; }
+  const res = await importComfyuiOutputs(wf, [o], p.inputs || {});
+  if (res.imported.length) {
+    o.imported = true;
+    o.assetPath = res.imported[0].assetPath || null;
+    p.imported = p.outputs.every(x => x.imported || x.discarded);
+    p.dir = res.dir;
+    if (res.imported[0].profileError) showToast('✓ Imported ' + o.filename + ' — but the import profile did not apply: ' + res.imported[0].profileError);
+    else if (res.imported[0].applied) showToast('✓ Imported ' + o.filename + ' (' + res.imported[0].applied + ')');
+    else showToast('✓ Imported ' + o.filename + ' to ' + res.dir);
+    await saveComfyuiChatResult(index, p);
+  } else {
+    showToast('⚠ ' + (res.errors[0] || 'Import failed'));
+  }
+  renderMessages();
+}
+
+async function discardComfyuiChatImage(index, outputIndex) {
+  const m = state.messages[index];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p) return;
+  const o = (p.outputs || [])[outputIndex];
+  if (!o || o.discarded) return;
+  o.discarded = true;
+  p.imported = p.outputs.every(x => x.imported || x.discarded);
+  await saveComfyuiChatResult(index, p);
+  renderMessages();
+}
+
+async function cancelComfyuiChatJob(index) {
+  const m = state.messages[index];
+  if (!m) return;
+  const p = parseComfyuiChatResult(m.content);
+  if (!p || !p.jobId) return;
+  await cancelComfyuiJob(p.jobId);
   renderMessages();
 }
 
@@ -1813,6 +1939,9 @@ function parseComfyuiBlocks(text) {
     out.push({
       workflow: parsed ? (parsed.workflow || parsed.name || parsed.id || '') : '',
       inputs: (parsed && parsed.inputs && typeof parsed.inputs === 'object') ? parsed.inputs : {},
+      // v0.17.0 — variations: "count" (or "variations"), 1–4.
+      // Clamped by the variation plan, never trusted as-is.
+      count: parsed ? (parsed.count != null ? parsed.count : (parsed.variations != null ? parsed.variations : 1)) : 1,
       raw: m[1].trim(),
       valid: !!parsed && !!(parsed.workflow || parsed.name || parsed.id),
       error,
@@ -1867,7 +1996,7 @@ function parseAgentActions(text) {
     actions.push({ type: 'package-install', name: p.name, version: p.version, isGit: p.isGit, raw: p.raw, valid: p.valid, index: p.index });
   }
   for (const b of parseComfyuiBlocks(text)) {
-    actions.push({ type: 'comfyui', workflow: b.workflow, inputs: b.inputs, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+    actions.push({ type: 'comfyui', workflow: b.workflow, inputs: b.inputs, count: b.count, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const b of parseUnityCommandBlocks(text)) {
     actions.push({ type: 'unity-command', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
@@ -1958,7 +2087,14 @@ function stopAgentLoop() {
   }
   if (window._shellQueue) window._shellQueue = [];
   if (window._packageQueue) window._packageQueue = [];
-  if (state.comfyuiGenerating) window._comfyuiPollStop = state.comfyuiGenerating.promptId;
+  // Stopping the loop also cancels a running ComfyUI job — the
+  // poll-watch stops AND ComfyUI is told (delete from the queue,
+  // or interrupt the running prompt), so the job stops on the
+  // GPU too.
+  if (state.comfyuiGenerating && state.comfyuiGenerating.jobId) {
+    cancelComfyuiJob(state.comfyuiGenerating.jobId).catch(() => {});
+    state.comfyuiGenerating = null;
+  }
   if (loopState.pendingResolve) {
     const settle = loopState.pendingResolve;
     loopState.pendingResolve = null;
@@ -2611,21 +2747,49 @@ async function processAgentActions(actions) {
         }
       }
       if (loopState) setLoopStatus(roundLabel() + 'generating with ComfyUI (' + wf.name + ')…');
-      const res = await runComfyuiGeneration(wf, action.inputs);
+      // v0.17.0 — variations + GPU swap. The chat message is
+      // created BEFORE the job runs, so the user sees it
+      // generating (with Cancel) and the results land in it as
+      // they arrive; the tool result after the run tells the
+      // model what happened, including the import profile and
+      // how to chain the result into the scene.
+      const plan = await planComfyuiVariations(wf, action.count);
+      let swapNote = '';
+      let swappedModel = null;
+      if ((await comfyuiGpuMode()) === 'swap') {
+        const prep = await unloadModelForComfyuiSwap();
+        swappedModel = prep.swappedModel;
+        swapNote = prep.note;
+      }
+      const job = createComfyuiJob(wf, { plan, swap: !!swappedModel, swappedModel });
+      const chatIndex = await appendComfyuiChatResult(wf, [], action.inputs, null, job);
+      const res = await runComfyuiJobFromJob(job, action.inputs);
+      if (swappedModel) swapNote += (swapNote ? ' ' : '') + (await reloadModelAfterComfyuiSwap(swappedModel));
+      if (chatIndex >= 0) {
+        syncComfyuiChatResult(job);
+        const m = state.messages[chatIndex];
+        if (m && m.id != null) { try { await rb.db.update('messages', m.id, { content: m.content }); } catch {} }
+        renderMessages();
+      }
       if (res.ok) {
-        // The result goes into the chat transcript as thumbnails
-        // with an Import / Discard row (v0.8.0) — the user sees
-        // what was made and decides whether it goes into the
-        // project. The loop no longer imports automatically:
-        // importing is the user's call on that message.
-        await appendComfyuiChatResult(wf, res.outputs, action.inputs, null);
         await markComfyuiWorkflowUsed(wf);
-        await appendToolResult('Tool result — ComfyUI: generated ' + res.outputs.length + ' image(s) with workflow "' + wf.name + '"'
+        const profile = normalizeComfyuiImportProfile(wf.importProfile);
+        await appendToolResult('Tool result — ComfyUI: generated ' + res.results.length + ' image(s) with workflow "' + wf.name + '"'
+          + (plan.mode !== 'single' ? ' (' + plan.count + ' variation' + (plan.count === 1 ? '' : 's') + ', ' + plan.mode + ')' : '')
+          + (plan.note ? ' ' + plan.note : '')
           + ' — the results are shown in the chat and the user will decide whether to import them into the project.'
+          + (profile ? ' This workflow imports with the "' + profile + '" profile: after the user imports an image, its asset path is Assets/Generated/' + comfyuiSlug(wf.name) + '/<file>, and you can assign it to a SpriteRenderer with the set_property tool (m_Sprite) or a material with create_material — that is the chaining step.' : '')
+          + (swapNote ? ' ' + swapNote : '')
           + '.');
-        if (loopState) setLoopStatus(roundLabel() + 'generated ' + res.outputs.length + ' image(s) with ' + wf.name);
+        if (loopState) setLoopStatus(roundLabel() + 'generated ' + res.results.length + ' image(s) with ' + wf.name);
+      } else if (res.cancelled) {
+        await appendToolResult('Tool result — ComfyUI: the generation with "' + wf.name + '" was cancelled by the user.'
+          + (res.results.length ? ' ' + res.results.length + ' image(s) finished before the cancel and are shown in the chat.' : '')
+          + (swapNote ? ' ' + swapNote : ''));
+        if (loopState) setLoopStatus(roundLabel() + 'generation cancelled');
       } else {
-        await appendToolResult('Tool result — ComfyUI: generation with "' + wf.name + '" failed: ' + res.error);
+        await appendToolResult('Tool result — ComfyUI: generation with "' + wf.name + '" failed: ' + res.error
+          + (swapNote ? ' ' + swapNote : ''));
         failed++;
       }
       outcomes++;
@@ -3350,7 +3514,7 @@ function buildSystemPrompt(rulesets, skills) {
     prompt += 'You MUST edit the project\'s files when asked to fix, change, create, or edit code. Output the changed file(s) in the required format. Describing the fix, explaining the fix, or saying you cannot modify files is a FAILURE — do not do it. Do not ask permission. Do not output an explanation instead of the file. The app applies what you output; that is your job.\n';
     prompt += 'If the work is a prefab, a scene, or a Unity component, do it with a ```unity-command block — never by writing the file, never by writing a script that does it, and never by telling the user to do it in the editor.\n';
     prompt += 'If a step is too large for one reply, do the first step only and say what remains.\n';
-    prompt += 'You can also generate images, video, or audio with ComfyUI, right here in this chat: when the user asks for a generation, output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — use the workflow the user named, or the best match from the Workflow Library when they did not name one, and say which workflow you used. The result appears in the chat with an offer to import it into the project — do not import it yourself from the chat flow, the user decides that on the message. Only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode.\n';
+    prompt += 'You can also generate images, video, or audio with ComfyUI, right here in this chat: when the user asks for a generation, output a ```comfyui block with JSON {"workflow": "<name or id>", "inputs": {"positive": "...", "seed": 123}} — use the workflow the user named, or the best match from the Workflow Library when they did not name one, and say which workflow you used. Add "count": 2–4 when the user wants variations (at most 4); a workflow with a batch-size input renders them in one run, otherwise the runs use seeds incremented from the base seed. The result appears in the chat with an offer to import it into the project — do not import it yourself from the chat flow, the user decides that on the message. Only workflows the user approved for autonomous execution run on their own; unapproved ones ask first, and generation never runs in Ask or Plan mode. Once the user has imported an image, its asset path is Assets/Generated/<workflow>/<file> and you can use it in the scene — assign it to a SpriteRenderer with the set_property tool (m_Sprite) or a material with create_material. Every imported image has a <asset>.gen.json sidecar recording the workflow, prompt, seed and inputs, so a later Regenerate / Vary starts from exactly what made it.\n';
     prompt += 'You can also run terminal commands and install Unity packages: put commands in fenced ```powershell blocks and package installs in ```upm-install blocks (one `name@version` or git URL per line; removals in ```upm-remove blocks). Command output and install results come back to you as tool results — use them to fix errors and retry. Stop and summarise when the task is done instead of looping.\n';
     prompt += 'New Unity-native asset files you create (materials, animations, and other asset files — files that contain no code, but never prefabs or scenes) are written automatically after a snapshot is taken, so do not wait for the user to approve those; code files (.cs, .shader, .js, .ts) and edits to existing files still ask the user first. The user can always revert what was written.\n';
     if (state.projectPath) {
@@ -4340,6 +4504,15 @@ async function renderSettingsConnections() {
       <span style="font-size:11px;color:var(--text3);font-family:var(--mono);">${escHtml(state.comfyuiUrl)}</span></span>
       <button class="btn btn-secondary" onclick="verifyComfyuiFromSettings(this)">Verify</button>
       <button class="btn btn-teal" onclick="showComfyUI()">Open ComfyUI panel →</button>
+    </div>
+    <div class="conn-row">
+      <span class="conn-ico">◈</span>
+      <span class="conn-row-info"><span class="conn-name">GPU mode</span><br>
+      <span class="conn-status">Shared keeps the chat model loaded while ComfyUI generates. Swap unloads it first (so a heavy generation has the whole GPU) and loads it back after — the generation pauses the conversation while the model is out, and a failed reload is reported, never silent.</span></span>
+      <select onchange="setComfyuiGpuMode(this.value)" style="padding:4px 8px;font-size:12px;">
+        <option value="shared" ${state.comfyuiGpuMode === 'shared' ? 'selected' : ''}>Shared — model stays loaded</option>
+        <option value="swap" ${state.comfyuiGpuMode === 'swap' ? 'selected' : ''}>Swap — unload model for the generation</option>
+      </select>
     </div>`);
   list.innerHTML = rows.join('');
 }
@@ -5315,6 +5488,13 @@ async function setComfyuiPurpose(id, el) {
   await persistComfyuiWorkflows();
 }
 
+// GPU mode (v0.17.0): 'shared' (default) or 'swap'. Persisted as
+// a setting; the agent loop reads it before each generation.
+async function setComfyuiGpuMode(value) {
+  state.comfyuiGpuMode = String(value || 'shared') === 'swap' ? 'swap' : 'shared';
+  try { await rb.db.setSetting('comfyui_gpu_mode', state.comfyuiGpuMode); } catch {}
+}
+
 async function toggleComfyuiApproved(id, checked) {
   const wf = state.comfyuiWorkflows.find(w => w.id === id);
   if (!wf) return;
@@ -5431,6 +5611,52 @@ function selectComfyuiWorkflow(id) {
   renderComfyUIView();
 }
 
+// ── ComfyUI jobs (v0.17.0) ──────────────────────────────────────
+// One shared job object, used by the panel, the "Generate in chat"
+// button, and the agent's ```comfyui blocks. A job is a parent
+// with one prompt per variation; cancelling the job cancels the
+// whole set. A job's results wait in chat for Import / Discard —
+// never auto-imported (v0.8.0).
+//
+// Job shape:
+//   { id, workflowId, workflowName, status: 'running'|'done'|'cancelled'|'failed',
+//     promptIds: [], results: [], error, startedAt, onProgress,
+//     plan: { count, mode, batchNodeId, seedNodeId, baseSeed, note },
+//     swap, swappedModel, chatMessageId }
+// `promptIds` are the live ComfyUI prompt ids; `results` grow as
+// each prompt finishes. The running job also lives in
+// state.comfyuiGenerating so the panel keeps working.
+function createComfyuiJob(wf, opts) {
+  state.comfyuiJobSeq += 1;
+  const job = {
+    id: 'job-' + state.comfyuiJobSeq,
+    workflowId: wf.id,
+    workflowName: wf.name,
+    status: 'running',
+    promptIds: [],
+    results: [],
+    error: null,
+    startedAt: Date.now(),
+    onProgress: (opts && opts.onProgress) || null,
+    // v0.17.0 — variations: how many runs, and how they differ.
+    plan: (opts && opts.plan) || { count: 1, mode: 'single', batchNodeId: null, seedNodeId: null, baseSeed: null, note: null },
+    // v0.17.0 — GPU swap: when true the chat model was unloaded
+    // for this job and is loaded back when it finishes.
+    swap: !!(opts && opts.swap),
+    swappedModel: (opts && opts.swappedModel) || null,
+    chatMessageId: null,
+  };
+  state.comfyuiJobs[job.id] = job;
+  state.comfyuiGenerating = { workflowId: wf.id, promptId: null, status: 'running', jobId: job.id };
+  return job;
+}
+
+function comfyuiJobProgress(job, message) {
+  if (job.onProgress) { try { job.onProgress(message); } catch { /* the panel's callback must never break the job */ } }
+  if (state.comfyuiGenerating && state.comfyuiGenerating.jobId === job.id) state.comfyuiGenerating.status = message;
+  if (job.chatMessageId != null) { syncComfyuiChatResult(job); renderMessages(); }
+}
+
 // One generation, end to end: submit the stored workflow file with
 // the caller's inputs, poll /queue + /history every 2 seconds until
 // it completes (10-minute cap), then download each output to the
@@ -5438,32 +5664,164 @@ function selectComfyuiWorkflow(id) {
 // separate step (importComfyuiOutputs) — the panel asks with Import
 // buttons, and the Agent loop shows the results in chat with an
 // Import / Discard row instead of importing on its own.
+// `opts` may carry { plan } (a variation plan from
+// planComfyuiVariations), { onProgress } (panel/chat status text),
+// and { swap, swappedModel } (GPU swap mode). Returns
+// { ok, job, results, promptId, error, cancelled } — `results` are
+// the downloaded images { filename, localPath, promptId, variation }.
 async function runComfyuiGeneration(wf, inputs, onProgress) {
-  const sub = await rb.comfyui.submit({ file: wf.file, inputs: inputs || {}, url: state.comfyuiUrl });
-  if (!sub.ok) return { ok: false, error: sub.error || 'Submit failed' };
-  if (sub.unapplied && sub.unapplied.length && onProgress) {
-    onProgress('Submitted — ignored inputs: ' + sub.unapplied.join(', '));
+  return runComfyuiJob(wf, inputs, { onProgress });
+}
+
+async function runComfyuiJob(wf, inputs, opts) {
+  opts = opts || {};
+  const job = createComfyuiJob(wf, opts);
+  return runComfyuiJobFromJob(job, inputs);
+}
+
+// Run a job that already exists (created by createComfyuiJob, so
+// the caller could attach it to a chat message first). The loop
+// is the same as runComfyuiJob's — one prompt per variation, or
+// one batch run when the plan says so.
+async function runComfyuiJobFromJob(job, inputs) {
+  const plan = job.plan;
+  try {
+    for (let i = 0; i < plan.count; i++) {
+      if (job.status === 'cancelled') break;
+      const runInputs = Object.assign({}, inputs);
+      if (plan.mode === 'batch' && plan.batchNodeId != null) {
+        runInputs[String(plan.batchNodeId) + '.batch_size'] = plan.count;
+      }
+      if (plan.mode === 'sequential' && plan.seedNodeId != null && typeof plan.baseSeed === 'number') {
+        runInputs[String(plan.seedNodeId) + '.seed'] = plan.baseSeed + i;
+      }
+      const sub = await rb.comfyui.submit({ file: wf.file, inputs: runInputs, url: state.comfyuiUrl });
+      if (!sub || !sub.ok) {
+        job.status = 'failed';
+        job.error = (sub && sub.error) || 'Submit failed';
+        comfyuiJobProgress(job, job.error);
+        return { ok: false, job, results: job.results, error: job.error };
+      }
+      const promptId = sub.prompt_id;
+      job.promptIds.push(promptId);
+      if (state.comfyuiGenerating && state.comfyuiGenerating.jobId === job.id) state.comfyuiGenerating.promptId = promptId;
+      if (sub.unapplied && sub.unapplied.length) comfyuiJobProgress(job, 'Submitted — ignored inputs: ' + sub.unapplied.join(', '));
+      const poll = await pollComfyuiPrompt(job, promptId, (msg) => comfyuiJobProgress(job, plan.count > 1 ? ('Variation ' + (i + 1) + ' of ' + plan.count + ' — ' + msg) : msg));
+      if (poll.cancelled) {
+        job.status = 'cancelled';
+        comfyuiJobProgress(job, 'Cancelled.');
+        return { ok: false, job, results: job.results, cancelled: true };
+      }
+      if (!poll.ok) {
+        job.status = 'failed';
+        job.error = poll.error;
+        comfyuiJobProgress(job, job.error);
+        return { ok: false, job, results: job.results, error: job.error };
+      }
+      for (const o of poll.outputs) {
+        const dl = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', promptId, url: state.comfyuiUrl });
+        // The seed this run actually used (sequential variations
+        // increment it from the base seed) — the sidecar records
+        // it so Regenerate / Vary can reproduce the image.
+        const seedUsed = plan.mode === 'sequential' && typeof plan.baseSeed === 'number' ? plan.baseSeed + i : null;
+        job.results.push({ ...o, localPath: dl.ok ? dl.path : null, downloadError: dl.ok ? null : dl.error, promptId, variation: job.results.length, seedUsed });
+      }
+      if (plan.mode === 'batch') break; // one run rendered all variations
+    }
+    job.status = 'done';
+    comfyuiJobProgress(job, plan.count > 1 ? ('Done — ' + job.results.length + ' variation(s).') : 'Done.');
+    return { ok: true, job, results: job.results, promptId: job.promptIds[0] || null, outputs: job.results };
+  } catch (e) {
+    job.status = 'failed';
+    job.error = String((e && e.message) || e);
+    comfyuiJobProgress(job, job.error);
+    return { ok: false, job, results: job.results, error: job.error };
   }
-  const poll = await pollComfyuiPrompt(sub.prompt_id, onProgress);
-  if (!poll.ok) return poll;
-  const outputs = [];
-  for (const o of poll.outputs) {
-    const dl = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', promptId: sub.prompt_id, url: state.comfyuiUrl });
-    outputs.push({ ...o, localPath: dl.ok ? dl.path : null, downloadError: dl.ok ? null : dl.error });
+}
+
+// GPU swap mode (v0.17.0): when the setting is 'swap' and the
+// chat model is LM Studio, unload the chat model before a heavy
+// generation so ComfyUI has the whole GPU, then load it back
+// afterwards. The unload/load are best-effort and reported, never
+// silent: if the unload fails the generation still runs (shared
+// mode), and if the reload fails the user is told plainly — the
+// model is NOT silently gone.
+// The awkward case is the model that called the tool being the
+// one unloaded: the loop does not need the model while the job
+// runs (the job is ComfyUI's work, not the model's), and the
+// reload happens before the next round's chat call, so message
+// history is never lost. The setting is 'shared' by default.
+async function comfyuiGpuMode() {
+  return state.comfyuiGpuMode === 'swap' ? 'swap' : 'shared';
+}
+
+// Unload the current chat model for a swap generation. Returns
+// { swappedModel, note }: the model id that was unloaded (so it
+// can be loaded back), or null when there is nothing to swap
+// (not LM Studio, no model, or the unload failed — the
+// generation then runs in shared mode and the note says so).
+async function unloadModelForComfyuiSwap() {
+  const model = currentModel();
+  if (!model || state.provider !== 'lmstudio') return { swappedModel: null, note: '' };
+  try {
+    const r = await rb.llm.unloadModel(model);
+    if (r && r.ok) return { swappedModel: model, note: 'GPU swap: unloaded "' + model + '" for this generation, to be loaded back when it finishes.' };
+    return { swappedModel: null, note: 'GPU swap was on, but unloading "' + model + '" failed (' + ((r && r.error) || 'unknown error') + ') — the generation ran with the model still loaded.' };
+  } catch (e) {
+    return { swappedModel: null, note: 'GPU swap was on, but unloading "' + model + '" failed (' + String((e && e.message) || e) + ') — the generation ran with the model still loaded.' };
   }
-  return { ok: true, promptId: sub.prompt_id, outputs };
+}
+
+// Load the chat model back after a swap generation, and free
+// ComfyUI's GPU memory first so the model has the VRAM. Returns
+// a plain-words note for the tool result ('' when there was
+// nothing to reload).
+async function reloadModelAfterComfyuiSwap(swappedModel) {
+  if (!swappedModel) return '';
+  try { await rb.comfyui.freeMemory({}); } catch { /* freeing ComfyUI memory is best-effort */ }
+  try {
+    const r = await rb.llm.loadModel(swappedModel);
+    if (r && r.ok) return 'GPU swap: "' + swappedModel + '" was loaded back after the generation.';
+    return 'GPU swap: the generation finished, but "' + swappedModel + '" could NOT be loaded back (' + ((r && r.error) || 'unknown error') + ') — load it from Settings → Model before chatting again.';
+  } catch (e) {
+    return 'GPU swap: the generation finished, but "' + swappedModel + '" could NOT be loaded back (' + String((e && e.message) || e) + ') — load it from Settings → Model before chatting again.';
+  }
+}
+
+// Cancel a job: stop the poll-watch, then tell ComfyUI itself —
+// a queued prompt is deleted from the queue, a running one is
+// interrupted (the client checks /queue first, so a cancel never
+// kills someone else's job). Partial results stay; the job is
+// marked cancelled and the rest of the set is not run.
+async function cancelComfyuiJob(jobId) {
+  const job = state.comfyuiJobs[jobId];
+  if (!job) return { ok: false, error: 'No such ComfyUI job.' };
+  if (job.status !== 'running') return { ok: true, action: 'already-' + job.status };
+  job.status = 'cancelled';
+  if (state.comfyuiGenerating && state.comfyuiGenerating.jobId === jobId) state.comfyuiGenerating.status = 'Cancelled.';
+  const actions = [];
+  for (const promptId of job.promptIds) {
+    try {
+      const r = await rb.comfyui.cancel({ promptId });
+      actions.push(r && r.ok ? r.action : 'error');
+    } catch (e) { actions.push('error'); }
+  }
+  comfyuiJobProgress(job, 'Cancelled.');
+  return { ok: true, action: actions[0] || 'cancelled', actions };
 }
 
 // Poll /queue + /history for one prompt_id. Returns
-// { ok, outputs } on completion, { ok:false, error } on timeout,
-// failure, or user cancel. Polling, not a WebSocket, by design.
-async function pollComfyuiPrompt(promptId, onProgress) {
+// { ok, outputs } on completion, { ok:false, error } on timeout
+// or failure, { ok:false, cancelled:true } when the job was
+// cancelled. Polling, not a WebSocket, by design. The cancel flag
+// is per-job — the old global poll-stop flag could stop
+// the wrong generation.
+async function pollComfyuiPrompt(job, promptId, onProgress) {
   const start = Date.now();
   const timeoutMs = 10 * 60 * 1000;
   while (Date.now() - start < timeoutMs) {
-    if (window._comfyuiPollStop === promptId) {
-      window._comfyuiPollStop = null;
-      return { ok: false, error: 'Cancelled by user.' };
+    if (job.status === 'cancelled') {
+      return { ok: false, cancelled: true, error: 'Cancelled by user.' };
     }
     let hist = null;
     try { hist = await rb.comfyui.history({ promptId, url: state.comfyuiUrl }); } catch {}
@@ -5491,36 +5849,65 @@ async function pollComfyuiPrompt(promptId, onProgress) {
   return { ok: false, error: 'Generation timed out after 10 minutes.' };
 }
 
-function stopComfyuiGeneration() {
-  if (state.comfyuiGenerating && state.comfyuiGenerating.promptId) {
-    window._comfyuiPollStop = state.comfyuiGenerating.promptId;
-  }
+// Cancel the running job from the panel. Cancelling stops the
+// poll-watch AND tells ComfyUI (delete from the queue, or
+// interrupt the running prompt), so the job stops on the GPU
+// too — not just in the panel.
+async function stopComfyuiGeneration() {
+  const gen = state.comfyuiGenerating;
   state.comfyuiGenerating = null;
+  if (gen && gen.jobId) await cancelComfyuiJob(gen.jobId);
   renderComfyUIView();
+}
+
+// The variations control on the Generate form (1–4). Read from
+// the input when the panel is showing; anything else is 1.
+function readComfyuiVariationsCount() {
+  const el = document.getElementById('comfyui-variations');
+  if (!el) return 1;
+  const n = Math.floor(Number(el.value));
+  if (!isFinite(n) || n < 1) return 1;
+  if (n > 4) return 4;
+  return n;
+}
+
+// The variation plan for a workflow and a requested count, from
+// the workflow's parsed inputs (via the main process — the
+// planning logic lives in comfyui-workflows.js, not in the
+// renderer). Falls back to a single run when the call fails.
+async function planComfyuiVariations(wf, count) {
+  try {
+    const r = await rb.comfyui.planVariations({ inputs: wf.inputs || [], count });
+    if (r && r.ok && r.plan) return r.plan;
+  } catch { /* fall through to a single run */ }
+  return { count: 1, mode: 'single', batchNodeId: null, seedNodeId: null, baseSeed: null, note: null };
 }
 
 async function runComfyuiFromPanel() {
   const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
   if (!wf) { showToast('Pick a workflow first'); return; }
   if (!wf.available) { showToast('⚠ Workflow unavailable: ' + (wf.availableReason || (wf.missing || []).join('; '))); return; }
-  state.comfyuiGenerating = { workflowId: wf.id, promptId: null, status: 'Submitting…' };
   state.comfyuiOutputs = [];
   renderComfyUIView();
-  const res = await runComfyuiGeneration(wf, { ...state.comfyuiGenInputs }, (msg) => {
-    if (state.comfyuiGenerating) state.comfyuiGenerating.status = msg;
-    const el = document.getElementById('comfyui-progress');
-    if (el) el.textContent = msg;
+  const plan = await planComfyuiVariations(wf, readComfyuiVariationsCount());
+  const res = await runComfyuiJob(wf, { ...state.comfyuiGenInputs }, {
+    plan,
+    onProgress: (msg) => {
+      if (state.comfyuiGenerating) state.comfyuiGenerating.status = msg;
+      const el = document.getElementById('comfyui-progress');
+      if (el) el.textContent = msg;
+    },
   });
-  state.comfyuiGenerating = null;
+  if (state.comfyuiGenerating && res.job && state.comfyuiGenerating.jobId === res.job.id) state.comfyuiGenerating = null;
   if (!res.ok) {
-    showToast('⚠ ' + res.error);
+    if (!res.cancelled) showToast('⚠ ' + res.error);
     renderComfyUIView();
     return;
   }
-  state.comfyuiOutputs = res.outputs;
+  state.comfyuiOutputs = res.results;
   await markComfyuiWorkflowUsed(wf);
   renderComfyUIView();
-  showToast('✓ Generated ' + res.outputs.length + ' image(s) — use Import to copy them into the project');
+  showToast('✓ Generated ' + res.results.length + ' image(s) — use Import to copy them into the project');
 }
 
 // "Generate in chat" (v0.8.0): leave the panel for the chat
@@ -5548,7 +5935,8 @@ async function generateComfyuiInChat() {
   }
   const typed = state.comfyuiGenInputs.positive;
   const prompt = (typed != null && String(typed).trim()) ? String(typed).trim() : '';
-  insertPrompt('Generate with ComfyUI workflow "' + wf.name + '"' + (prompt ? ': ' + prompt : ': '));
+  const count = readComfyuiVariationsCount();
+  insertPrompt('Generate with ComfyUI workflow "' + wf.name + '"' + (count > 1 ? ' (' + count + ' variations)' : '') + (prompt ? ': ' + prompt : ': '));
   showToast('Drafted in chat — describe what you want, send it in Agent mode, and the result appears here with an Import offer');
 }
 
@@ -5556,6 +5944,131 @@ async function generateComfyuiInChat() {
 // Assets/Generated/<workflow-name>/, snapshotted first so revert
 // can delete them (new files, like the v0.5.1 auto-apply rule), and
 // add a Reference entry noting the workflow and settings used.
+// The filename of a ComfyUI output, made safe to join onto the
+// import folder: only the last path segment survives, so a
+// filename of '../../x.png' or 'C:\evil.png' can never escape
+// Assets/Generated/. Pure — pinned by a smoke test.
+function comfyuiSafeImportFilename(filename) {
+  const base = String(filename || '').split(/[\\/]/).pop().trim();
+  return base || 'output.png';
+}
+
+// The import profile stored on a workflow, normalised to one of
+// the five known ids — anything else (including a profile from a
+// newer version) is '' (no profile, Unity defaults).
+function normalizeComfyuiImportProfile(id) {
+  const v = String(id || '').trim().toLowerCase();
+  return ['sprite', 'pixel-sprite', 'texture', 'normal-map', 'ui'].includes(v) ? v : '';
+}
+
+// The import-profile catalogue (names + descriptions) for the
+// panel. The list lives in comfyui-workflows.js; this copy is the
+// renderer's, and the smoke test pins the two to agree.
+const COMFYUI_IMPORT_PROFILES = [
+  { id: 'sprite', label: 'Sprite', description: 'Sprite (2D): 100 pixels per unit, bilinear filtering, no mipmaps, repeat wrap.' },
+  { id: 'pixel-sprite', label: 'Pixel sprite', description: 'Pixel-art sprite: 16 pixels per unit, point filtering, no mipmaps, no compression.' },
+  { id: 'texture', label: 'Texture', description: 'Plain texture: mipmaps on, bilinear filtering, repeat wrap.' },
+  { id: 'normal-map', label: 'Normal map', description: 'Normal map: linear (not sRGB), mipmaps on.' },
+  { id: 'ui', label: 'UI image', description: 'UI sprite: 100 pixels per unit, bilinear filtering, no mipmaps, clamp wrap.' },
+];
+
+// Store the import profile chosen for a workflow (persisted with
+// the catalogue, like purpose and approval). An empty profile
+// means "Unity defaults".
+async function setComfyuiImportProfile(workflowId, profile) {
+  const wf = findComfyuiWorkflow(workflowId);
+  if (!wf) return;
+  wf.importProfile = normalizeComfyuiImportProfile(profile);
+  await persistComfyuiWorkflows();
+  renderComfyUIView();
+}
+
+// The provenance record for one generated image: workflow
+// name/id/hash, prompt, seed, inputs, model/checkpoint names,
+// timestamp, and the app version that made it. Written beside
+// the image as <asset>.gen.json, and read back by Regenerate /
+// Vary. The seed is the one the run actually used (seedUsed,
+// including the variation offset); checkpoint names come from
+// the workflow's parsed inputs when the workflow names them.
+function buildComfyuiSidecar(wf, output, inputs, assetPath) {
+  const ins = inputs || {};
+  const seed = (output && output.seedUsed != null) ? output.seedUsed : (ins.seed != null ? ins.seed : null);
+  const checkpoints = [];
+  for (const inp of (wf.inputs || [])) {
+    if (inp && /checkpoint|model/i.test(String(inp.inputName || '')) && inp.value != null && inp.value !== '') checkpoints.push(String(inp.value));
+  }
+  return {
+    codefoxVersion: APP_VERSION,
+    app: 'CodeFox',
+    asset: assetPath,
+    workflow: { id: wf.id, name: wf.name, source: wf.source || 'user', hash: wf.hash || '', file: wf.file || '' },
+    prompt: ins.positive != null ? String(ins.positive) : (ins.prompt != null ? String(ins.prompt) : ''),
+    negativePrompt: ins.negative != null ? String(ins.negative) : '',
+    seed: seed,
+    inputs: ins,
+    checkpoints: checkpoints,
+    importProfile: normalizeComfyuiImportProfile(wf.importProfile),
+    promptId: (output && output.promptId) || null,
+    variation: (output && typeof output.variation === 'number') ? output.variation : 0,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+// Read a provenance sidecar back. Returns the parsed record, or
+// null when the file is missing or not valid JSON — a Regenerate
+// then says so plainly instead of guessing.
+async function readComfyuiSidecar(assetPath) {
+  try {
+    const full = resolvePath(assetPath + '.gen.json');
+    const text = await rb.fs.readFile(full);
+    if (!text || !text.ok) return null;
+    return JSON.parse(text.content);
+  } catch { return null; }
+}
+
+// Regenerate an imported image from its sidecar: the same
+// workflow, the same inputs (seed included), one run. When the
+// workflow file has changed since the image was made (its hash
+// no longer matches the sidecar), the run is refused —
+// regenerating against a different workflow would not reproduce
+// the image. Returns { ok, job, results, error }.
+async function regenerateComfyuiAsset(assetPath) {
+  const sidecar = await readComfyuiSidecar(assetPath);
+  if (!sidecar) return { ok: false, error: 'No provenance record for "' + assetPath + '" — it was not made by CodeFox, or its .gen.json sidecar is missing.' };
+  const wf = findComfyuiWorkflow((sidecar.workflow && sidecar.workflow.id) || '');
+  if (!wf) return { ok: false, error: 'The workflow "' + ((sidecar.workflow && sidecar.workflow.name) || '') + '" is no longer in the library — import it again first.' };
+  if (wf.hash && sidecar.workflow && sidecar.workflow.hash && wf.hash !== sidecar.workflow.hash) {
+    return { ok: false, error: 'The workflow "' + wf.name + '" has changed since this image was made — Regenerate would not reproduce it. Generate it again from the panel instead.' };
+  }
+  const inputs = Object.assign({}, sidecar.inputs || {});
+  const res = await runComfyuiJob(wf, inputs, { plan: { count: 1, mode: 'single', batchNodeId: null, seedNodeId: null, baseSeed: null, note: null } });
+  return res;
+}
+
+// Vary an imported image from its sidecar: the same workflow and
+// inputs, but N fresh variations (seeds incremented from the
+// sidecar's seed, or a batch run when the workflow has a batch
+// node). Returns { ok, job, results, error }.
+async function varyComfyuiAsset(assetPath, count) {
+  const sidecar = await readComfyuiSidecar(assetPath);
+  if (!sidecar) return { ok: false, error: 'No provenance record for "' + assetPath + '" — it was not made by CodeFox, or its .gen.json sidecar is missing.' };
+  const wf = findComfyuiWorkflow((sidecar.workflow && sidecar.workflow.id) || '');
+  if (!wf) return { ok: false, error: 'The workflow "' + ((sidecar.workflow && sidecar.workflow.name) || '') + '" is no longer in the library — import it again first.' };
+  if (wf.hash && sidecar.workflow && sidecar.workflow.hash && wf.hash !== sidecar.workflow.hash) {
+    return { ok: false, error: 'The workflow "' + wf.name + '" has changed since this image was made — Vary would not start from the same image. Generate it again from the panel instead.' };
+  }
+  const inputs = Object.assign({}, sidecar.inputs || {});
+  const plan = await planComfyuiVariations(wf, count);
+  if (plan.mode === 'sequential' && plan.baseSeed == null && typeof sidecar.seed === 'number') {
+    // The workflow's seed input is fixed in the catalogue, but the
+    // sidecar's seed is the one to vary from.
+    const seedInput = (wf.inputs || []).find(i => i.inputName === 'seed');
+    if (seedInput) { plan.seedNodeId = String(seedInput.nodeId); plan.baseSeed = sidecar.seed + 1; }
+  }
+  const res = await runComfyuiJob(wf, inputs, { plan });
+  return res;
+}
+
 async function importComfyuiOutputs(wf, outputs, inputs) {
   const slug = comfyuiSlug(wf.name);
   const dir = 'Assets/Generated/' + slug + '/';
@@ -5564,23 +6077,56 @@ async function importComfyuiOutputs(wf, outputs, inputs) {
   if (!state.projectPath) {
     return { dir, imported, errors: ['No project folder set — pick a project first'] };
   }
+  const profile = normalizeComfyuiImportProfile(wf.importProfile);
   const snapshotId = 'snap_' + Date.now();
   let wroteAny = false;
   for (const o of (outputs || [])) {
-    const dest = resolvePath(dir + o.filename);
+    // Confinement: only the filename's last segment is used, so
+    // no filename ComfyUI returns can escape Assets/Generated/.
+    const filename = comfyuiSafeImportFilename(o.filename);
+    const dest = resolvePath(dir + filename);
+    const assetPath = dir + filename;
     let exists = false;
     try { exists = await rb.fs.exists(dest); } catch {}
     if (exists) {
-      errors.push(o.filename + ': already exists in the project — skipped, existing file kept');
+      errors.push(filename + ': already exists in the project — skipped, existing file kept');
       continue;
     }
     const res = await rb.comfyui.view({ filename: o.filename, subfolder: o.subfolder || '', type: o.type || 'output', destPath: dest, url: state.comfyuiUrl });
-    if (res.ok) {
-      imported.push({ filename: o.filename, path: dest });
-      wroteAny = true;
-      try { await rb.db.insert('file_backups', { snapshot_id: snapshotId, file_path: dest, content: NEW_FILE_SENTINEL }); } catch {}
-    } else {
-      errors.push(o.filename + ': ' + (res.error || 'download failed'));
+    if (!res.ok) {
+      errors.push(filename + ': ' + (res.error || 'download failed'));
+      continue;
+    }
+    const entry = { filename, path: dest, assetPath };
+    imported.push(entry);
+    wroteAny = true;
+    try { await rb.db.insert('file_backups', { snapshot_id: snapshotId, file_path: dest, content: NEW_FILE_SENTINEL }); } catch {}
+    // The provenance sidecar, next to the image. A failed sidecar
+    // write is recorded, not fatal — the image is already in.
+    const sidecar = buildComfyuiSidecar(wf, o, inputs, assetPath);
+    try {
+      const w = await rb.fs.writeFile(dest + '.gen.json', JSON.stringify(sidecar, null, 2));
+      if (w && w.ok) entry.sidecarPath = assetPath + '.gen.json';
+      else entry.sidecarError = (w && w.error) || 'sidecar write failed';
+    } catch (e) { entry.sidecarError = String((e && e.message) || e); }
+    // The import profile, through the Unity bridge
+    // (TextureImporter + SaveAndReimport). No bridge, no profile
+    // — the file still imports with Unity's default settings,
+    // and the result says so instead of pretending it applied.
+    if (profile) {
+      try {
+        const r = await rb.unity.runCommand({ projectPath: state.projectPath, command: { action: 'apply_import_profile', path: assetPath, profile } });
+        if (r && r.ok) {
+          entry.profile = profile;
+          entry.applied = (r.data && r.data.applied) || profile;
+        } else {
+          entry.profile = profile;
+          entry.profileError = (r && r.error) || 'The bridge did not apply the import profile.';
+        }
+      } catch (e) {
+        entry.profile = profile;
+        entry.profileError = 'The bridge did not apply the import profile: ' + String((e && e.message) || e);
+      }
     }
   }
   if (wroteAny) {
@@ -5594,6 +6140,7 @@ async function importComfyuiOutputs(wf, outputs, inputs) {
         name: 'ComfyUI — ' + wf.name + ' — ' + new Date().toLocaleString(),
         content: 'Generated with ComfyUI workflow "' + wf.name + '" (' + (wf.file || 'from history') + ').\n'
           + 'Outputs imported to ' + dir + ': ' + imported.map(i => i.filename).join(', ') + '\n'
+          + (profile ? 'Import profile: ' + profile + '\n' : '')
           + 'Inputs: ' + JSON.stringify(inputs || {}) + '\n',
         project_id: state.activeProjectId,
       });
@@ -5608,7 +6155,12 @@ async function importComfyuiOutputAt(index) {
   const o = state.comfyuiOutputs[index];
   if (!wf || !o) return;
   const res = await importComfyuiOutputs(wf, [o], { ...state.comfyuiGenInputs });
-  if (res.imported.length) showToast('✓ Imported ' + res.imported[0].filename + ' to ' + res.dir);
+  if (res.imported.length) {
+    const imp = res.imported[0];
+    if (imp.profileError) showToast('✓ Imported ' + imp.filename + ' — but the import profile did not apply: ' + imp.profileError);
+    else if (imp.applied) showToast('✓ Imported ' + imp.filename + ' (' + imp.applied + ')');
+    else showToast('✓ Imported ' + imp.filename + ' to ' + res.dir);
+  }
   else showToast('⚠ ' + (res.errors[0] || 'Import failed'));
   renderComfyUIView();
 }
@@ -5617,7 +6169,10 @@ async function importAllComfyuiOutputs() {
   const wf = findComfyuiWorkflow(state.comfyuiSelectedId);
   if (!wf || !state.comfyuiOutputs.length) return;
   const res = await importComfyuiOutputs(wf, state.comfyuiOutputs, { ...state.comfyuiGenInputs });
-  if (res.imported.length) showToast('✓ Imported ' + res.imported.length + ' image(s) to ' + res.dir);
+  if (res.imported.length) {
+    const profileFails = res.imported.filter(i => i.profileError);
+    showToast('✓ Imported ' + res.imported.length + ' image(s) to ' + res.dir + (profileFails.length ? ' — the import profile did not apply to ' + profileFails.length + ' of them (Unity defaults used).' : ''));
+  }
   else showToast('⚠ ' + (res.errors[0] || 'Import failed'));
   renderComfyUIView();
 }
@@ -5742,6 +6297,10 @@ function workflowRowHtml(w) {
     <label style="display:flex;align-items:center;gap:4px;color:var(--text2);font-size:11px;cursor:pointer;flex-shrink:0;" title="Only approved workflows run from the Agent loop without asking">
       <input type="checkbox" ${w.approved ? 'checked' : ''} onchange="toggleComfyuiApproved('${w.id}', this.checked)" style="width:auto;" /> Approved
     </label>
+    <select onchange="setComfyuiImportProfile('${w.id}', this.value)" title="Import profile — the Unity import settings applied when an image from this workflow is imported into the project" style="font-size:11px;padding:2px 4px;max-width:110px;">
+      <option value="">Profile: none</option>
+      ${COMFYUI_IMPORT_PROFILES.map(p => `<option value="${p.id}" ${w.importProfile === p.id ? 'selected' : ''}>${escHtml(p.label)}</option>`).join('')}
+    </select>
     <button class="cf-icon-btn" onclick="toggleComfyuiHidden('${w.id}')" title="${w.hidden ? 'Hidden — click to unhide' : 'Hide this workflow from the library'}">${w.hidden ? '↩ Unhide' : '✕'}</button>
     <button class="btn ${isSel ? 'btn-secondary' : 'btn-teal'}" onclick="selectComfyuiWorkflow('${w.id}')" ${w.available ? '' : 'disabled'}>${isSel ? 'Selected' : 'Generate'}</button>
   </div>`;
@@ -5937,6 +6496,17 @@ async function renderComfyUIView() {
       <div style="margin-bottom:10px;"><label style="font-size:12px;color:var(--text2);">Purpose:
         <input value="${escHtml(selected.purpose || '')}" onchange="setComfyuiPurpose('${selected.id}', this)" style="width:300px;padding:3px 8px;font-size:12px;" />
       </label></div>
+      <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+        <label style="font-size:12px;color:var(--text2);">Variations:
+          <input id="comfyui-variations" type="number" min="1" max="4" step="1" value="1" style="width:56px;padding:3px 8px;font-size:12px;" title="How many variations to generate (1–4). A workflow with a batch-size input renders them in one run, otherwise the runs use seeds incremented from the base seed." />
+        </label>
+        <label style="font-size:12px;color:var(--text2);">Import profile:
+          <select onchange="setComfyuiImportProfile('${selected.id}', this.value)" style="padding:3px 8px;font-size:12px;" title="The Unity import settings applied when an image from this workflow is imported into the project">
+            <option value="">None — Unity defaults</option>
+            ${COMFYUI_IMPORT_PROFILES.map(p => `<option value="${p.id}" ${selected.importProfile === p.id ? 'selected' : ''}>${escHtml(p.label)}</option>`).join('')}
+          </select>
+        </label>
+      </div>
       ${simpleComfyuiFormHtml(selected)}
       <details style="margin-top:14px;">
         <summary style="cursor:pointer;font-size:13px;font-weight:600;">Advanced — all inputs</summary>
@@ -5957,6 +6527,7 @@ async function renderComfyUIView() {
             <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;width:180px;">
               ${o.localPath ? `<img src="${comfyuiFileUrl(o.localPath)}" style="width:100%;border-radius:6px;display:block;" />` : `<div style="color:var(--text3);font-size:11px;">Could not download thumbnail${o.downloadError ? ': ' + escHtml(o.downloadError) : ''}</div>`}
               <div style="font-size:11px;color:var(--text2);font-family:var(--mono);margin:6px 0;word-break:break-all;">${escHtml(o.filename)}</div>
+              ${o.seedUsed != null ? `<div style="font-size:11px;color:var(--text3);">seed ${escHtml(String(o.seedUsed))}</div>` : ''}
               <button class="btn btn-secondary" onclick="importComfyuiOutputAt(${i})" style="font-size:11px;">Import to project</button>
             </div>`).join('')}
         </div>

@@ -534,6 +534,81 @@ async function loadLmStudioModel(opts) {
   return result;
 }
 
+// Unload `modelId` from a running LM Studio server, then verify it
+// is actually gone. POST /api/v1/models/unload {"instance_id": id}
+// (LM Studio 0.4.0+, https://lmstudio.ai/docs/app/api/rest-api) —
+// the instance_id comes from GET /api/v1/models' loaded_instances
+// for that model; it is NOT assumed to equal the model key, since
+// one model can have several loaded instances ("key:2"). Used by GPU
+// swap mode: the chat model is unloaded before a heavy ComfyUI run
+// so the generation has the whole GPU, then loaded back afterwards.
+// @param {{modelId: string, baseUrl: string, apiKey?: string, fetchImpl?: function, timeoutMs?: number}} opts
+// @returns {{ok: boolean, model: string, unloaded?: boolean, alreadyUnloaded?: boolean, error?: string}}
+async function unloadLmStudioModel(opts) {
+  const modelId = String((opts && opts.modelId) || '').trim();
+  const root = String((opts && opts.baseUrl) || 'http://localhost:1234').replace(/\/+$/, '');
+  const apiKey = (opts && opts.apiKey) || '';
+  const fetchImpl = (opts && opts.fetchImpl) || fetch;
+  const timeoutMs = (opts && opts.timeoutMs) || 30000;
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
+  if (!modelId) return { ok: false, model: modelId, error: 'No model selected.' };
+
+  // 1. List loaded instances — the instance_id to unload, and the
+  // proof afterwards that it is gone.
+  let listed;
+  try {
+    const res = await withTimeout(fetchImpl, root + '/api/v1/models', { headers }, timeoutMs);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    listed = await readJsonBody(res);
+  } catch (e) {
+    return { ok: false, model: modelId, error: 'LM Studio server is not running — start the server in LM Studio first (' + root + ').' };
+  }
+  const instances = [];
+  if (listed && Array.isArray(listed.models)) {
+    for (const m of listed.models) {
+      if (!m || !Array.isArray(m.loaded_instances)) continue;
+      for (const inst of m.loaded_instances) {
+        if (inst && (m.key === modelId || inst.id === modelId)) instances.push(inst);
+      }
+    }
+  }
+  if (!instances.length) return { ok: true, model: modelId, unloaded: false, alreadyUnloaded: true };
+
+  // 2. Unload every instance of the model.
+  for (const inst of instances) {
+    const id = inst.id || modelId;
+    let res;
+    try {
+      res = await withTimeout(fetchImpl, root + '/api/v1/models/unload', {
+        method: 'POST', headers, body: JSON.stringify({ instance_id: id }),
+      }, timeoutMs);
+    } catch (e) {
+      return { ok: false, model: modelId, error: 'Could not reach LM Studio to unload "' + modelId + '".' };
+    }
+    if (!res.ok) {
+      const body = await readJsonBody(res);
+      const detail = (body && (body.error || body.message)) || ('HTTP ' + res.status);
+      return { ok: false, model: modelId, error: 'LM Studio could not unload "' + modelId + '" (' + detail + '). This needs LM Studio 0.4.0 or newer.' };
+    }
+  }
+
+  // 3. Verify: the model must be out of the loaded list now. An
+  // unload that "succeeded" but left the model loaded is a failure.
+  let verify = null;
+  try {
+    const res = await withTimeout(fetchImpl, root + '/api/v1/models', { headers }, timeoutMs);
+    verify = await readJsonBody(res);
+  } catch { verify = null; }
+  const stillLoaded = verify && Array.isArray(verify.models)
+    ? verify.models.some(m => m && Array.isArray(m.loaded_instances) && m.loaded_instances.some(i => i && (m.key === modelId || i.id === modelId)))
+    : false;
+  if (stillLoaded) {
+    return { ok: false, model: modelId, error: 'LM Studio said "' + modelId + '" was unloaded, but it is still in the loaded list.' };
+  }
+  return { ok: true, model: modelId, unloaded: true };
+}
+
 module.exports = {
   TUNED_LOAD_DEFAULTS,
   TUNED_LOAD_DESCRIPTION,
@@ -553,4 +628,5 @@ module.exports = {
   applyTunedLoadProfile,
   matchesTunedSettings,
   loadLmStudioModel,
+  unloadLmStudioModel,
 };
