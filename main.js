@@ -669,6 +669,25 @@ ipcMain.handle('fs:exists', (_, filePath) => {
   catch { return false; }
 });
 
+// ── File tools (v0.11.0) ─────────────────────────────────────────
+// The model reads with view / grep (plain Node engine, same pattern
+// as git-backup.js) and edits with str_replace — which the
+// renderer resolves through applyFileChanges, so writes still go
+// through snapshots and the approval bar. Reads run immediately;
+// nothing here ever writes a file.
+const fileTools = require('./file-tools');
+const fileEngine = fileTools.createFileEngine({ fs, path });
+
+ipcMain.handle('file:view', async (_, payload) => {
+  try { return fileEngine.view(payload || {}); }
+  catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
+ipcMain.handle('file:grep', async (_, payload) => {
+  try { return fileEngine.grep(payload || {}); }
+  catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
 // ── Unified LLM IPC (LM Studio + Ollama) ─────────────────────────
 
 function resolveLlmConfig(payload) {

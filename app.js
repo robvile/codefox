@@ -1172,7 +1172,7 @@ function isRefusal(text) {
 // identical string for the Node-side refusal functions; the smoke
 // test asserts the two are equal.
 const UNITY_CREATE_PREFAB_EXAMPLE = '```unity-command\n{"action": "createPrefab", "name": "ImageContainer", "root": {"name": "ImageContainer", "components": [{"type": "RectTransform", "props": {"sizeDelta": [100, 100]}}, {"type": "Image", "props": {"color": [1, 1, 1, 1]}}]}}\n```';
-const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block. Do not describe the fix instead of making it.';
+const REFUSAL_CORRECTION = 'You CAN modify files in this app. CodeFox applies the files you output — that is how this app works. Output the corrected file now in the required format: **File Path:** `path` then a fenced code block, or a ```file:path block — or, for a small change to an existing file, a ```file str_replace block with the exact old text and the new text (view the file first if you are not sure of the exact text). Do not describe the fix instead of making it.';
 
 // No-actions enforcement (v0.5.2). The refusal retry above only
 // catches models that SAY they cannot edit. The common case is
@@ -1206,6 +1206,141 @@ function loopNoActionsDecision(userRequest, enforcementRetried, lastRoundHadActi
   if (!asksForChange(userRequest)) return 'stop';
   if (!enforcementRetried) return 'enforce';
   return 'stop';
+}
+
+// ── File tools (v0.11.0) — pure helpers ──────────────────────────
+// Read before you edit: the model views the exact lines, then
+// str_replace replaces that chunk. These are pure so the smoke
+// test can exercise them without the app running.
+
+// Inline mirror of applyStrReplaceText in file-tools.js (the
+// renderer cannot require that file — the same reason
+// unity-assets.js has an inline mirror in this file). The smoke
+// test pins the two copies to agree: if you change one, change
+// both. Replace ONE exact chunk: 0 matches and 2+ matches are
+// both plain failures with a message that says what to do next.
+// Windows files often use CRLF while the model writes LF: when an
+// exact match fails, the search retries with line endings
+// normalized, mapping the match back to the original offsets.
+function countOccurrencesText(haystack, needle) {
+  if (!needle) return 0;
+  let count = 0;
+  let at = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, at);
+    if (i === -1) return count;
+    count++;
+    at = i + needle.length;
+  }
+}
+function mapNormToOrigText(src, normPos) {
+  let n = 0;
+  for (let i = 0; i < src.length; i++) {
+    if (n === normPos) return i;
+    if (src[i] === '\r' && src[i + 1] === '\n') { i++; n++; }
+    else n++;
+  }
+  return src.length;
+}
+function applyStrReplaceText(content, oldText, newText) {
+  const src = String(content == null ? '' : content);
+  const oldS = String(oldText == null ? '' : oldText);
+  const newS = String(newText == null ? '' : newText);
+  if (!oldS) return { ok: false, error: 'The "old" text is empty — view the file and copy the exact lines to replace.' };
+  const newAdj = src.includes('\r\n') ? newS.replace(/(?<!\r)\n/g, '\r\n') : newS;
+  const rawCount = countOccurrencesText(src, oldS);
+  if (rawCount === 1) {
+    const at = src.indexOf(oldS);
+    return { ok: true, content: src.slice(0, at) + newAdj + src.slice(at + oldS.length) };
+  }
+  if (rawCount > 1) return { ok: false, error: 'The old text matched ' + rawCount + ' times — include more surrounding context to make it unique.' };
+  const normSrc = src.replace(/\r\n/g, '\n');
+  const normOld = oldS.replace(/\r\n/g, '\n');
+  const normCount = countOccurrencesText(normSrc, normOld);
+  if (normCount === 0) return { ok: false, error: 'The old text was not found in the file — view the file and check the exact text (including indentation).' };
+  if (normCount > 1) return { ok: false, error: 'The old text matched ' + normCount + ' times — include more surrounding context to make it unique.' };
+  const normAt = normSrc.indexOf(normOld);
+  const start = mapNormToOrigText(src, normAt);
+  const end = mapNormToOrigText(src, normAt + normOld.length);
+  return { ok: true, content: src.slice(0, start) + newAdj + src.slice(end) };
+}
+
+// A ```file path is project-relative and must stay inside the
+// project folder: no drive letters, no leading slash or UNC path,
+// no `..` segments. (The main process enforces the same rule
+// again for view/grep — this is the renderer's copy for
+// str_replace, which the renderer resolves itself.)
+function isSafeProjectPath(p) {
+  const s = String(p || '').trim();
+  if (!s || s.indexOf('\0') !== -1) return false;
+  if (/^[A-Za-z]:/.test(s) || s.startsWith('/') || s.startsWith('\\')) return false;
+  return !s.split(/[\\/]+/).some(seg => seg === '..');
+}
+
+// Compile-after-every-edit decision (v0.11.0): run the build
+// check once per round when that round changed a .cs file —
+// whole-file write OR str_replace. A round that changed only
+// prefabs or other assets skips it (the bridge already reports
+// those plainly). Returns true/false.
+function shouldRunRoundCompileCheck(writtenPaths) {
+  return (writtenPaths || []).some(p => String(p || '').toLowerCase().endsWith('.cs'));
+}
+
+// The compile-check tool result, as the model sees it.
+// buildCheck says "no .NET solution found" when the project has
+// no solution: that is "no check available", a plain note — never
+// a failure, never an error to fix. A build that ran and failed
+// reports the error tail, so the model can fix it next round.
+function roundCompileCheckText(check) {
+  if (!check) return 'Compile check: no result.';
+  const text = String(check.rawTail || check.error || '').trim();
+  if (check.ok) return 'Compile check: compile clean — the project compiles.';
+  if (/no \.net solution found/i.test(text) || /no \.net solution found/i.test(String(check.error || ''))) {
+    return 'Compile check: no .NET solution found in the project, so there is no check available here. Not a failure — carry on.';
+  }
+  const tail = text.split(/\r?\n/).slice(-30).join('\n');
+  return 'Compile check: FAILED — the project does not compile. Fix the errors below, then the check runs again.\n' + tail;
+}
+
+// The tool result for a ```file block, as the model sees it.
+// Reads come back as data; failures are plain sentences the model
+// can act on (view the file, widen the context, use a different
+// pattern) — never a stack trace.
+function fileToolResultText(result) {
+  const r = result || {};
+  if (!r.ok) return 'File tool failed: ' + (r.error || 'unknown error');
+  if (r.kind === 'view') {
+    const head = 'View ' + r.path + ' — lines ' + r.start + '–' + r.end + ' of ' + r.totalLines + (r.truncated ? ' (truncated: the file continues past what is shown here — view the next range if you need it)' : '') + ':';
+    const body = (r.lines || []).map(l => String(l.n).padStart(4, ' ') + '| ' + l.text).join('\n');
+    return head + '\n' + body;
+  }
+  if (r.kind === 'grep') {
+    if (!r.matches || !r.matches.length) return 'Grep "' + r.pattern + '": no matches in the project' + (r.filesSearched != null ? ' (' + r.filesSearched + ' files searched)' : '') + '.';
+    const head = 'Grep "' + r.pattern + '": ' + r.matches.length + ' match' + (r.matches.length === 1 ? '' : 'es') + (r.truncated ? ' (capped at ' + r.matches.length + ' — narrow the pattern or the paths to see more)' : '') + ':';
+    const body = r.matches.map(m => m.file + ':' + m.line + ': ' + m.text).join('\n');
+    return head + '\n' + body;
+  }
+  if (r.kind === 'str_replace') return 'str_replace applied to ' + r.path + '.';
+  return 'File tool: done.';
+}
+
+// Format a readConsole result for the model (v0.11.0): newest
+// first, at most 50 entries, at most 2 stack lines each, and the
+// truncated flag when the console held more. A `truncated: true`
+// means the earliest errors are missing and the count is a lower
+// bound — the model must say so, and the full picture is in
+// Editor.log. (The log-triage build consumes this shape.)
+function formatConsoleResult(data) {
+  const d = data || {};
+  const entries = Array.isArray(d.entries) ? d.entries : [];
+  if (!entries.length) return 'Console (' + (d.logType || 'Error') + '): no entries.';
+  const head = 'Console (' + (d.logType || 'Error') + '): ' + entries.length + ' newest entr' + (entries.length === 1 ? 'y' : 'ies') + (d.truncated ? ' — truncated, the console held more; the earliest entries are missing and this count is a lower bound. The full log is in Editor.log.' : '') + ':';
+  const body = entries.map(e => {
+    const where = e.file ? ' (' + e.file + (e.line ? ':' + e.line : '') + ')' : '';
+    const stack = (e.stack || []).map(s => '    at ' + s).join('\n');
+    return '- ' + (e.message || '') + where + (stack ? '\n' + stack : '');
+  }).join('\n');
+  return head + '\n' + body;
 }
 
 // ── Git backups (v0.10.0) — pure helpers ─────────────────────────
@@ -1244,6 +1379,9 @@ function isChangeMakingAction(action) {
     || action.type === 'package-install' || action.type === 'package-remove'
     || action.type === 'shell') return true;
   if (action.type === 'git' && action.command && action.command.action === 'restore') return true;
+  // v0.11.0: a str_replace changes a file, so the turn backup
+  // must happen first; view/grep only read, so they do not.
+  if (action.type === 'file' && action.command && action.command.action === 'str_replace') return true;
   return false;
 }
 
@@ -1286,6 +1424,30 @@ function parseGitBlocks(text) {
   }
   return out;
 }
+
+// File tools (v0.11.0, Agent mode only): ```file with JSON
+// {"action": "view" | "grep" | "str_replace", ...}. Reads run
+// immediately, no approval; a str_replace goes through
+// applyFileChanges like any other code write. Ask/Plan never
+// parse these.
+function parseFileBlocks(text) {
+  const out = [];
+  const re = /```file\s*\n([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let parsed = null;
+    let error = null;
+    try { parsed = JSON.parse(m[1].trim()); } catch (e) { error = e.message; }
+    out.push({
+      command: parsed,
+      raw: m[1].trim(),
+      valid: !!parsed && typeof parsed === 'object' && typeof parsed.action === 'string' && !!parsed.action,
+      error,
+      index: m.index,
+    });
+  }
+  return out;
+}
 // Intent-based mode routing (v0.8.2). Ask mode is instructed to
 // refuse file work ("Answer and explain only"), so a build request
 // sent in Ask mode gets an INSTRUCTED refusal — the model doing
@@ -1303,7 +1465,7 @@ function lastUserMessageText() {
   }
   return '';
 }
-const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format. An explanation without the file is not an answer.';
+const ENFORCEMENT_FOLLOWUP = 'You did not output any file changes. The user asked you to fix this. Output the corrected file(s) now in the required format — a whole file, or a ```file str_replace block for a small change (view the file first to get the exact text). An explanation without the file is not an answer.';
 
 // Unity-aware corrections (v0.9.2). The generic correction tells
 // the model to "output the file" — for a prefab request that
@@ -1463,6 +1625,9 @@ function parseAgentActions(text) {
   }
   for (const b of parseGitBlocks(text)) {
     actions.push({ type: 'git', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
+  }
+  for (const b of parseFileBlocks(text)) {
+    actions.push({ type: 'file', command: b.command, raw: b.raw, valid: b.valid, error: b.error, index: b.index });
   }
   for (const p of parseUpmBlocks(text, 'upm-remove')) {
     actions.push({ type: 'package-remove', name: p.name, version: '', isGit: false, raw: p.raw, valid: p.valid, index: p.index });
@@ -1950,6 +2115,97 @@ async function runAgentTurn(systemPrompt, threadId) {
   }
 }
 
+// Execute one set of file changes — the shared write path for
+// whole-file writes and str_replace edits (v0.11.0), used by the
+// loop's `files` action and by the `file` action. One helper, one
+// set of rules: auto-apply for new Unity assets, auto-accept when
+// on, otherwise the approval bar; snapshots before every write;
+// the tool result carries the outcome back to the model.
+// Returns { outcomes, failed, stop, writtenPaths } — stop is true
+// when the user stopped the loop, writtenPaths lists the files
+// actually written (for the compile-after-every-edit check).
+async function applyFilesAction(changes, resultPrefix) {
+  const paths = (changes || []).map(c => c.path).join(', ');
+  let outcomes = 0;
+  let failed = 0;
+  const writtenPaths = [];
+  // The loop status prefix — roundLabel() is local to the loop
+  // in processAgentActions, so this helper builds its own.
+  const label = () => loopState ? 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ' : '';
+  // v0.5.1: a pure set of NEW Unity-native asset files
+  // auto-applies — snapshot first, no Apply click, and the loop
+  // keeps going. The tool result tells the model it was written.
+  if (await isAutoApplyAssetSet(changes)) {
+    const summary = await applyFileChanges(changes);
+    if (summary.written > 0) noteTurnChange(changes.map(c => c.path));
+    noteTurnSnapshot(summary.snapshotId);
+    if (summary.failed > 0) failed++;
+    if (summary.writtenPaths) writtenPaths.push(...summary.writtenPaths);
+    await appendToolResult('Tool result — Unity asset files applied automatically: ' + paths
+      + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
+      + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : '')
+      // v0.9.3: a set that was refused in full has no snapshot
+      // (nothing was written) — only claim one when something
+      // was actually written.
+      + (summary.written > 0 ? ' Snapshot taken — the user can still revert.' : ''));
+    if (loopState) setLoopStatus(label() + 'auto-applied ' + summary.written + ' Unity asset file(s)');
+    outcomes++;
+  } else if (state.autoAcceptChanges) {
+    const summary = await applyFileChanges(changes);
+    if (summary.written > 0) noteTurnChange(changes.map(c => c.path));
+    noteTurnSnapshot(summary.snapshotId);
+    if (summary.failed > 0) failed++;
+    if (summary.writtenPaths) writtenPaths.push(...summary.writtenPaths);
+    await appendToolResult('Tool result — ' + (resultPrefix || 'files applied') + ': ' + paths
+      + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
+      + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : ''));
+    if (loopState) setLoopStatus(label() + 'applied ' + summary.written + ' file(s)');
+    outcomes++;
+  } else {
+    const outcome = await waitForLoopDecision((settle) => showApplyBar(changes, settle));
+    if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') return { outcomes: 0, failed: 0, stop: true, writtenPaths };
+    if (outcome.decision === 'applied') {
+      const s = outcome.summary || { written: 0, failed: 0, errors: [] };
+      if (s.written > 0) noteTurnChange(changes.map(c => c.path));
+      noteTurnSnapshot(s.snapshotId);
+      if (s.failed > 0) failed++;
+      if (s.writtenPaths) writtenPaths.push(...s.writtenPaths);
+      await appendToolResult('Tool result — ' + (resultPrefix || 'files applied') + ': ' + paths
+        + ' (' + s.written + ' written, ' + s.failed + ' failed)'
+        + (s.failed ? ' Errors: ' + s.errors.join('; ') : ''));
+      if (loopState) setLoopStatus(label() + 'applied ' + s.written + ' file(s)');
+    } else {
+      await appendToolResult('User declined: file changes (' + paths + ')');
+    }
+    outcomes++;
+  }
+  return { outcomes, failed, stop: false, writtenPaths };
+}
+
+// Compile after every edit (v0.11.0): run the existing
+// unity:buildCheck IPC once and append the result as a tool
+// result before the next model turn. Reuses the IPC — the dotnet
+// invocation is not re-implemented here. Returns true when the
+// check ran and the build actually failed (a "no solution"
+// project is not a failure — it reports "no check available").
+// The check never throws: a failed IPC is reported as a tool
+// result, never a crashed turn.
+async function runRoundCompileCheck() {
+  if (!state.projectPath) return false;
+  if (loopState) setLoopStatus('Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — compiling…');
+  let check;
+  try {
+    check = await rb.unity.buildCheck(state.projectPath);
+  } catch (e) {
+    check = { ok: false, error: String(e && e.message || e) };
+  }
+  await appendToolResult('Tool result — ' + roundCompileCheckText(check));
+  if (!check || check.ok) return false;
+  const text = String(check.rawTail || check.error || '');
+  if (/no \.net solution found/i.test(text)) return false;
+  return true;
+}
+
 // Execute one round's actions in order. Returns how many outcomes
 // (executed, declined, or skipped-with-note) were appended as tool
 // results. An action that needs approval pauses the loop on its bar;
@@ -1964,6 +2220,11 @@ async function processAgentActions(actions) {
   // failure: the user said no, so the model's next text-only reply
   // ends the loop instead of retrying the declined change.
   let failed = 0;
+  // v0.11.0: whether this round changed a .cs file — whole-file
+  // write OR str_replace. A round that did gets one compile check
+  // before the next model turn; a round that only changed prefabs
+  // or assets does not (the bridge already reports those).
+  let roundChangedCs = false;
   // v0.10.0: one git backup before the first change of the turn.
   // The backup never blocks the work — a skip/failure is noted
   // once and the snapshot system carries on as the fallback.
@@ -1980,51 +2241,13 @@ async function processAgentActions(actions) {
     if (!loopState || loopState.stopRequested) break;
     const roundLabel = () => 'Working… round ' + loopState.round + '/' + loopState.maxRounds + ' — ';
     if (action.type === 'files') {
-      const paths = action.changes.map(c => c.path).join(', ');
-      // v0.5.1: a pure set of NEW Unity-native asset files
-      // auto-applies — snapshot first, no Apply click, and the loop
-      // keeps going. The tool result tells the model it was written.
-      if (await isAutoApplyAssetSet(action.changes)) {
-        const summary = await applyFileChanges(action.changes);
-        if (summary.written > 0) noteTurnChange(action.changes.map(c => c.path));
-        noteTurnSnapshot(summary.snapshotId);
-        if (summary.failed > 0) failed++;
-        await appendToolResult('Tool result — Unity asset files applied automatically: ' + paths
-          + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
-          + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : '')
-          // v0.9.3: a set that was refused in full has no snapshot
-          // (nothing was written) — only claim one when something
-          // was actually written.
-          + (summary.written > 0 ? ' Snapshot taken — the user can still revert.' : ''));
-        if (loopState) setLoopStatus(roundLabel() + 'auto-applied ' + summary.written + ' Unity asset file(s)');
-        outcomes++;
-      } else if (state.autoAcceptChanges) {
-        const summary = await applyFileChanges(action.changes);
-        if (summary.written > 0) noteTurnChange(action.changes.map(c => c.path));
-        noteTurnSnapshot(summary.snapshotId);
-        if (summary.failed > 0) failed++;
-        await appendToolResult('Tool result — files applied: ' + paths
-          + ' (' + summary.written + ' written, ' + summary.failed + ' failed)'
-          + (summary.failed ? ' Errors: ' + summary.errors.join('; ') : ''));
-        if (loopState) setLoopStatus(roundLabel() + 'applied ' + summary.written + ' file(s)');
-        outcomes++;
-      } else {
-        const outcome = await waitForLoopDecision((settle) => showApplyBar(action.changes, settle));
-        if (!loopState || loopState.stopRequested || outcome.decision === 'stopped') break;
-        if (outcome.decision === 'applied') {
-          const s = outcome.summary || { written: 0, failed: 0, errors: [] };
-          if (s.written > 0) noteTurnChange(action.changes.map(c => c.path));
-          noteTurnSnapshot(s.snapshotId);
-          if (s.failed > 0) failed++;
-          await appendToolResult('Tool result — files applied: ' + paths
-            + ' (' + s.written + ' written, ' + s.failed + ' failed)'
-            + (s.failed ? ' Errors: ' + s.errors.join('; ') : ''));
-          if (loopState) setLoopStatus(roundLabel() + 'applied ' + s.written + ' file(s)');
-        } else {
-          await appendToolResult('User declined: file changes (' + paths + ')');
-        }
-        outcomes++;
-      }
+      // v0.11.0: the shared write path (auto-apply / auto-accept /
+      // approval bar) — see applyFilesAction above.
+      const res = await applyFilesAction(action.changes, 'files applied');
+      if (res.stop) break;
+      outcomes += res.outcomes;
+      failed += res.failed;
+      roundChangedCs = roundChangedCs || shouldRunRoundCompileCheck(res.writtenPaths);
     } else if (action.type === 'shell') {
       const cmd = action.command;
       if (!state.shellEnabled) {
@@ -2196,7 +2419,15 @@ async function processAgentActions(actions) {
         }
         let text = 'Tool result — Unity command "' + label + '": ' + (res.message || 'done')
           + (res.path ? ' (' + res.path + ')' : '');
-        if (res.data != null) text += '\n' + JSON.stringify(res.data);
+        // v0.11.0: readConsole comes back as newest-first entries
+        // with at most 2 stack lines each — format them for the
+        // model instead of dumping raw JSON. (The log-triage build
+        // consumes this shape.)
+        if (label === 'readConsole' && res.data != null) {
+          text += '\n' + formatConsoleResult(res.data);
+        } else if (res.data != null) {
+          text += '\n' + JSON.stringify(res.data);
+        }
         if (deleteSnapshot) {
           text += ' Snapshot taken — the user can revert the delete from the bar below.';
           showRevertBar(deleteSnapshot.snapshotId, deleteSnapshot.label, deleteSnapshot.backedUp, 0);
@@ -2302,7 +2533,67 @@ async function processAgentActions(actions) {
       await appendToolResult('Tool result — Git: unknown action "' + g + '" — use "status", "diff", "log", "backup", or "restore".');
       failed++;
       outcomes++;
+    } else if (action.type === 'file') {
+      // File tools (v0.11.0, Agent mode only). Reads run straight
+      // away, no approval; a str_replace goes through the shared
+      // write path — snapshot first, same approval rules as any
+      // other code write. An invalid block is a plain failure the
+      // model can fix, never a crash.
+      if (!action.valid) {
+        await appendToolResult('Tool result — File tool: could not parse the ```file block'
+          + (action.error ? ' (' + action.error + ')' : '')
+          + ' — expected JSON {"action": "view", "path": "Assets/…"} (or "grep", "str_replace").');
+        failed++;
+        outcomes++;
+        continue;
+      }
+      const f = action.command.action;
+      if (f === 'view' || f === 'grep') {
+        if (!state.projectPath) {
+          await appendToolResult('Tool result — File tool "' + f + '": no project folder set — pick a project folder in Settings first.');
+          failed++;
+          outcomes++;
+          continue;
+        }
+        let res;
+        try {
+          if (f === 'view') res = await rb.fs.view({ projectPath: state.projectPath, path: action.command.path, start: action.command.start, end: action.command.end });
+          else res = await rb.fs.grep({ projectPath: state.projectPath, pattern: action.command.pattern, paths: action.command.paths, path: action.command.path });
+        } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+        if (!res || !res.ok) failed++;
+        await appendToolResult(fileToolResultText(Object.assign({}, res, { kind: f })));
+        outcomes++;
+        continue;
+      }
+      if (f === 'str_replace') {
+        const p = String(action.command.path || '').trim();
+        if (!p || action.command.old == null || action.command.new == null) {
+          await appendToolResult('Tool result — File tool: str_replace needs "path", "old", and "new" — {"action": "str_replace", "path": "Assets/…", "old": "…", "new": "…"}');
+          failed++;
+          outcomes++;
+          continue;
+        }
+        const res = await applyFilesAction([{ kind: 'str_replace', path: p, old: action.command.old, new: action.command.new }], 'str_replace applied');
+        if (res.stop) break;
+        outcomes += res.outcomes;
+        failed += res.failed;
+        roundChangedCs = roundChangedCs || shouldRunRoundCompileCheck(res.writtenPaths);
+        continue;
+      }
+      await appendToolResult('Tool result — File tool: unknown action "' + f + '" — use "view", "grep", or "str_replace".');
+      failed++;
+      outcomes++;
     }
+  }
+  // v0.11.0: compile after every edit — one build check when this
+  // round changed a .cs file, before the next model turn. The
+  // result is a tool result, so the model sees the error tail and
+  // can fix it next round instead of waiting for the post-turn
+  // check. A "no solution" project reports "no check available",
+  // never a failure. One check per round at most; skipped when the
+  // round changed no .cs files, and skipped when the loop stopped.
+  if (loopState && !loopState.stopRequested && roundChangedCs) {
+    if (await runRoundCompileCheck()) failed++;
   }
   // v0.9.3: record this round for the loop's no-actions branch —
   // a text-only reply after an all-success round is the summary.
@@ -2555,7 +2846,15 @@ function buildSystemPrompt(rulesets) {
       prompt += '- deleteAsset — delete one asset: ```unity-command\n{"action": "deleteAsset", "path": "Assets/Prefabs/ImageContainer.prefab"}\n```\nThe path must start with Assets/ and must exist. CodeFox snapshots the file (and its .meta) before Unity deletes it, so the user can revert the delete.\n';
       prompt += 'Do not put a **File Path:** line before a ```unity-command block — the block is a command, not a file.\n';
       prompt += '- listComponentTypes — ask Unity what components exist in this install: {"action": "listComponentTypes", "filter": "Scroll"}. describeComponent — ask what can be set on one: {"action": "describeComponent", "type": "Image"}.\n';
+      prompt += '- readConsole — read the newest Unity console entries of one type, without recompiling or reimporting anything (reading never clears the console): {"action": "readConsole", "logType": "Error"}. Ask for Error first, then Warning separately when you need it — never "All". You get the newest 50 entries, each with its message, file:line where Unity knows it, and up to 2 stack lines; a truncated flag means the console held more and the earliest entries are missing, so the count is a lower bound and the full log is in Editor.log. Use it when a build, a play-mode run, or a prefab command fails and the error is in Unity, not in the file you just wrote.\n';
       prompt += 'Rule: if you do not know whether a component exists, or what you can set on it, ask Unity first with listComponentTypes / describeComponent — never guess a type name, a property name, or a script guid. A component the bridge does not know is a plain failure you can fix by asking, not something to work around by writing the file yourself.\n';
+      prompt += '## Reading and editing files\n';
+      prompt += 'Read before you edit — view the exact lines, then str_replace that chunk; never rewrite a whole file to change a few lines. You have three file tools, in a ```file block with JSON (Agent mode only). Paths are relative to the project folder, for example "Assets/Scripts/Player.cs" — a path that escapes the project is refused.\n';
+      prompt += '- view — read a file in line ranges, with line numbers: {"action": "view", "path": "Assets/Scripts/Player.cs", "start": 40, "end": 80}. Omit start/end to read from the top. At most 200 lines come back at once, and the result says so when it was cut short — view the next range if you need it.\n';
+      prompt += '- grep — search plain text across the project (a substring, case-insensitive, not a regex): {"action": "grep", "pattern": "Health"}. Optionally narrow it with "paths": ["Assets/Scripts"] (folders or files). Results are file:line: matching line, at most 50 — narrow the pattern or the paths to see more. Library, .git, node_modules and the other generated folders are never searched. No match is a plain empty result, not an error.\n';
+      prompt += '- str_replace — replace ONE exact chunk of a file: {"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "  health = 100;", "new": "  health = 150;"}. The old text must match EXACTLY ONCE: if it is not found, or it matches more than once, the edit fails plainly and you must view the file and copy the exact text (including indentation) or add more surrounding lines to make it unique. A str_replace is a real file change — CodeFox snapshots the file first and the user approves it like any other code write, and after the edit the project is compiled and the result comes back to you.\n';
+      prompt += 'After you change a .cs file (a whole-file write or a str_replace), CodeFox compiles the project and the result comes back to you as a tool result before your next turn: "compile clean" means carry on; a failure lists the errors — fix them, and the check runs again. A project with no .NET solution reports "no check available" — that is not a failure and not an error to fix. Prefab and asset changes are not compiled — the bridge already reports those.\n';
+      prompt += 'Do not put a **File Path:** line before a ```file block — the block is a command, not a file.\n';
       prompt += '## Git backups\n';
       prompt += 'Before you change anything in a project that uses git, CodeFox takes a backup commit first ("CodeFox backup: before …") — you do not need to make one, and the commit shows up in the user\'s git program (for example GitKraken) like any other commit. Only tracked changes are committed; untracked files are left alone.\n';
       prompt += 'You can inspect the project\'s git state with a ```git block (Agent mode only): {"action": "status"} — what changed and what branch you are on; {"action": "diff", "ref": "<sha>"} — what changed since a backup commit (add "nameStatus": true for a file list instead of the full diff); {"action": "log", "count": 10} — recent commits, backup commits are marked. After a change, compare what changed against the last backup to find what broke.\n';
@@ -5548,11 +5847,12 @@ function extractFileChanges(responseText) {
     }
     // Any fenced code block (```csharp, ```json, ```, …) — except
     // action blocks (powershell / upm-install / upm-remove /
-    // unity-command / comfyui), which are not files and are handled
-    // by the agent loop instead. A ```unity-command block after a
-    // **File Path:** line is a command, not a file: skipping it
-    // here is what stops every successful prefab command from also
-    // producing a spurious "0 written, 1 failed" refusal (v0.9.3).
+    // unity-command / comfyui / git / file), which are not files
+    // and are handled by the agent loop instead. A ```unity-command
+    // block after a **File Path:** line is a command, not a file:
+    // skipping it here is what stops every successful prefab
+    // command from also producing a spurious "0 written, 1 failed"
+    // refusal (v0.9.3). A ```file block is a command too (v0.11.0).
     const fenceMatch = line.match(/^```\s*(\S*)\s*$/);
     if (fenceMatch) {
       const fenceLang = (fenceMatch[1] || '').toLowerCase();
@@ -5564,7 +5864,7 @@ function extractFileChanges(responseText) {
         const fp = (fenceMatch[1] || '').slice(5).trim().replace(/^`|`$/g, '');
         if (fp) pendingPath = fp;
       }
-      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui' || fenceLang === 'git') {
+      if (fenceLang === 'powershell' || fenceLang === 'pwsh' || fenceLang === 'shell' || fenceLang === 'upm-install' || fenceLang === 'upm-remove' || fenceLang === 'unity-command' || fenceLang === 'comfyui' || fenceLang === 'git' || fenceLang === 'file') {
         let j = i + 1;
         while (j < lines.length && !lines[j].match(/^```\s*$/)) j++;
         i = j;
@@ -5623,6 +5923,20 @@ function diffLines(oldLines, newLines) {
 
 let pendingDiffChanges = null;
 async function showDiffOverlay(changes, onDecision) {
+  // v0.11.0: resolve str_replace changes first, so the diff shows
+  // the actual new file content. An unresolvable edit shows the
+  // failure in the overlay instead of a diff.
+  const resolved = await resolveStrReplaceChanges(changes);
+  if (!resolved.ok) {
+    const content = document.getElementById('diff-content');
+    const overlay = document.getElementById('diff-overlay');
+    if (content && overlay) {
+      content.innerHTML = '<div style="color:var(--red);padding:12px;">' + escHtml(resolved.error) + '</div>';
+      overlay.classList.add('open');
+    }
+    return;
+  }
+  changes = resolved.changes;
   pendingDiffChanges = changes;
   window._diffOnDecision = onDecision || null;
   const content = document.getElementById('diff-content');
@@ -5779,7 +6093,48 @@ function isEditorApiScriptChange(c) {
   return EDITOR_API_RE.test(String(c.code || ''));
 }
 
+// Resolve str_replace changes (v0.11.0) into the whole-file
+// content the writer understands: read the current file, apply
+// the exact-once replacement, and hand the result back as a
+// normal whole-file change. A failure stops the apply before
+// anything is written — the file is never touched and no snapshot
+// is taken — and the message says what to do next (view the file,
+// widen the context).
+async function resolveStrReplaceChanges(changes) {
+  const out = [];
+  for (const c of (changes || [])) {
+    if (c.kind === 'str_replace') {
+      const p = String(c.path || '').trim();
+      if (!isSafeProjectPath(p)) {
+        return { ok: false, error: 'File tool failed: path must be relative to the project folder: ' + (p || '(empty)') };
+      }
+      if (!state.projectPath) {
+        return { ok: false, error: 'File tool failed: no project folder set — str_replace needs a Unity project folder.' };
+      }
+      const filePath = resolvePath(p);
+      const read = await rb.fs.readFile(filePath);
+      if (!read || !read.ok) {
+        return { ok: false, error: 'File tool failed: could not read ' + p + ' — view the file first and check the path.' };
+      }
+      const res = applyStrReplaceText(read.content, c.old, c.new);
+      if (!res.ok) return { ok: false, error: 'File tool failed: ' + res.error };
+      out.push({ path: c.path, code: res.content });
+    } else {
+      out.push(c);
+    }
+  }
+  return { ok: true, changes: out };
+}
+
 async function applyFileChanges(changes) {
+  // v0.11.0: resolve str_replace changes into whole-file content
+  // first, so the write path below — snapshots, the approval bar,
+  // the revert bar, the git-backup hook — is identical for a
+  // surgical edit and a whole-file write. A resolution failure
+  // stops the apply before anything is written or snapshotted.
+  const resolved = await resolveStrReplaceChanges(changes);
+  if (!resolved.ok) return { ok: false, written: 0, failed: (changes || []).length, errors: [resolved.error], snapshotId: null, label: '', writtenPaths: [] };
+  changes = resolved.changes;
   // v0.9.0: Unity writes its own files. A .prefab or .unity write is
   // refused here — the model must use a ```unity-command block
   // (createPrefab / modifyPrefab) instead, so Unity writes the YAML
@@ -5809,7 +6164,7 @@ async function applyFileChanges(changes) {
       if (refused.some(r => /\.cs$/i.test(r.change.path || ''))) reasons.push('editor-API scripts belong under Assets/Editor/ — use a unity-command block instead of a generator script');
       showToast(`⚠ ${refused.length} file${refused.length > 1 ? 's' : ''} not written — ` + reasons.join('; '));
     }
-    return { written: 0, failed: refused.length, errors: refusalErrors, snapshotId: null, label: (changes || []).map(c => c.path.split(/[\/]/).pop()).join(', ') };
+    return { written: 0, failed: refused.length, errors: refusalErrors, snapshotId: null, label: (changes || []).map(c => c.path.split(/[\/]/).pop()).join(', '), writtenPaths: [] };
   }
   changes = allowed;
 
@@ -5863,11 +6218,14 @@ async function applyFileChanges(changes) {
   let written = 0;
   let failed = refused.length;
   const errors = refusalErrors.slice();
+  // v0.11.0: the paths actually written, so the caller knows
+  // whether a .cs file changed (compile-after-every-edit).
+  const writtenPaths = [];
 
   for (const change of changes) {
     const fullPath = resolvePath(change.path);
     const result = await rb.fs.writeFile(fullPath, change.code);
-    if (result.ok) { written++; }
+    if (result.ok) { written++; writtenPaths.push(change.path); }
     else { failed++; errors.push(change.path + ': ' + result.error); }
   }
 
@@ -5890,7 +6248,7 @@ async function applyFileChanges(changes) {
   // The new snapshot should appear in the sidebar straight away,
   // so it can be reverted from there even after this bar is gone.
   refreshSidebar().catch(() => {});
-  return { written, failed, errors, snapshotId, label };
+  return { written, failed, errors, snapshotId, label, writtenPaths };
 }
 
 // Snapshot an asset before the bridge deletes it (v0.9.3) — the

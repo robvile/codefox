@@ -1,6 +1,6 @@
 {
   "name": "codefox",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Local AI coding assistant \u2014 runs entirely on your machine, with LM Studio (default) or Ollama",
   "main": "main.js",
   "author": "CodeFox Contributors",
@@ -48,7 +48,8 @@
       "build/icon.png",
       "comfyui.js",
       "lmstudio-load.js",
-      "git-backup.js"
+      "git-backup.js",
+      "file-tools.js"
     ],
     "win": {
       "target": [

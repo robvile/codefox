@@ -132,6 +132,9 @@ contextBridge.exposeInMainWorld('rb', {
     exists: (path) => ipcRenderer.invoke('fs:exists', path),
     pickFolder: () => ipcRenderer.invoke('fs:pickFolder'),
     pickExe: (title) => ipcRenderer.invoke('fs:pickExe', title),
+    // v0.11.0: model read tools — line-range view and project grep.
+    view: (payload) => ipcRenderer.invoke('file:view', payload || {}),
+    grep: (payload) => ipcRenderer.invoke('file:grep', payload || {}),
   },
   project: {
     list: () => ipcRenderer.invoke('project:list'),

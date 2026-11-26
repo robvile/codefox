@@ -13,7 +13,7 @@ function check(name, ok, detail) {
 }
 
 // 1. Syntax-check every JS file we ship.
-for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
+for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity-assets.js', 'unity-bridge.js', 'unity-bridge-source.js', 'unity-command.js', 'mcp-presets.js', 'comfyui.js', 'lmstudio-load.js', 'git-backup.js', 'file-tools.js', 'scripts/embed-bridge.js', 'test/smoke.js']) {
   try {
     execFileSync(process.execPath, ['--check', path.join(root, file)], { stdio: 'pipe' });
     check('node --check ' + file, true);
@@ -22,10 +22,10 @@ for (const file of ['main.js', 'preload.js', 'app.js', 'upm-manifest.js', 'unity
   }
 }
 
-// 2. package.json version is 0.10.0.
+// 2. package.json version is 0.11.0.
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-check('package.json version is 0.10.0', pkg.version === '0.10.0', 'got ' + pkg.version);
-check('sidebar footer shows 0.10.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.10.0 — Local'));
+check('package.json version is 0.11.0', pkg.version === '0.11.0', 'got ' + pkg.version);
+check('sidebar footer shows 0.11.0', fs.readFileSync(path.join(root, 'index.html'), 'utf8').includes('CodeFox 0.11.0 — Local'));
 check('installer has one unversioned name', pkg.build && pkg.build.artifactName === 'CodeFox-Setup.${ext}', 'got ' + (pkg.build && pkg.build.artifactName));
 check('build scripts clean dist first', typeof pkg.scripts['build:win'] === 'string' && pkg.scripts['build:win'].includes('npm run clean'));
 check('package.json has test script', typeof pkg.scripts.test === 'string' && pkg.scripts.test.includes('test/smoke.js'));
@@ -324,7 +324,7 @@ check('app.js has the auto_apply_unity_assets setting',
 check('app.js has the auto-apply decision + handler',
   appJs.includes('isAutoApplyAssetSet') && appJs.includes('handleFileChanges'));
 check('auto-apply is wired into the agent loop files branch',
-  appJs.includes('isAutoApplyAssetSet(action.changes)') && appJs.includes('Unity asset files applied automatically'));
+  appJs.includes('applyFilesAction(action.changes') && appJs.includes('isAutoApplyAssetSet(changes)') && appJs.includes('Unity asset files applied automatically'));
 check('auto-apply is wired into the one-shot Ask/Plan path',
   appJs.includes('await handleFileChanges(changes)'));
 check('Advanced settings has the auto-apply toggle',
@@ -430,12 +430,12 @@ check('embedded bridge contains the fixed 1-argument call',
 // that every auto-install / auto-update path respects, plus bridge
 // versioning so an out-of-date installed bridge is overwritten
 // instead of skipped.
-check('bridge .cs has the 0.9.3 version marker',
-  bridgeCs.includes('// CodeFoxBridge version: 0.9.3') && bridgeCs.includes('BridgeVersion = "0.9.3"'));
-check('embedded bridge has the 0.9.3 version marker',
-  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.9.3'));
-check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.9.3',
-  bridge.BUNDLED_BRIDGE_VERSION === '0.9.3');
+check('bridge .cs has the 0.11.0 version marker',
+  bridgeCs.includes('// CodeFoxBridge version: 0.11.0') && bridgeCs.includes('BridgeVersion = "0.11.0"'));
+check('embedded bridge has the 0.11.0 version marker',
+  bridgeSrc.BRIDGE_SOURCE.includes('// CodeFoxBridge version: 0.11.0'));
+check('unity-bridge.js has BUNDLED_BRIDGE_VERSION 0.11.0',
+  bridge.BUNDLED_BRIDGE_VERSION === '0.11.0');
 // v0.9.1 — CS0104: a bare `Object` is an ambiguous reference between
 // UnityEngine.Object and System.Object when both namespaces are in
 // scope (the 0.9.0 bridge failed to compile in Unity on exactly this:
@@ -497,9 +497,9 @@ try {
     bridge.isBridgeUpdateAvailable(path.join(tmpV, 'no-such-project')) === true);
   const upd = bridge.ensureBridge(tmpV, tmpVAppDir);
   check('ensureBridge overwrites an out-of-date bridge',
-    upd.ok === true && upd.updated === true && upd.toVersion === '0.9.3' && upd.fromVersion === '0.0.0');
-  check('installed bridge now carries the 0.9.3 marker',
-    bridge.getInstalledBridgeVersion(tmpV) === '0.9.3');
+    upd.ok === true && upd.updated === true && upd.toVersion === '0.11.0' && upd.fromVersion === '0.0.0');
+  check('installed bridge now carries the 0.11.0 marker',
+    bridge.getInstalledBridgeVersion(tmpV) === '0.11.0');
   check('isBridgeUpdateAvailable false when the bridge is current',
     bridge.isBridgeUpdateAvailable(tmpV) === false);
   check('ensureBridge no-ops when the bridge is already current',
@@ -2487,6 +2487,297 @@ check('sidebar revert guards the fake bar (revertFromHistory fix)',
 check('README has the Git backups section, CHANGELOG has the 0.10.0 entry',
   readme.includes('### Git backups') && readme.includes('Never leave it broken')
   && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.10.0 — 2026-11-26'));
+// 35. v0.11.0 — the foundation loop: read/edit tools, compile
+// after every edit, console reading. The engine is plain Node
+// (file-tools.js) so it is tested directly; the app.js pure
+// helpers are extracted like the 0.9.3/0.10.0 ones; the bridge
+// readConsole code is structural (live console reading is only
+// proven by Rob's Unity).
+const fileTools = require(path.join(root, 'file-tools.js'));
+check('file-tools resolveInProject keeps project paths, refuses escapes',
+  fileTools.resolveInProject('/proj', 'Assets/Scripts/Player.cs') === path.join('/proj', 'Assets/Scripts/Player.cs')
+  && fileTools.resolveInProject('/proj', '../evil.cs') === null
+  && fileTools.resolveInProject('/proj', 'Assets/../../evil.cs') === null
+  && fileTools.resolveInProject('/proj', '/abs/path.cs') === null
+  && fileTools.resolveInProject('/proj', 'C:\\evil.cs') === null
+  && fileTools.resolveInProject('/proj', '') === null);
+check('file-tools applyStrReplaceText replaces exactly once',
+  (() => {
+    const ok = fileTools.applyStrReplaceText('a\nb\nc\n', 'b', 'B');
+    return ok.ok === true && ok.content === 'a\nB\nc\n';
+  })());
+check('file-tools applyStrReplaceText fails plainly on 0 and 2+ matches',
+  (() => {
+    const none = fileTools.applyStrReplaceText('a\nb\nc\n', 'zzz', 'Z');
+    const twice = fileTools.applyStrReplaceText('x\ny\nx\n', 'x', 'X');
+    return none.ok === false && none.error.includes('not found') && none.error.includes('view the file')
+      && twice.ok === false && twice.error.includes('matched 2 times') && twice.error.includes('more surrounding context');
+  })());
+check('file-tools applyStrReplaceText matches LF text against a CRLF file and keeps CRLF endings',
+  (() => {
+    const crlf = fileTools.applyStrReplaceText('line1\r\nline2\r\nline3\r\n', 'line1\nline2', 'A\nB');
+    const single = fileTools.applyStrReplaceText('line1\r\nline2\r\nline3\r\n', 'line2', 'LINE2');
+    return crlf.ok === true && crlf.content === 'A\r\nB\r\nline3\r\n'
+      && single.ok === true && single.content === 'line1\r\nLINE2\r\nline3\r\n';
+  })());
+check('file-tools applyStrReplaceText refuses an empty old text',
+  fileTools.applyStrReplaceText('a\nb\n', '', 'x').ok === false);
+// view / grep against a throwaway project tree.
+const tmpProj = fs.mkdtempSync(path.join(os.tmpdir(), 'codefox-file-tools-'));
+try {
+  fs.mkdirSync(path.join(tmpProj, 'Assets', 'Scripts'), { recursive: true });
+  fs.mkdirSync(path.join(tmpProj, 'Library'), { recursive: true });
+  fs.mkdirSync(path.join(tmpProj, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(tmpProj, 'node_modules'), { recursive: true });
+  const playerLines = Array.from({ length: 10 }, (_, i) => 'line ' + (i + 1));
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'Scripts', 'Player.cs'), playerLines.join('\n') + '\n');
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'Scripts', 'Health.cs'), 'public int health = 100;\npublic int maxHealth = 100;\n// health regen\n');
+  fs.writeFileSync(path.join(tmpProj, 'Library', 'Ignored.cs'), 'needle in Library\n');
+  fs.writeFileSync(path.join(tmpProj, '.git', 'ignored.cs'), 'needle in git\n');
+  fs.writeFileSync(path.join(tmpProj, 'node_modules', 'ignored.js'), 'needle in node_modules\n');
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'sprite.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x6e, 0x65, 0x65, 0x64, 0x6c, 0x65]));
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'Scripts', 'Many.cs'), Array.from({ length: 60 }, () => 'needle here').join('\n') + '\n');
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'Scripts', 'Long.cs'), Array.from({ length: 300 }, (_, i) => 'row ' + (i + 1)).join('\n') + '\n');
+  fs.writeFileSync(path.join(tmpProj, 'Assets', 'Scripts', 'Wide.cs'), Array.from({ length: 5 }, () => 'x'.repeat(10000)).join('\n') + '\n');
+  const eng = fileTools.createFileEngine({ fs, path });
+  const v = eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Player.cs', start: 3, end: 5 });
+  check('view returns the right lines with numbers',
+    v.ok === true && v.totalLines === 10 && v.start === 3 && v.end === 5 && v.truncated === false
+    && v.lines.length === 3 && v.lines[0].n === 3 && v.lines[0].text === 'line 3' && v.lines[2].n === 5 && v.lines[2].text === 'line 5');
+  check('view fails plainly on out-of-range start and a missing file',
+    eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Player.cs', start: 99 }).ok === false
+    && eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Player.cs', start: 99 }).error.includes('outside the file')
+    && eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Nope.cs' }).ok === false
+    && eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Nope.cs' }).error.includes('File not found'));
+  const long = eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Long.cs' });
+  check('view truncates an oversize range with a note',
+    long.ok === true && long.lines.length === 200 && long.truncated === true);
+  const wide = eng.view({ projectPath: tmpProj, path: 'Assets/Scripts/Wide.cs' });
+  check('view truncates on the byte cap with a note',
+    wide.ok === true && wide.lines.length === 3 && wide.truncated === true);
+  check('view refuses a path escaping the project',
+    eng.view({ projectPath: tmpProj, path: '../evil.cs' }).ok === false
+    && eng.view({ projectPath: tmpProj, path: '../evil.cs' }).error.includes('inside the project folder')
+    && eng.view({ projectPath: tmpProj, path: 'C:\\evil.cs' }).ok === false);
+  const g = eng.grep({ projectPath: tmpProj, pattern: 'health' });
+  check('grep finds matches as file:line with the matching line',
+    g.ok === true && g.truncated === false
+    && g.matches.some(m => m.file === 'Assets/Scripts/Health.cs' && m.line === 1 && m.text.includes('health = 100'))
+    && g.matches.some(m => m.file === 'Assets/Scripts/Health.cs' && m.line === 3));
+  check('grep never searches Library / .git / node_modules and skips binary files',
+    (() => {
+      const n = eng.grep({ projectPath: tmpProj, pattern: 'needle' });
+      return n.ok === true && n.matches.every(m => !m.file.startsWith('Library/') && !m.file.startsWith('.git/') && !m.file.startsWith('node_modules/'))
+        && n.matches.every(m => m.file !== 'Assets/sprite.png');
+    })());
+  const many = eng.grep({ projectPath: tmpProj, pattern: 'needle here' });
+  check('grep caps matches with a note',
+    many.ok === true && many.matches.length === 50 && many.truncated === true);
+  const none = eng.grep({ projectPath: tmpProj, pattern: 'zzz-no-such-text' });
+  check('grep with no match is a plain empty result, not an error',
+    none.ok === true && none.matches.length === 0 && none.truncated === false);
+  check('grep with no pattern fails plainly',
+    eng.grep({ projectPath: tmpProj, pattern: '' }).ok === false);
+} finally { fs.rmSync(tmpProj, { recursive: true, force: true }); }
+
+// The app.js str_replace mirror must agree with file-tools.js:
+// the renderer cannot require that file, so the text op lives in
+// both places — if they ever drift, edits the model sees in the
+// UI will not match what the engine does.
+const mirrorCountSrc = extractFunction(appJs, 'countOccurrencesText');
+const mirrorMapSrc = extractFunction(appJs, 'mapNormToOrigText');
+const mirrorReplaceSrc = extractFunction(appJs, 'applyStrReplaceText');
+check('app.js str_replace mirror is extractable for testing',
+  !!mirrorCountSrc && !!mirrorMapSrc && !!mirrorReplaceSrc);
+if (mirrorCountSrc && mirrorMapSrc && mirrorReplaceSrc) {
+  const mirrorReplace = new Function(mirrorCountSrc + '\n' + mirrorMapSrc + '\n' + mirrorReplaceSrc + '\nreturn applyStrReplaceText;')();
+  const mirrorCases = [
+    ['a\nb\nc\n', 'b', 'B'],
+    ['a\nb\nc\n', 'zzz', 'Z'],
+    ['x\ny\nx\n', 'x', 'X'],
+    ['line1\r\nline2\r\nline3\r\n', 'line1\nline2', 'A\nB'],
+    ['line1\r\nline2\r\nline3\r\n', 'line2', 'LINE2'],
+    ['a\nb\n', '', 'x'],
+    ['  health = 100;\n  health = 100;\n', '  health = 100;\n  health = 100;\n', '  health = 150;\n'],
+    ['one\ntwo\nthree\n', 'two\nthree', 'TWO\nTHREE'],
+  ];
+  check('app.js str_replace mirror agrees with file-tools.js on every case',
+    mirrorCases.every(([content, oldText, newText]) =>
+      JSON.stringify(mirrorReplace(content, oldText, newText)) === JSON.stringify(fileTools.applyStrReplaceText(content, oldText, newText))));
+}
+
+// Compile-after-every-edit decision + result text (pure helpers).
+const compileCheckSrc = extractFunction(appJs, 'shouldRunRoundCompileCheck');
+const compileTextSrc = extractFunction(appJs, 'roundCompileCheckText');
+check('round compile helpers are extractable for testing', !!compileCheckSrc && !!compileTextSrc);
+if (compileCheckSrc && compileTextSrc) {
+  const helpers = new Function(compileCheckSrc + '\n' + compileTextSrc + '\nreturn { shouldRunRoundCompileCheck, roundCompileCheckText };')();
+  check('compile check runs when a .cs changed, skips otherwise',
+    helpers.shouldRunRoundCompileCheck(['Assets/Scripts/Player.cs']) === true
+    && helpers.shouldRunRoundCompileCheck(['Assets/Scripts/PLAYER.CS']) === true
+    && helpers.shouldRunRoundCompileCheck(['Assets/Prefabs/Image.prefab']) === false
+    && helpers.shouldRunRoundCompileCheck([]) === false
+    && helpers.shouldRunRoundCompileCheck(['Assets/Scripts/Player.cs', 'Assets/Prefabs/Image.prefab']) === true);
+  check('compile result text: clean note, no-solution note, failure tail',
+    helpers.roundCompileCheckText({ ok: true }).includes('compile clean')
+    && helpers.roundCompileCheckText({ ok: false, rawTail: 'no .NET solution found in the project' }).includes('no check available')
+    && !helpers.roundCompileCheckText({ ok: false, rawTail: 'no .NET solution found in the project' }).includes('FAILED')
+    && helpers.roundCompileCheckText({ ok: false, rawTail: 'error CS1002: ; expected\n  at Foo.cs:12' }).includes('FAILED')
+    && helpers.roundCompileCheckText({ ok: false, rawTail: 'error CS1002: ; expected' }).includes('CS1002'));
+}
+
+// File-tool result text + console result text (pure helpers).
+const fileTextSrc = extractFunction(appJs, 'fileToolResultText');
+const consoleTextSrc = extractFunction(appJs, 'formatConsoleResult');
+check('file/console result formatters are extractable for testing', !!fileTextSrc && !!consoleTextSrc);
+if (fileTextSrc && consoleTextSrc) {
+  const fmt = new Function(fileTextSrc + '\n' + consoleTextSrc + '\nreturn { fileToolResultText, formatConsoleResult };')();
+  check('file tool result text formats view / grep / str_replace / failure',
+    fmt.fileToolResultText({ ok: true, kind: 'view', path: 'Assets/Scripts/Player.cs', start: 3, end: 5, totalLines: 10, lines: [{ n: 3, text: 'line 3' }], truncated: false }).includes('  3| line 3')
+    && fmt.fileToolResultText({ ok: true, kind: 'grep', pattern: 'Health', matches: [{ file: 'a.cs', line: 7, text: '  health = 100;' }], truncated: false, filesSearched: 3 }).includes('a.cs:7:   health = 100;')
+    && fmt.fileToolResultText({ ok: true, kind: 'grep', pattern: 'zzz', matches: [], filesSearched: 3 }).includes('no matches')
+    && fmt.fileToolResultText({ ok: true, kind: 'str_replace', path: 'x.cs' }).includes('str_replace applied')
+    && fmt.fileToolResultText({ ok: false, error: 'boom' }).includes('File tool failed: boom'));
+  check('console result text: newest entries, file:line, stack lines, truncated warning, empty',
+    fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start () (at Assets/Scripts/Player.cs:42)'] }, { message: 'NullReferenceException', stack: [] }], truncated: true }).includes('CS1002')
+    && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'CS1002: ; expected', file: 'Assets/Scripts/Player.cs', line: 42, stack: ['at Player.Start ()'] }], truncated: true }).includes('Player.cs:42')
+    && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'x', stack: [] }], truncated: true }).includes('truncated')
+    && fmt.formatConsoleResult({ logType: 'Error', entries: [{ message: 'x', stack: [] }], truncated: true }).includes('lower bound')
+    && fmt.formatConsoleResult({ logType: 'Warning', entries: [], truncated: false }).includes('no entries'));
+}
+
+// ```file blocks: parsed, skipped by the file extractor, and a
+// str_replace is a change-making action (backup hook) while reads
+// are not.
+const parseFileSrc = extractFunction(appJs, 'parseFileBlocks');
+const changeMaking11Src = extractFunction(appJs, 'isChangeMakingAction');
+const safePathSrc = extractFunction(appJs, 'isSafeProjectPath');
+check('file-block helpers are extractable for testing', !!parseFileSrc && !!changeMaking11Src && !!safePathSrc);
+if (parseFileSrc && changeMaking11Src && safePathSrc) {
+  const helpers11 = new Function(parseFileSrc + '\n' + changeMaking11Src + '\n' + safePathSrc + '\nreturn { parseFileBlocks, isChangeMakingAction, isSafeProjectPath };')();
+  check('parseFileBlocks parses view/grep/str_replace JSON, rejects bad JSON',
+    (() => {
+      const blocks = helpers11.parseFileBlocks('```file\n{"action": "view", "path": "Assets/Scripts/Player.cs", "start": 1, "end": 20}\n```\n```file\n{"action": "str_replace", "path": "Assets/Scripts/Player.cs", "old": "a", "new": "b"}\n```\n```file\nnot json\n```\n');
+      return blocks.length === 3 && blocks[0].valid && blocks[0].command.action === 'view'
+        && blocks[1].valid && blocks[1].command.action === 'str_replace'
+        && !blocks[2].valid && !!blocks[2].error;
+    })());
+  check('str_replace is change-making for the backup hook; view/grep are reads, not changes',
+    helpers11.isChangeMakingAction({ type: 'file', command: { action: 'str_replace' } }) === true
+    && helpers11.isChangeMakingAction({ type: 'file', command: { action: 'view' } }) === false
+    && helpers11.isChangeMakingAction({ type: 'file', command: { action: 'grep' } }) === false
+    && helpers11.isChangeMakingAction({ type: 'files' }) === true);
+  check('file paths must be project-relative: escapes refused',
+    helpers11.isSafeProjectPath('Assets/Scripts/Player.cs') === true
+    && helpers11.isSafeProjectPath('../evil.cs') === false
+    && helpers11.isSafeProjectPath('Assets/../../evil.cs') === false
+    && helpers11.isSafeProjectPath('/abs/path.cs') === false
+    && helpers11.isSafeProjectPath('C:\\evil.cs') === false
+    && helpers11.isSafeProjectPath('') === false);
+}
+check('parser skips ```file fences as files, still extracts a real file change',
+  (() => {
+    const p = new Function('CODE_EXTS', parserSrc + '\nreturn extractFileChanges;')(codeExtsMatch[1]);
+    return p('```file\n{"action": "view", "path": "Assets/Scripts/Player.cs"}\n```\n').length === 0
+      && p('**File Path:** `Assets/Scripts/Player.cs`\n```file\n{"action": "grep", "pattern": "Health"}\n```\n').length === 0
+      && p('**File Path:** `Assets/Scripts/Player.cs`\n```csharp\npublic class Player {}\n```\n').length === 1;
+  })());
+
+// readConsole — structural only: the .cs can only truly run in
+// Rob's Unity. The dispatcher case, the LogEntries reflection,
+// the mode masks, the newest-first 50-entry cap, and the hard
+// rule that reading never recompiles or reimports.
+check('bridge dispatcher has a readConsole case',
+  bridgeCs.includes('case "readConsole":'));
+const readConsoleStart = bridgeCs.indexOf('private static CFResult ReadConsole(');
+const readConsoleEnd = bridgeCs.indexOf('    [MenuItem("CodeFox/Refresh")]', readConsoleStart);
+const readConsoleSrc = readConsoleStart !== -1 && readConsoleEnd !== -1 ? bridgeCs.slice(readConsoleStart, readConsoleEnd) : '';
+const readConsoleCode = readConsoleSrc
+  .replace(/"(?:\\.|[^"\\])*"/g, '""')
+  .replace(/'(?:\\.|[^'\\])*'/g, "''")
+  .replace(/\/\/.*$/gm, '')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
+check('bridge readConsole is extractable for the structural checks', readConsoleSrc.length > 0);
+check('bridge readConsole reaches LogEntries by reflection and never clears the console',
+  readConsoleSrc.includes('GetType("UnityEditor.LogEntries")')
+  && readConsoleSrc.includes('StartGettingEntries') && readConsoleSrc.includes('EndGettingEntries')
+  && readConsoleSrc.includes('GetEntryInternal') && readConsoleSrc.includes('GetCount')
+  && readConsoleSrc.includes('GetType("UnityEditor.LogEntry")')
+  && !/\.Clear\s*\(/.test(readConsoleCode));
+check('bridge readConsole never recompiles or reimports (no Refresh / AssetDatabase / Compile call)',
+  !readConsoleCode.includes('AssetDatabase') && !readConsoleCode.includes('Refresh(')
+  && !readConsoleCode.includes('Compile') && !readConsoleCode.includes('Reimport'));
+check('bridge readConsole: newest first, at most 50, at most 2 stack lines, truncated flag',
+  readConsoleCode.includes('count - 1') && readConsoleCode.includes('i--')
+  && bridgeCs.includes('ReadConsoleMaxEntries = 50') && bridgeCs.includes('ReadConsoleMaxStackLines = 2')
+  && readConsoleCode.includes('ReadConsoleMaxEntries') && readConsoleCode.includes('ReadConsoleMaxStackLines')
+  && readConsoleSrc.includes('\\"truncated\\"'));
+check('bridge readConsole refuses "All" and takes Error / Warning only',
+  readConsoleSrc.includes('never \\"All\\"') && readConsoleSrc.includes('\\"Error\\"') && readConsoleSrc.includes('\\"Warning\\"'));
+
+// Prompt: the agent prompt carries the file-tool docs and the
+// readConsole example, and its JSON examples parse.
+if (promptSrc) {
+  const buildPrompt11 = new Function('state', 'window', 'projectScanSummary', 'UNITY_CREATE_PREFAB_EXAMPLE', promptSrc + '\nreturn buildSystemPrompt([]);');
+  const agentPrompt11 = buildPrompt11(
+    { projectContext: 'a Unity project', projectPath: 'C:\\TD Pizza Racer', projectScan: null, rulesCharBudget: 4000, useCondensedRules: false, condensedRules: '', chatMode: 'agent' },
+    {},
+    () => '',
+    assets.UNITY_CREATE_PREFAB_EXAMPLE);
+  check('agent prompt has the file-tools section with all three actions and the read-before-you-edit rule',
+    agentPrompt11.includes('## Reading and editing files')
+    && agentPrompt11.includes('Read before you edit')
+    && agentPrompt11.includes('"action": "view"')
+    && agentPrompt11.includes('"action": "grep"')
+    && agentPrompt11.includes('"action": "str_replace"')
+    && agentPrompt11.includes('must match EXACTLY ONCE'));
+  check('agent prompt has the readConsole example (Error first, Warning separately, never All)',
+    agentPrompt11.includes('"action": "readConsole"')
+    && agentPrompt11.includes('"logType": "Error"')
+    && agentPrompt11.includes('never "All"'));
+  check('agent prompt says compile-after-edit feedback comes back as a tool result',
+    agentPrompt11.includes('After you change a .cs file')
+    && agentPrompt11.includes('compile clean')
+    && agentPrompt11.includes('no check available'));
+  check('the file-tool examples in the built prompt are valid JSON',
+    (() => {
+      const section = agentPrompt11.slice(agentPrompt11.indexOf('## Reading and editing files'), agentPrompt11.indexOf('## Git backups'));
+      const found = section.match(/\{"action": "[a-z_]+"[^}]*\}/g) || [];
+      if (found.length < 3) return false;
+      try { for (const f of found) JSON.parse(f); return true; } catch { return false; }
+    })());
+  check('the readConsole example in the built prompt is valid JSON',
+    (() => {
+      const section = agentPrompt11.slice(agentPrompt11.indexOf('## Unity — prefabs'), agentPrompt11.indexOf('## Reading and editing files'));
+      const found = section.match(/\{"action": "readConsole"[^}]*\}/g) || [];
+      if (found.length < 1) return false;
+      try { JSON.parse(found[0]); return true; } catch { return false; }
+    })());
+}
+// Wiring + version pins for 0.11.0.
+check('main.js has the file IPCs and the engine require',
+  mainJs.includes("require('./file-tools')")
+  && mainJs.includes("ipcMain.handle('file:view'")
+  && mainJs.includes("ipcMain.handle('file:grep'"));
+check('preload.js exposes rb.fs.view / rb.fs.grep',
+  preloadJs.includes("ipcRenderer.invoke('file:view'") && preloadJs.includes("ipcRenderer.invoke('file:grep'"));
+check('package.json build files include file-tools.js',
+  Array.isArray(pkg.build && pkg.build.files) && pkg.build.files.includes('file-tools.js'));
+check('app.js has the file loop machinery',
+  appJs.includes('parseFileBlocks') && appJs.includes("action.type === 'file'")
+  && appJs.includes('applyFilesAction') && appJs.includes('runRoundCompileCheck')
+  && appJs.includes('roundCompileCheckText') && appJs.includes('shouldRunRoundCompileCheck')
+  && appJs.includes('formatConsoleResult') && appJs.includes('resolveStrReplaceChanges')
+  && appJs.includes('isSafeProjectPath'));
+check('bridge version pins are 0.11.0 everywhere',
+  bridgeCs.includes('// CodeFoxBridge version: 0.11.0')
+  && bridgeCs.includes('BridgeVersion = "0.11.0"')
+  && fs.readFileSync(path.join(root, 'unity-bridge.js'), 'utf8').includes("BUNDLED_BRIDGE_VERSION = '0.11.0'")
+  && fs.readFileSync(path.join(root, 'unity-bridge-source.js'), 'utf8').includes('CodeFoxBridge version: 0.11.0'));
+check('README has the file-tools section + compile-after-edit + readConsole, CHANGELOG has the 0.11.0 entry',
+  readme.includes('### Reading and editing files') && readme.includes('Compile after every edit')
+  && readme.includes('readConsole') && readme.includes('version-0.11.0')
+  && fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').includes('## 0.11.0 — 2026-11-26'));
 (async () => {
   await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
   const base = 'http://127.0.0.1:' + mockServer.address().port;
@@ -2776,6 +3067,49 @@ check('README has the Git backups section, CHANGELOG has the 0.10.0 entry',
       && inserts.length === 0);
   } catch (e) {
     check('snapshotForDelete runs against stubbed rb/state', false, String(e && e.message));
+  }
+  // v0.11.0 — resolveStrReplaceChanges (async helper; extractFunction
+  // drops the `async` keyword, so re-add it). Stubbed rb/state: a
+  // str_replace resolves to a whole-file change through the same
+  // path the writer uses, and a failure stops the apply before
+  // anything is written.
+  try {
+    const resolveSrSrc = extractFunction(appJs, 'resolveStrReplaceChanges');
+    const safePathSrcA = extractFunction(appJs, 'isSafeProjectPath');
+    const resolvePathSrcA = extractFunction(appJs, 'resolvePath');
+    const replaceSrcA = extractFunction(appJs, 'applyStrReplaceText');
+    const countSrcA = extractFunction(appJs, 'countOccurrencesText');
+    const mapSrcA = extractFunction(appJs, 'mapNormToOrigText');
+    if (!resolveSrSrc || !safePathSrcA || !resolvePathSrcA || !replaceSrcA || !countSrcA || !mapSrcA) throw new Error('resolveStrReplaceChanges or its helpers not extractable');
+    const files = {
+      'C:\\TD Pizza Racer\\Assets\\Scripts\\Player.cs': 'public class Player {\n  int health = 100;\n}\n',
+      'C:\\TD Pizza Racer\\Assets\\Scripts\\CRLF.cs': 'line1\r\nline2\r\n',
+    };
+    const resolveStrReplaceChanges = new Function('rb', 'state',
+      'async ' + resolveSrSrc + '\n' + safePathSrcA + '\n' + resolvePathSrcA + '\n' + replaceSrcA + '\n' + countSrcA + '\n' + mapSrcA + '\nreturn resolveStrReplaceChanges;')(
+      { fs: { readFile: async (p) => (p in files ? { ok: true, content: files[p] } : { ok: false, error: 'ENOENT' }) } },
+      { projectPath: 'C:\\TD Pizza Racer' });
+    const srOk = await resolveStrReplaceChanges([{ kind: 'str_replace', path: 'Assets/Scripts/Player.cs', old: '  int health = 100;', new: '  int health = 150;' }]);
+    check('resolveStrReplaceChanges resolves a str_replace to a whole-file change',
+      srOk.ok === true && srOk.changes.length === 1 && srOk.changes[0].path === 'Assets/Scripts/Player.cs'
+      && srOk.changes[0].code === 'public class Player {\n  int health = 150;\n}\n');
+    const srCrlf = await resolveStrReplaceChanges([{ kind: 'str_replace', path: 'Assets/Scripts/CRLF.cs', old: 'line1\nline2', new: 'A\nB' }]);
+    check('resolveStrReplaceChanges handles CRLF files',
+      srCrlf.ok === true && srCrlf.changes[0].code === 'A\r\nB\r\n');
+    const srMiss = await resolveStrReplaceChanges([{ kind: 'str_replace', path: 'Assets/Scripts/Player.cs', old: 'not in the file', new: 'x' }]);
+    check('resolveStrReplaceChanges fails plainly on a 0-match edit',
+      srMiss.ok === false && srMiss.error.includes('not found') && srMiss.error.includes('view the file'));
+    const srMissing = await resolveStrReplaceChanges([{ kind: 'str_replace', path: 'Assets/Scripts/Nope.cs', old: 'a', new: 'b' }]);
+    check('resolveStrReplaceChanges fails plainly on an unreadable file',
+      srMissing.ok === false && srMissing.error.includes('could not read'));
+    const srEscape = await resolveStrReplaceChanges([{ kind: 'str_replace', path: '../evil.cs', old: 'a', new: 'b' }]);
+    check('resolveStrReplaceChanges refuses a path escaping the project',
+      srEscape.ok === false && srEscape.error.includes('relative to the project folder'));
+    const srPass = await resolveStrReplaceChanges([{ path: 'Assets/Scripts/Player.cs', code: 'whole file\n' }]);
+    check('resolveStrReplaceChanges passes whole-file changes through untouched',
+      srPass.ok === true && srPass.changes.length === 1 && srPass.changes[0].code === 'whole file\n' && !('kind' in srPass.changes[0]));
+  } catch (e) {
+    check('resolveStrReplaceChanges runs against stubbed rb/state', false, String(e && e.message));
   }
 
   // v0.10.0 — git engine against a stubbed git, then the real

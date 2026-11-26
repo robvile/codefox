@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.9.3
+// CodeFoxBridge version: 0.11.0
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 // Watches for file changes from the CodeFox app and auto-refreshes Unity's AssetDatabase.
 // Also watches Assets/.codefox-command.json: when CodeFox writes a command there,
@@ -18,7 +18,7 @@
 //
 // Prefabs (v0.9.0) — Unity writes prefab files itself; CodeFox never
 // hand-writes .prefab YAML (that is how invented script guids and
-// "Unknown type 'Image'" happened). The five actions below build,
+// "Unknown type 'Image'" happened). The actions below build,
 // change, and delete prefabs through Unity's own API, and can ask
 // Unity what actually exists in this install before touching
 // anything:
@@ -45,6 +45,12 @@
 //     Assets/ and must exist; Assets itself is never deletable.)
 //   { "action": "listComponentTypes", "filter": "Scroll" }
 //   { "action": "describeComponent", "type": "Image" }
+// Console (v0.11.0) — read the newest console entries of one type
+// without recompiling or reimporting (reading never clears the
+// console): { "action": "readConsole", "logType": "Error" }
+// (or "Warning" — never "All"). Newest first, at most 50, each
+// with its message, file:line where known, and up to 2 stack
+// lines; "truncated" says the console held more.
 // Props take strings, numbers, bools, [x,y(,z)] vectors, [r,g,b(,a)]
 // colours (or "#rrggbb"), enum names, and asset paths (Assets/…) for
 // Sprite / Material / Texture2D / Font / AudioClip. An unknown type,
@@ -67,7 +73,7 @@ public static class CodeFoxBridge
     // Version of this bridge file. CodeFox reads this marker to tell
     // whether the bridge installed in a project is older than the one
     // bundled with the app, so it can update it automatically.
-    public const string BridgeVersion = "0.9.3";
+    public const string BridgeVersion = "0.11.0";
     private const string TriggerFileName = ".codefox-refresh-trigger";
     private const string CommandFileName = ".codefox-command.json";
     private const string ResultFileName = ".codefox-result.json";
@@ -201,6 +207,8 @@ public static class CodeFoxBridge
                 return ListComponentTypes(json);
             case "describeComponent":
                 return DescribeComponent(json);
+            case "readConsole":
+                return ReadConsole(json);
             default:
                 return new CFResult { ok = false, message = "Unknown action: " + cmd.action };
         }
@@ -1249,6 +1257,167 @@ public static class CodeFoxBridge
         }
         sb.Append("]}");
         return new CFResult { ok = true, message = type.Name + " (" + type.FullName + ")", data = sb.ToString() };
+    }
+
+    // ── Console reading (v0.11.0) ─────────────────────────────────
+    // UnityEditor.LogEntries has no public API, so it is reached by
+    // reflection — the same pattern other shipping tools use
+    // (verified against the real ReadConsole.cs in
+    // youngwoocho02/unity-cli). StartGettingEntries /
+    // EndGettingEntries only lock the console state while reading;
+    // this code NEVER calls Clear, AssetDatabase.Refresh, or
+    // anything that recompiles or reimports — reading must not
+    // destroy the evidence it reads (the log-triage build depends
+    // on it, and recompiling clears the console).
+    //
+    // logType is "Error" or "Warning" — never "All": the caller
+    // asks Error first, then Warning separately. An "Error"
+    // request includes Exception and Assert entries too — those
+    // ARE the errors that matter after a crash. Mode bitmasks
+    // (LogEntry.mode bits): Error = Error(1<<0) |
+    // AssetImportError(1<<6) | ScriptingError(1<<8) |
+    // ScriptCompileError(1<<11) | StickyError(1<<13) plus
+    // Assert(1<<1) | Fatal(1<<4) | ScriptingException(1<<17) |
+    // ScriptingAssertion(1<<21); Warning = AssetImportWarning
+    // (1<<7) | ScriptingWarning(1<<9) | ScriptCompileWarning
+    // (1<<12).
+    //
+    // The result data is newest first, at most 50 entries:
+    //   {"logType":"Error","total":3,"returned":3,"truncated":false,
+    //    "entries":[{"message":"…","file":"Assets/Scripts/Foo.cs",
+    //    "line":42,"stack":["…","…"]}, …]}
+    // "message" is the first line of the entry; "stack" is up to 2
+    // lines with Unity-internal frames filtered out; "file"/"line"
+    // appear only when Unity knows them. "truncated" means the
+    // console held more — the earliest entries are missing and the
+    // count is a lower bound; the full log is in Editor.log.
+    private const int ReadConsoleMaxEntries = 50;
+    private const int ReadConsoleMaxStackLines = 2;
+    private static readonly int[] ReadConsoleErrorModes = { 1 << 0, 1 << 6, 1 << 8, 1 << 11, 1 << 13, 1 << 1, 1 << 4, 1 << 17, 1 << 21 };
+    private static readonly int[] ReadConsoleWarningModes = { 1 << 7, 1 << 9, 1 << 12 };
+
+    private static bool ReadConsoleModeMatches(int mode, int[] wanted)
+    {
+        foreach (int m in wanted) if ((mode & m) != 0) return true;
+        return false;
+    }
+
+    private static bool ReadConsoleIsInternalStackLine(string line)
+    {
+        string l = line.TrimStart();
+        return l.StartsWith("UnityEngine.Debug:", StringComparison.Ordinal)
+            || l.StartsWith("UnityEditor.", StringComparison.Ordinal)
+            || l.StartsWith("UnityEngine.", StringComparison.Ordinal)
+            || l.StartsWith("EditorGUIUtility:", StringComparison.Ordinal)
+            || l.StartsWith("SystemState:", StringComparison.Ordinal)
+            || l.StartsWith("(at Library/", StringComparison.Ordinal)
+            || l.StartsWith("(at ./Library/", StringComparison.Ordinal);
+    }
+
+    private static CFResult ReadConsole(string json)
+    {
+        object parsed;
+        try { parsed = JsonMini.Parse(json); }
+        catch (Exception e) { return new CFResult { ok = false, message = "Could not parse command JSON: " + e.Message }; }
+        var cmd = parsed as Dictionary<string, object>;
+        string logType = cmd != null ? JStr(cmd, "logType", "Error") : "Error";
+        string lt = (logType ?? "Error").Trim();
+        int[] wanted;
+        if (lt.Equals("Error", StringComparison.OrdinalIgnoreCase)) wanted = ReadConsoleErrorModes;
+        else if (lt.Equals("Warning", StringComparison.OrdinalIgnoreCase)) wanted = ReadConsoleWarningModes;
+        else return new CFResult { ok = false, message = "readConsole logType must be \"Error\" or \"Warning\" — never \"All\". Ask for Error first, then Warning separately." };
+
+        Type logEntriesType = typeof(EditorApplication).Assembly.GetType("UnityEditor.LogEntries");
+        if (logEntriesType == null)
+            return new CFResult { ok = false, message = "readConsole: UnityEditor.LogEntries is not available in this Unity version — the console could not be read." };
+        MethodInfo startGetting = logEntriesType.GetMethod("StartGettingEntries", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        MethodInfo endGetting = logEntriesType.GetMethod("EndGettingEntries", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        MethodInfo getCount = logEntriesType.GetMethod("GetCount", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        MethodInfo getEntry = logEntriesType.GetMethod("GetEntryInternal", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        if (startGetting == null || endGetting == null || getCount == null || getEntry == null)
+            return new CFResult { ok = false, message = "readConsole: UnityEditor.LogEntries changed shape in this Unity version — the console could not be read." };
+        Type logEntryType = typeof(EditorApplication).Assembly.GetType("UnityEditor.LogEntry");
+        if (logEntryType == null)
+            return new CFResult { ok = false, message = "readConsole: UnityEditor.LogEntry is not available in this Unity version — the console could not be read." };
+        FieldInfo modeField = logEntryType.GetField("mode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        FieldInfo messageField = logEntryType.GetField("message", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        FieldInfo fileField = logEntryType.GetField("file", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        FieldInfo lineField = logEntryType.GetField("line", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (modeField == null || messageField == null)
+            return new CFResult { ok = false, message = "readConsole: UnityEditor.LogEntry changed shape in this Unity version — the console could not be read." };
+
+        // Newest first, at most 50; scan the whole console so the
+        // truncated flag is honest (the count is a lower bound when
+        // it is set).
+        var sb = new System.Text.StringBuilder();
+        int total = 0;
+        int returned = 0;
+        bool truncated = false;
+        sb.Append("{\"logType\":\"").Append(EscapeJson(lt)).Append("\",\"entries\":[");
+        try
+        {
+            startGetting.Invoke(null, null);
+            try
+            {
+                int count = Convert.ToInt32(getCount.Invoke(null, null));
+                for (int i = count - 1; i >= 0; i--)
+                {
+                    object entry = Activator.CreateInstance(logEntryType);
+                    getEntry.Invoke(null, new object[] { i, entry });
+                    int mode = Convert.ToInt32(modeField.GetValue(entry));
+                    if (!ReadConsoleModeMatches(mode, wanted)) continue;
+                    total++;
+                    if (returned >= ReadConsoleMaxEntries) { truncated = true; continue; }
+                    string raw = messageField.GetValue(entry) as string ?? "";
+                    string[] lines = raw.Split('\n');
+                    string message = lines.Length > 0 ? lines[0].Trim() : "";
+                    var stack = new List<string>();
+                    for (int j = 1; j < lines.Length && stack.Count < ReadConsoleMaxStackLines; j++)
+                    {
+                        string sl = lines[j].Trim();
+                        if (sl.Length == 0) continue;
+                        if (ReadConsoleIsInternalStackLine(sl)) continue;
+                        stack.Add(sl);
+                    }
+                    if (returned > 0) sb.Append(',');
+                    returned++;
+                    sb.Append("{\"message\":\"").Append(EscapeJson(message)).Append("\"");
+                    if (fileField != null)
+                    {
+                        string file = fileField.GetValue(entry) as string;
+                        if (!string.IsNullOrEmpty(file)) sb.Append(",\"file\":\"").Append(EscapeJson(file)).Append("\"");
+                    }
+                    if (lineField != null)
+                    {
+                        int line = Convert.ToInt32(lineField.GetValue(entry));
+                        if (line > 0) sb.Append(",\"line\":").Append(line);
+                    }
+                    sb.Append(",\"stack\":[");
+                    for (int j = 0; j < stack.Count; j++)
+                    {
+                        if (j > 0) sb.Append(',');
+                        sb.Append("\"").Append(EscapeJson(stack[j])).Append("\"");
+                    }
+                    sb.Append("]}");
+                }
+            }
+            finally
+            {
+                endGetting.Invoke(null, null);
+            }
+        }
+        catch (Exception e)
+        {
+            return new CFResult { ok = false, message = "readConsole failed while reading the console: " + e.Message };
+        }
+        sb.Append("],\"total\":").Append(total).Append(",\"returned\":").Append(returned).Append(",\"truncated\":").Append(truncated ? "true" : "false").Append("}");
+        string displayType = lt.Equals("Warning", StringComparison.OrdinalIgnoreCase) ? "Warning" : "Error";
+        return new CFResult
+        {
+            ok = true,
+            message = total + " console " + displayType.ToLowerInvariant() + " entr" + (total == 1 ? "y" : "ies") + (truncated ? " — showing the newest " + returned + ", the console held more." : "."),
+            data = sb.ToString()
+        };
     }
 
     [MenuItem("CodeFox/Refresh")]
