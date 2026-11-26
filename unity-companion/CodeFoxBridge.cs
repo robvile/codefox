@@ -1,5 +1,5 @@
 // CodeFoxBridge.cs
-// CodeFoxBridge version: 0.16.3
+// CodeFoxBridge version: 0.16.4
 // Place this file in: Assets/Editor/CodeFoxBridge.cs
 //
 // The CodeFox app talks to this bridge through files in
@@ -232,7 +232,7 @@ public static class CodeFoxBridge
     // click_ui). 0.12.0 is the first bridge that speaks the
     // .bridge/ transport (protocol 1); the app never sends inbox
     // commands to anything older — it updates the bridge first.
-    public const string BridgeVersion = "0.16.3";
+    public const string BridgeVersion = "0.16.4";
     // Protocol version every message carries. Bump it only when the
     // message shape changes in a way an old app could not read.
     public const int ProtocolVersion = 1;
@@ -5247,6 +5247,21 @@ public static class CodeFoxBridge
             string finalName = SceneHelpers.UniqueSiblingName(parentT, name);
             bool renamed = finalName != name;
             string finalPath = parentT == null ? finalName : ComponentLocator.GetPath(parentT) + "/" + finalName;
+            // v0.21.6: a name that is already taken is a refusal,
+            // not a rename. The old behaviour silently created
+            // "Main Camera (1)", "Main Camera (2)"… — the model
+            // re-laid the same foundation every time instead of
+            // editing what was already there. The error names the
+            // existing object so the model can configure it with
+            // set_property instead. Only an explicit allowDuplicate
+            // (a row of enemies, a set of trees) creates a second
+            // object with the same name. This sits before the
+            // dry-run branch, so the preview refuses the same way.
+            if (renamed && !JBool(args, "allowDuplicate", false))
+            {
+                string existingPath = parentT == null ? name : ComponentLocator.GetPath(parentT) + "/" + name;
+                return BridgeResult.Error("'" + name + "' already exists at '" + existingPath + "' — modify it with set_property (or add_component) instead of creating a second one. If you genuinely need more than one, pass \"allowDuplicate\": true.");
+            }
             if (dryRun)
             {
                 var data = new Dictionary<string, object>();
